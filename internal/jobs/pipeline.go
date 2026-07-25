@@ -312,8 +312,12 @@ func (p *Pipeline) generateUnit(
 			WorkDir: req.SourceDir, Model: p.AnalyzeModel,
 			BudgetUSD: p.Budget.AnalyzeUSD, Timeout: p.Timeout,
 			SystemPrompt: analyzeSystemPrompt(steering),
-			Prompt:       analyzePrompt(key, unit, steering, attempt, lastViolations),
-			JSONSchema:   AnalysisSchema,
+			// The rendered map is identical for every unit in the run, so it
+			// rides the cache breakpoint and all but the first unit reads it at
+			// a fraction of the input rate.
+			CacheableContext: req.Map.Summary,
+			Prompt:           analyzePrompt(key, unit, req.SourceDir, steering, attempt, lastViolations),
+			JSONSchema:       AnalysisSchema,
 		})
 		if aerr != nil {
 			res.Err = aerr
@@ -331,8 +335,9 @@ func (p *Pipeline) generateUnit(
 			WorkDir: req.SourceDir, ScratchDir: scratch,
 			Model: p.modelFor(attempt), FallbackModel: p.FallbackModel,
 			BudgetUSD: p.Budget.PageUSD, Timeout: p.Timeout,
-			SystemPrompt: generateSystemPrompt(steering),
-			Prompt:       generatePrompt(key, unit, steering, attempt, lastViolations),
+			SystemPrompt:     generateSystemPrompt(steering),
+			CacheableContext: req.Map.Summary,
+			Prompt:           generatePrompt(key, unit, req.SourceDir, steering, attempt, lastViolations),
 		})
 		if gerr != nil {
 			res.Err = gerr

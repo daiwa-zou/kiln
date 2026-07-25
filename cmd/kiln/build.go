@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"time"
@@ -15,8 +17,11 @@ import (
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/connector"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
+	"github.com/daiwa-zou/kiln/internal/connector/upload"
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/jobs"
+	"github.com/daiwa-zou/kiln/internal/mapper"
+	"github.com/daiwa-zou/kiln/internal/mapper/docmap"
 	"github.com/daiwa-zou/kiln/internal/mapper/repomap"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
@@ -24,6 +29,7 @@ import (
 
 type buildFlags struct {
 	path      string
+	docs      string
 	workspace string
 	org       string
 	dryRun    bool
@@ -55,6 +61,7 @@ before anything is spent.`,
 
 	fl := cmd.Flags()
 	fl.StringVar(&f.path, "path", "", "directory to scan (defaults to the positional argument)")
+	fl.StringVar(&f.docs, "docs", "", "also ingest documents from this directory into the same wiki")
 	fl.StringVar(&f.workspace, "workspace", "", "workspace slug (defaults to the directory name)")
 	fl.StringVar(&f.org, "org", "local", "organization slug")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "plan and estimate without calling the model")
@@ -141,6 +148,27 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		fmt.Fprintln(out, "  not a git repository; change detection uses content hashes")
 	}
 
+	router := routerFor(rm)
+
+	// A second connector's material merges into the same map, so code and
+	// documents produce one wiki whose pages can link across the boundary
+	// rather than two wikis that cannot see each other.
+	if f.docs != "" {
+		docMap, docRouter, staging, err := syncDocs(ctx, out, f.docs)
+		if staging != "" {
+			defer os.RemoveAll(staging)
+		}
+		if err != nil {
+			return err
+		}
+		merged, err := mapper.Merge(absPath, wm, docMap)
+		if err != nil {
+			return err
+		}
+		wm = merged
+		maps.Copy(router.DocPaths, docRouter)
+	}
+
 	runner, err := agent.New(cfg)
 	if err != nil {
 		return err
@@ -168,7 +196,7 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		Ref:         gitRef(rm),
 		SourceDir:   absPath,
 		Map:         wm,
-		Router:      routerFor(rm),
+		Router:      router,
 		// Every unit is a candidate; the pipeline's hash gate is what actually
 		// decides. A local path has no commit range to diff against, and the
 		// gate is both cheaper and more precise than a filesystem comparison --
@@ -195,6 +223,59 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 	}
 
 	return report(out, res, f.dryRun, time.Since(started))
+}
+
+// syncDocs ingests a documents directory through the upload connector and maps
+// it with docmap, returning the map and the doc paths to add to routing.
+//
+// The returned staging directory holds the extracted text the unit inputs point
+// at. It must outlive the build -- prompts are assembled from it -- so the
+// caller owns removing it rather than a defer here.
+func syncDocs(ctx context.Context, out io.Writer, dir string) (_ *mapper.WorkspaceMap, _ map[string]diff.Key, staging string, err error) {
+	absDocs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	conn, err := connector.Get("upload")
+	if err != nil {
+		return nil, nil, "", err
+	}
+	fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), absDocs)
+
+	staging, err = os.MkdirTemp("", "kiln-docs-")
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	set, err := conn.Sync(ctx, connector.Config{"path": absDocs}, staging)
+	if err != nil {
+		return nil, nil, staging, err
+	}
+
+	payload := upload.PayloadOf(set)
+	if payload == nil {
+		return nil, nil, staging, fmt.Errorf("upload connector returned no documents payload")
+	}
+
+	dm := &docmap.Mapper{}
+	wm, err := dm.MapDocs(ctx, staging, payload.Docs)
+	if err != nil {
+		return nil, nil, staging, err
+	}
+
+	fmt.Fprintf(out, "  %d document(s), %d units\n", len(payload.Docs), len(wm.Units))
+	// Skips are reported rather than swallowed: a folder that silently ingested
+	// half its files would look like a working build.
+	for _, s := range payload.Skipped {
+		fmt.Fprintf(out, "  skipped %s: %s\n", s.Path, s.Reason)
+	}
+
+	routes := map[string]diff.Key{}
+	for _, d := range payload.Docs {
+		routes[d.Origin] = diff.DocKey(d.Origin)
+	}
+	return wm, routes, staging, nil
 }
 
 // routerFor maps module directories to their cache keys so a changed path is

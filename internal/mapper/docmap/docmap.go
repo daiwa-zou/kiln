@@ -93,6 +93,15 @@ func (m *Mapper) MapDocs(_ context.Context, root string, docs []Doc) (*mapper.Wo
 
 	for _, doc := range sorted {
 		units := m.unitsFor(doc, taken)
+		// Inputs point at staged text, which is not under the run's source
+		// directory. Recording the root here is what lets a merged map resolve
+		// them; a doc unit that loses it reads no source at all.
+		for i := range units {
+			if units[i].Meta == nil {
+				units[i].Meta = map[string]any{}
+			}
+			units[i].Meta[mapper.MetaRoot] = root
+		}
 		wm.Units = append(wm.Units, units...)
 
 		// A split document's sections are parts of one whole, so the reader

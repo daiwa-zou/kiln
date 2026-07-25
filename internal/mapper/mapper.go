@@ -28,6 +28,14 @@ type Unit struct {
 	Meta   map[string]any `json:"meta,omitempty"`
 }
 
+// MetaRoot is the Unit.Meta key naming the directory a unit's Inputs are
+// relative to.
+//
+// Set it when a mapper's inputs do not live under the run's source directory --
+// staged extractions, for instance. Omitting it means "relative to the source
+// directory", which is what every in-tree mapper wants.
+const MetaRoot = "root"
+
 // Edge is a dependency or reference between units, extracted deterministically
 // so dependency pages are grounded rather than inferred by the model.
 type Edge struct {

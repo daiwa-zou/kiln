@@ -839,3 +839,58 @@ func TestBuildIsIdempotent(t *testing.T) {
 		t.Errorf("second run Status = %q, want %q", res.Summary.Status, StatusNoChanges)
 	}
 }
+
+func TestBuildSendsSourceMaterialAndCachesTheMap(t *testing.T) {
+	// Two properties the pipeline cannot be trusted without, both invisible in
+	// a passing run: the model has to receive the unit's source, and the shared
+	// map has to travel on the cacheable block rather than in the per-unit
+	// prompt where it would be re-billed at full rate for every unit.
+	store := newMemStore()
+	runner := newScriptedRunner()
+
+	req := testRequest(t, testMap(mapper.Unit{
+		Key: "module:ripple", Kind: "module", Slug: "ripple", Title: "Ripple",
+		Dir: "apps/ripple", Inputs: []string{"apps/ripple/main.go"}, Hash: "h1",
+	}), diff.ChangeSet{FullRebuild: true})
+	req.Map.Summary = "# Repository map\n\nOne module: apps/ripple."
+
+	if err := writeFile(req.SourceDir, "apps/ripple/main.go",
+		"package main\n\nfunc main() { dispatch() }\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := testPipeline(store, runner).Build(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(runner.calls) == 0 {
+		t.Fatal("no calls were made")
+	}
+
+	var grounded int
+	for _, call := range runner.calls {
+		// arch:overview is synthetic and owns no files; it is grounded in the
+		// map, which is why the map has to reach every call.
+		if strings.HasSuffix(call.SessionID, sanitize("module:ripple")) {
+			if !strings.Contains(call.Prompt, "func main() { dispatch() }") {
+				t.Errorf("%s prompt carries no source material:\n%s", call.Step, call.Prompt)
+			}
+			grounded++
+		}
+
+		if call.CacheableContext != req.Map.Summary {
+			t.Errorf("%s did not carry the map on the cacheable block", call.Step)
+		}
+		// The map in the per-unit prompt would defeat the breakpoint: caching is
+		// a prefix match, and a duplicated map is billed per unit.
+		if strings.Contains(call.Prompt, "# Repository map") {
+			t.Errorf("%s duplicated the shared map into the unit prompt", call.Step)
+		}
+	}
+
+	// Both steps, not just generate: a plan drawn up without the source is a
+	// plan for a page the model has not read.
+	if grounded != 2 {
+		t.Errorf("%d grounded calls for the module unit, want 2 (analyze and generate)", grounded)
+	}
+}

@@ -113,7 +113,7 @@ func appendSteering(b *strings.Builder, s Steering) {
 	}
 }
 
-func analyzePrompt(key diff.Key, unit mapper.Unit, s Steering, attempt int, prior []wiki.Violation) string {
+func analyzePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, attempt int, prior []wiki.Violation) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Analyze this unit and plan its wiki pages.\n\nUnit: %s\n", key)
@@ -130,17 +130,24 @@ func analyzePrompt(key diff.Key, unit mapper.Unit, s Steering, attempt int, prio
 		}
 	}
 
+	b.WriteString(renderUnitContext(root, unit))
+
 	appendCorrections(&b, s, unit.Slug)
 	appendRetryContext(&b, attempt, prior)
 	return b.String()
 }
 
-func generatePrompt(key diff.Key, unit mapper.Unit, s Steering, attempt int, prior []wiki.Violation) string {
+func generatePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, attempt int, prior []wiki.Violation) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Write the wiki pages you planned for unit %s.\n", key)
 	b.WriteString("\nUse paths relative to the directory granted to you, for example ")
 	b.WriteString("`entities/module-name.md` or `concepts/some-idea.md`.\n")
+
+	// Repeated rather than relied on from the analyze turn: the two calls share
+	// a session, but a page written from a plan alone drifts from the source it
+	// is supposed to describe.
+	b.WriteString(renderUnitContext(root, unit))
 
 	appendCorrections(&b, s, unit.Slug)
 	appendRetryContext(&b, attempt, prior)
