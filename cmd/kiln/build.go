@@ -13,6 +13,8 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/agent"
 	"github.com/daiwa-zou/kiln/internal/config"
+	"github.com/daiwa-zou/kiln/internal/connector"
+	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/mapper/repomap"
@@ -111,13 +113,25 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		return err
 	}
 
-	// Scan is deterministic and cheap; it runs before anything is spent so the
-	// dry-run estimate is built from real structure rather than a guess.
-	fmt.Fprintf(out, "scanning %s\n", absPath)
-	scanner := &repomap.Scanner{Slug: slug}
-	rm, err := scanner.Scan(ctx, absPath)
+	// Sync goes through the connector registry rather than calling the scanner
+	// directly, so the abstraction is exercised by the path that uses it rather
+	// than assumed to work.
+	conn, err := connector.Get("git")
 	if err != nil {
 		return err
+	}
+	fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), absPath)
+
+	set, err := conn.Sync(ctx, connector.Config{"path": absPath, "slug": slug}, "")
+	if err != nil {
+		return err
+	}
+
+	// Routing and prompt grounding need the module graph, which a flat item
+	// list cannot express. The git connector carried it on the same sync.
+	rm := gitconn.MapOf(set)
+	if rm == nil {
+		return fmt.Errorf("git connector returned no repository map")
 	}
 	wm := rm.ToWorkspaceMap()
 	fmt.Fprintf(out, "  %d modules, %d units, %d edges\n", len(rm.Modules), len(wm.Units), len(wm.Edges))
