@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -114,6 +115,63 @@ func TestBuildIndexIsDeterministic(t *testing.T) {
 	}
 	if second := BuildIndex(pages, IndexOptions{RecentLimit: 5}); first != second {
 		t.Error("BuildIndex is order-dependent; output must be stable regardless of input order")
+	}
+}
+
+func TestBuildOverviewGolden(t *testing.T) {
+	got := BuildOverview(samplePages(), OverviewInput{
+		Workspace: "watchtower",
+		Ref:       "7dfadb6",
+		Date:      "2026-07-25",
+		Narrative: []string{
+			"Five Go services behind a gateway, each owning a slice of the request path.",
+		},
+	})
+	assertGolden(t, "overview.md", got)
+}
+
+func TestBuildOverviewEmpty(t *testing.T) {
+	got := BuildOverview(nil, OverviewInput{Workspace: "empty", Date: "2026-07-25"})
+
+	// A wiki with no pages must still produce a valid overview rather than a
+	// half-rendered frame.
+	if !strings.Contains(got, "no pages yet") {
+		t.Errorf("empty overview should say so:\n%s", got)
+	}
+	if _, _, err := ParseFrontmatter([]byte(got)); err != nil {
+		t.Errorf("empty overview has invalid frontmatter: %v", err)
+	}
+}
+
+func TestBuildOverviewIsDeterministic(t *testing.T) {
+	pages := samplePages()
+	in := OverviewInput{Workspace: "w", Ref: "abc", Date: "2026-07-25"}
+
+	first := BuildOverview(pages, in)
+	for i, j := 0, len(pages)-1; i < j; i, j = i+1, j-1 {
+		pages[i], pages[j] = pages[j], pages[i]
+	}
+	// Counting pages by type means iterating a map; a leak of that iteration
+	// order would make every run look like it rewrote the overview.
+	if second := BuildOverview(pages, in); first != second {
+		t.Error("BuildOverview output varies with input order")
+	}
+}
+
+func TestBuildOverviewIsParseable(t *testing.T) {
+	got := BuildOverview(samplePages(), OverviewInput{Workspace: "w", Date: "2026-07-25"})
+
+	meta, _, err := ParseFrontmatter([]byte(got))
+	if err != nil {
+		t.Fatalf("generated overview does not parse: %v", err)
+	}
+	// The overview is emitted deterministically and must never be mistaken for
+	// an agent-writable page.
+	if meta.Type != TypeOverview {
+		t.Errorf("type = %q, want overview", meta.Type)
+	}
+	if meta.Type.Generated() {
+		t.Error("overview must not be agent-writable")
 	}
 }
 

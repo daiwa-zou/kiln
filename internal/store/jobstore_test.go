@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
@@ -306,6 +308,97 @@ func TestImportBumpsRevision(t *testing.T) {
 	// The revision is what busts UI caches, so it has to move on every import.
 	if after := readRevision(); after <= before {
 		t.Errorf("revision did not advance: %d -> %d", before, after)
+	}
+}
+
+func TestImportPersistsDerivedArtifacts(t *testing.T) {
+	js, ws := jobStore(t)
+	ctx := context.Background()
+
+	p := page("entities/ripple.md", "ripple", "entity", "Ripple", "# Ripple\n\nBody.\n")
+	if err := js.Import(ctx, jobs.ImportRequest{
+		WorkspaceID: ws,
+		UpsertPages: []wiki.Page{p},
+		Index:       "# Wiki Index\n\n## Entities\n- [[entities/ripple|Ripple]]\n",
+		Overview:    "---\ntype: overview\n---\n\n# Overview\n",
+		LogEntry:    "## [2026-07-25] build | ws @ abc\n\n- Pages: 1 created\n",
+	}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	// These were computed and discarded before wiki_artifacts existed, which
+	// meant a built wiki had pages and no way to navigate them.
+	for kind, want := range map[string]string{
+		"index":    "## Entities",
+		"overview": "# Overview",
+		"log":      "build | ws @ abc",
+	} {
+		got, err := js.LoadArtifact(ctx, ws, kind)
+		if err != nil {
+			t.Fatalf("LoadArtifact(%s): %v", kind, err)
+		}
+		if !strings.Contains(got, want) {
+			t.Errorf("%s artifact missing %q:\n%s", kind, want, got)
+		}
+	}
+}
+
+func TestImportReplacesIndexButAppendsLog(t *testing.T) {
+	js, ws := jobStore(t)
+	ctx := context.Background()
+
+	for i, entry := range []string{
+		"## [2026-07-24] build | ws @ aaa\n",
+		"## [2026-07-25] build | ws @ bbb\n",
+	} {
+		if err := js.Import(ctx, jobs.ImportRequest{
+			WorkspaceID: ws,
+			Index:       fmt.Sprintf("# Wiki Index\n\nrevision %d\n", i),
+			LogEntry:    entry,
+		}); err != nil {
+			t.Fatalf("Import %d: %v", i, err)
+		}
+	}
+
+	// The index is a pure function of the page set, so only the newest is
+	// correct and it is replaced wholesale.
+	index, err := js.LoadArtifact(ctx, ws, "index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(index, "revision 0") {
+		t.Error("index was appended rather than replaced")
+	}
+	if !strings.Contains(index, "revision 1") {
+		t.Errorf("index does not hold the newest version:\n%s", index)
+	}
+
+	// The log is history and cannot be recomputed, so both entries must survive.
+	logBody, err := js.LoadArtifact(ctx, ws, "log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"aaa", "bbb"} {
+		if !strings.Contains(logBody, want) {
+			t.Errorf("log lost entry %q:\n%s", want, logBody)
+		}
+	}
+	if !strings.HasPrefix(logBody, wiki.LogHeader) {
+		t.Errorf("log was not seeded with a header:\n%s", logBody)
+	}
+}
+
+func TestLoadArtifactMissingIsEmptyNotAnError(t *testing.T) {
+	js, ws := jobStore(t)
+
+	// A workspace that has never been built has no artifacts; callers should
+	// not need to distinguish that from a failure.
+	got, err := js.LoadArtifact(context.Background(), ws, "index")
+	if err != nil {
+		t.Errorf("LoadArtifact on an unbuilt workspace: %v", err)
+	}
+	if got != "" {
+		t.Errorf("got %q, want empty", got)
 	}
 }
 

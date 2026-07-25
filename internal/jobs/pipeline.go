@@ -145,7 +145,11 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	var (
 		written    []wiki.Page
 		newSources []diff.SourceRecord
-		spent      float64
+		// findings are the agent's narrative observations. They are the one
+		// part of the overview the model contributes; the structure around
+		// them stays derived.
+		findings []string
+		spent    float64
 	)
 
 	for _, key := range dirty {
@@ -161,33 +165,34 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		unit := units[string(key)]
 		item := ItemSummary{Key: key, Status: StatusPending}
 
-		pagesOut, cost, turns, violations, err := p.generateUnit(ctx, req, key, unit, steering, known)
-		spent += cost
-		item.CostUSD = cost
-		item.Turns = turns
+		out := p.generateUnit(ctx, req, key, unit, steering, known)
+		spent += out.CostUSD
+		item.CostUSD = out.CostUSD
+		item.Turns = out.Turns
 
 		switch {
-		case err != nil:
+		case out.Err != nil:
 			item.Status = StatusFailed
-			item.Err = err.Error()
-			log.Error("unit failed", "key", key, "err", err)
-		case len(violations) > 0:
+			item.Err = out.Err.Error()
+			log.Error("unit failed", "key", key, "err", out.Err)
+		case len(out.Violations) > 0:
 			item.Status = StatusFailed
-			item.Err = fmt.Sprintf("%d validation violations", len(violations))
-			res.Violations = append(res.Violations, violations...)
-			log.Error("unit failed validation", "key", key, "violations", len(violations))
+			item.Err = fmt.Sprintf("%d validation violations", len(out.Violations))
+			res.Violations = append(res.Violations, out.Violations...)
+			log.Error("unit failed validation", "key", key, "violations", len(out.Violations))
 		default:
 			item.Status = StatusSucceeded
-			written = append(written, pagesOut...)
+			written = append(written, out.Pages...)
+			findings = append(findings, out.Findings...)
 
 			// The source record is only updated on success, so a failed unit
 			// keeps its old hash and is retried on the next run.
 			newSources = append(newSources, diff.SourceRecord{
 				Key:          key,
 				InputHash:    unit.Hash,
-				FilesWritten: pagePaths(pagesOut),
+				FilesWritten: pagePaths(out.Pages),
 			})
-			for _, pg := range pagesOut {
+			for _, pg := range out.Pages {
 				known[pg.Slug] = true
 			}
 		}
@@ -201,6 +206,12 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	// agent never writes these, so they cannot drift from the content.
 	merged := mergePages(pages, written, cascade.DeletePages)
 	index := wiki.BuildIndex(merged, wiki.IndexOptions{})
+	overview := wiki.BuildOverview(merged, wiki.OverviewInput{
+		Workspace: req.WorkspaceID,
+		Ref:       req.Ref,
+		Date:      now.Format(wiki.DateFormat),
+		Narrative: findings,
+	})
 
 	created, updated := countChanges(pages, written)
 	res.Summary.Created = created
@@ -223,6 +234,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		UpsertSources:   newSources,
 		DropSources:     cascade.DropSources,
 		Index:           index,
+		Overview:        overview,
 		LogEntry:        logEntry,
 	}); err != nil {
 		return nil, fmt.Errorf("jobs: import: %w", err)
@@ -255,6 +267,18 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 	return out
 }
 
+// unitResult is one unit's outcome. A struct rather than a long return list:
+// the caller needs pages, findings, cost, turns, and two distinct failure modes,
+// and positional returns stop being readable well before that.
+type unitResult struct {
+	Pages      []wiki.Page
+	Findings   []string
+	CostUSD    float64
+	Turns      int
+	Violations []wiki.Violation
+	Err        error
+}
+
 // generateUnit runs analyze then generate for one unit, retrying on validation
 // failure with the errors stated back to the agent.
 func (p *Pipeline) generateUnit(
@@ -264,11 +288,18 @@ func (p *Pipeline) generateUnit(
 	unit mapper.Unit,
 	steering Steering,
 	known map[string]bool,
-) (pages []wiki.Page, cost float64, turns int, violations []wiki.Violation, err error) {
+) unitResult {
+	var res unitResult
 
-	scratch := filepath.Join(req.ScratchDir, sanitize(string(key)))
-	if err := os.MkdirAll(scratch, 0o755); err != nil {
-		return nil, 0, 0, nil, fmt.Errorf("create scratch dir: %w", err)
+	// Only a runner that writes files needs somewhere to write them. The API
+	// runner returns pages as data, so no scratch directory is created at all.
+	scratch := ""
+	if req.ScratchDir != "" {
+		scratch = filepath.Join(req.ScratchDir, sanitize(string(key)))
+		if err := os.MkdirAll(scratch, 0o755); err != nil {
+			res.Err = fmt.Errorf("create scratch dir: %w", err)
+			return res
+		}
 	}
 
 	sessionID := req.RunID + "-" + sanitize(string(key))
@@ -285,12 +316,14 @@ func (p *Pipeline) generateUnit(
 			JSONSchema:   AnalysisSchema,
 		})
 		if aerr != nil {
-			return nil, cost, turns, nil, aerr
+			res.Err = aerr
+			return res
 		}
-		cost += analyzeRes.TotalCostUSD
-		turns += analyzeRes.NumTurns
+		res.CostUSD += analyzeRes.TotalCostUSD
+		res.Turns += analyzeRes.NumTurns
 		if err := analyzeRes.Err(); err != nil {
-			return nil, cost, turns, nil, err
+			res.Err = err
+			return res
 		}
 
 		genRes, gerr := p.Runner.Run(ctx, agent.Request{
@@ -302,12 +335,14 @@ func (p *Pipeline) generateUnit(
 			Prompt:       generatePrompt(key, unit, steering, attempt, lastViolations),
 		})
 		if gerr != nil {
-			return nil, cost, turns, nil, gerr
+			res.Err = gerr
+			return res
 		}
-		cost += genRes.TotalCostUSD
-		turns += genRes.NumTurns
+		res.CostUSD += genRes.TotalCostUSD
+		res.Turns += genRes.NumTurns
 		if err := genRes.Err(); err != nil {
-			return nil, cost, turns, nil, err
+			res.Err = err
+			return res
 		}
 
 		// Runners deliver pages two ways: the API runner returns them as
@@ -316,7 +351,8 @@ func (p *Pipeline) generateUnit(
 		// lets both satisfy one interface.
 		collected, cerr := pagesFrom(genRes, scratch)
 		if cerr != nil {
-			return nil, cost, turns, nil, cerr
+			res.Err = cerr
+			return res
 		}
 
 		lastViolations = wiki.ValidateBatch(collected, wiki.ValidateOptions{
@@ -324,21 +360,30 @@ func (p *Pipeline) generateUnit(
 			RequireDates: false,
 		})
 		if len(lastViolations) == 0 {
-			return derefPages(collected), cost, turns, nil, nil
+			res.Pages = derefPages(collected)
+			if genRes.Generation != nil {
+				res.Findings = genRes.Generation.Findings
+			}
+			return res
 		}
 
 		p.logger().Warn("validation failed; retrying",
 			"key", key, "attempt", attempt+1, "violations", len(lastViolations))
 		// Clear the scratch dir so a partial attempt is not re-collected.
-		if err := os.RemoveAll(scratch); err != nil {
-			return nil, cost, turns, lastViolations, err
-		}
-		if err := os.MkdirAll(scratch, 0o755); err != nil {
-			return nil, cost, turns, lastViolations, err
+		if scratch != "" {
+			if err := os.RemoveAll(scratch); err != nil {
+				res.Violations, res.Err = lastViolations, err
+				return res
+			}
+			if err := os.MkdirAll(scratch, 0o755); err != nil {
+				res.Violations, res.Err = lastViolations, err
+				return res
+			}
 		}
 	}
 
-	return nil, cost, turns, lastViolations, nil
+	res.Violations = lastViolations
+	return res
 }
 
 // modelFor escalates one tier on the final attempt rather than starting

@@ -191,6 +191,10 @@ func (s *JobStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 		return err
 	}
 
+	if err := writeArtifacts(ctx, tx, wikiID, in); err != nil {
+		return err
+	}
+
 	// The revision is what busts UI caches, so it moves only when the rest of
 	// the transaction succeeds.
 	if _, err := tx.Exec(ctx, `
@@ -203,6 +207,61 @@ func (s *JobStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 	}
 
 	return tx.Commit(ctx)
+}
+
+// writeArtifacts persists the derived index, overview, and log.
+//
+// The index and overview are replaced wholesale: they are pure functions of the
+// current page set, so the newest run's version is the only correct one. The log
+// is appended, because it is the record of how the wiki reached its current
+// state and rewriting it would erase that.
+func writeArtifacts(ctx context.Context, tx pgx.Tx, wikiID string, in jobs.ImportRequest) error {
+	for kind, body := range map[string]string{
+		"index":    in.Index,
+		"overview": in.Overview,
+	} {
+		if body == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO wiki_artifacts (wiki_id, kind, body) VALUES ($1,$2,$3)
+			ON CONFLICT (wiki_id, kind) DO UPDATE
+			SET body = EXCLUDED.body, updated_at = now()`,
+			wikiID, kind, body); err != nil {
+			return fmt.Errorf("store: write %s artifact: %w", kind, err)
+		}
+	}
+
+	if in.LogEntry == "" {
+		return nil
+	}
+	// Append-only: the new entry is concatenated onto whatever is already
+	// there, seeded with a header the first time.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO wiki_artifacts (wiki_id, kind, body)
+		VALUES ($1, 'log', $2 || $3)
+		ON CONFLICT (wiki_id, kind) DO UPDATE
+		SET body = wiki_artifacts.body || E'\n' || $3, updated_at = now()`,
+		wikiID, wiki.LogHeader+"\n\n", in.LogEntry); err != nil {
+		return fmt.Errorf("store: append log: %w", err)
+	}
+	return nil
+}
+
+// LoadArtifact returns a derived artifact, or empty when it has not been built.
+func (s *JobStore) LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error) {
+	var body string
+	err := s.pool.QueryRow(ctx, `
+		SELECT a.body FROM wiki_artifacts a
+		JOIN wikis w ON w.id = a.wiki_id
+		WHERE w.workspace_id = $1 AND a.kind = $2`, workspaceID, kind).Scan(&body)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: load %s artifact: %w", kind, err)
+	}
+	return body, nil
 }
 
 func ensureWiki(ctx context.Context, tx pgx.Tx, workspaceID string) (string, error) {
