@@ -1,0 +1,63 @@
+version: 2
+
+project_name: kiln
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: kiln
+    main: ./cmd/kiln
+    binary: kiln
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    # Same symbol the Makefile injects and `kiln version` prints, so released
+    # binaries report a real tag instead of "dev".
+    ldflags:
+      - -s -w
+      - -X github.com/daiwa-zou/kiln/internal/observability.Version={{ .Version }}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: kiln
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-next'
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - Merge pull request
+  groups:
+    - title: Features
+      regexp: '^feat'
+      order: 0
+    - title: Fixes
+      regexp: '^fix'
+      order: 1
+    - title: Other
+      order: 99
+
+release:
+  draft: false
+  prerelease: auto

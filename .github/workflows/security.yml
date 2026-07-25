@@ -1,0 +1,61 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # New CVEs land against code that has not changed, so the cron is the part
+  # of this workflow that actually earns its keep.
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Reports only vulnerabilities reachable from kiln's own call graph, so it
+  # stays quiet about CVEs in unused corners of the dependency tree.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  # kiln handles ANTHROPIC_API_KEY (internal/config/secrets.go) and Postgres
+  # DSNs, so a secret landing in a commit is a live risk.
+  #
+  # The gitleaks binary is installed directly rather than via gitleaks-action,
+  # which gates scanning behind a GITLEAKS_LICENSE secret.
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history on the scheduled sweep; the default shallow checkout
+          # is enough for a push or PR.
+          fetch-depth: ${{ github.event_name == 'schedule' && 0 || 1 }}
+      - name: Install gitleaks
+        run: |
+          version=$(curl -fsSL https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
+            | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${version}/gitleaks_${version#v}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            gitleaks git --redact --verbose .
+          else
+            gitleaks dir --redact --verbose .
+          fi

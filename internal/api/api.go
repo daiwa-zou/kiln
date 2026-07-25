@@ -415,7 +415,7 @@ func (s *Server) Serve(ctx context.Context, addr string) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errc:
-		if err == http.ErrServerClosed {
+		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err

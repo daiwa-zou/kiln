@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -100,11 +101,7 @@ func readConfigFile(v *viper.Viper, explicit string) error {
 }
 
 func asConfigFileNotFound(err error, target *viper.ConfigFileNotFoundError) bool {
-	if e, ok := err.(viper.ConfigFileNotFoundError); ok {
-		*target = e
-		return true
-	}
-	return false
+	return errors.As(err, target)
 }
 
 func searchPaths() []string {

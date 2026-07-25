@@ -5,7 +5,10 @@ LDFLAGS := -X '$(PKG)/internal/observability.Version=$(VERSION)'
 
 TEST_DB_URL := postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
 
-.PHONY: all build test test-verbose test-integration db-up db-down lint fmt tidy migrate dev clean
+# Pinned to match .github/workflows/ci.yml. Bump both together.
+GOLANGCI := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+
+.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev clean
 
 all: fmt test build
 
@@ -20,8 +23,20 @@ test-verbose:
 	go test -v -race ./...
 
 # Requires db-up. Exercises the schema against a real Postgres.
+#
+# -p 1 is load-bearing: internal/api and internal/store both DROP SCHEMA public
+# on the single shared database, so parallel package binaries race and fail
+# with spurious "relation ... does not exist" errors.
 test-integration: db-up
-	KILN_TEST_DATABASE_URL="$(TEST_DB_URL)" go test ./... -count=1
+	KILN_TEST_DATABASE_URL="$(TEST_DB_URL)" go test ./... -count=1 -p 1
+
+# Coverage profile plus the badge CI commits. Needs the database for the same
+# reason CI measures coverage in the integration job: without it internal/store
+# reports ~5% and the badge understates the project by a wide margin.
+cover: db-up
+	KILN_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race ./... -count=1 -p 1 -covermode=atomic -coverprofile=coverage.out
+	@go tool cover -func=coverage.out | tail -1
+	@./scripts/coverage-badge.sh coverage.out .github/badges/coverage.svg
 
 db-up:
 	@docker inspect kiln-test >/dev/null 2>&1 || \
@@ -36,8 +51,13 @@ db-down:
 	@docker rm -f kiln-test >/dev/null 2>&1 || true
 	@echo "postgres removed"
 
+# Pinned so local runs match CI exactly. `go run` caches the build, so only
+# the first invocation after a version bump is slow.
 lint:
-	go vet ./...
+	go run $(GOLANGCI) run
+
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 fmt:
 	go fmt ./...

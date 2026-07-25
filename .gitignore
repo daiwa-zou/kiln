@@ -6,7 +6,9 @@
 # Go
 *.test
 *.out
-coverage.*
+# Anchored: an unanchored `coverage.*` also matches .github/badges/coverage.svg,
+# which is a committed artifact, not build output.
+/coverage.*
 
 # Node / Next.js
 node_modules/
