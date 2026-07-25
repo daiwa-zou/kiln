@@ -49,8 +49,16 @@ type WorkspaceMap struct {
 }
 
 // SourceSet is what a Connector materializes for a Mapper to read.
+//
+// This mirrors connector.SourceSet rather than reusing it, so the mapper layer
+// does not depend on the connector layer. The duplication is deliberate but
+// worth watching: if a third field has to be kept in step across both, they
+// should become one type.
 type SourceSet struct {
-	Root  string
+	Root string
+	// Kind names the connector that produced this, so a caller can pick a
+	// matching Mapper.
+	Kind  string
 	Items []SourceItem
 }
 
