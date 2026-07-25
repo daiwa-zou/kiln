@@ -1,0 +1,27 @@
+# Binaries (anchored: a bare `kiln` would also match cmd/kiln/)
+/bin/
+/dist/
+/kiln
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Node / Next.js
+node_modules/
+web/.next/
+web/out/
+web/.turbo/
+
+# Local state
+.env
+.env.local
+*.local.toml
+/tmp/
+/blobs/
+
+# Editors / OS
+.DS_Store
+.idea/
+*.swp
