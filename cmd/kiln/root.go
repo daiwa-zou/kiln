@@ -40,6 +40,7 @@ run over unchanged sources costs nothing.`,
 	cmd.AddCommand(
 		newVersionCmd(),
 		newAdminCmd(&g),
+		newBuildCmd(&g),
 	)
 
 	return cmd

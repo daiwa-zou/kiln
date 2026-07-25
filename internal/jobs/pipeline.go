@@ -122,7 +122,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	if p.Budget.MaxPages > 0 && len(dirty) > p.Budget.MaxPages {
 		log.Warn("truncating work to the per-run page cap",
 			"planned", len(dirty), "cap", p.Budget.MaxPages)
-		dirty = dirty[:p.Budget.MaxPages]
+		dirty = truncatePreservingArch(dirty, p.Budget.MaxPages)
 	}
 
 	res.Planned = dirty
@@ -310,7 +310,11 @@ func (p *Pipeline) generateUnit(
 			return nil, cost, turns, nil, err
 		}
 
-		collected, cerr := collectPages(scratch)
+		// Runners deliver pages two ways: the API runner returns them as
+		// structured data, the CLI runner writes them into the scratch
+		// directory. Everything after this point is identical, which is what
+		// lets both satisfy one interface.
+		collected, cerr := pagesFrom(genRes, scratch)
 		if cerr != nil {
 			return nil, cost, turns, nil, cerr
 		}

@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -137,6 +138,116 @@ func testRequest(t *testing.T, m *mapper.WorkspaceMap, changes diff.ChangeSet) B
 			"apps/ripple": diff.ModuleKey("ripple"),
 		}},
 		Changes: changes,
+	}
+}
+
+// structuredRunner returns pages as data rather than writing files, the way
+// APIRunner does. Pages are keyed by unit so it behaves like the real thing:
+// each unit writes its own pages, not a shared set.
+type structuredRunner struct {
+	byUnit map[string][]agent.GeneratedPage
+	calls  int
+}
+
+func (s *structuredRunner) Run(_ context.Context, req agent.Request) (*agent.Result, error) {
+	s.calls++
+	res := &agent.Result{
+		Subtype: "success", TerminalReason: "completed",
+		SessionID: req.SessionID, NumTurns: 1, TotalCostUSD: 0.01,
+	}
+	if req.Step != agent.StepGenerate {
+		return res, nil
+	}
+
+	// Session IDs embed the sanitized cache key, so the unit is recoverable.
+	pages := []agent.GeneratedPage{}
+	for unit, p := range s.byUnit {
+		if strings.HasSuffix(req.SessionID, sanitize(unit)) {
+			pages = p
+			break
+		}
+	}
+	res.Generation = &agent.GenerationResult{Pages: pages}
+	return res, nil
+}
+
+func TestBuildAcceptsStructuredOutputWithoutTouchingDisk(t *testing.T) {
+	store := newMemStore()
+	runner := &structuredRunner{byUnit: map[string][]agent.GeneratedPage{
+		"module:ripple": {{
+			Path: "entities/ripple.md", Type: "entity", Title: "Ripple",
+			Body: "# Ripple\n\nCoordinates work across the services, dispatching tasks to " +
+				"workers and collecting their results for downstream consumers. Owns the " +
+				"queue and the retry schedule.\n",
+		}},
+		// The architecture unit writes a synthesis page, not the module's page.
+		"arch:overview": {{
+			Path: "synthesis/architecture-overview.md", Type: "synthesis", Title: "Architecture Overview",
+			Body: "# Architecture Overview\n\nOne Go module split across services, each " +
+				"owning a slice of the request path and communicating over the queue.\n",
+		}},
+	}}
+
+	p := testPipeline(store, runner)
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"})
+
+	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
+	// No scratch directory at all: the API path never writes files, so needing
+	// one would mean the structured branch is not being taken.
+	req.ScratchDir = filepath.Join(t.TempDir(), "never-created")
+
+	res, err := p.Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.Summary.Status != StatusSucceeded {
+		t.Fatalf("Status = %q, want succeeded (violations: %v)", res.Summary.Status, res.Violations)
+	}
+
+	imp := store.lastImport()
+	if imp == nil {
+		t.Fatal("nothing was imported")
+	}
+
+	// A full rebuild covers the module and the architecture synthesis, and each
+	// contributes its own page.
+	got := map[string]string{}
+	for _, p := range imp.UpsertPages {
+		got[p.Path] = p.Slug
+	}
+	if len(got) != 2 {
+		t.Fatalf("imported %d distinct pages, want 2: %v", len(got), got)
+	}
+	if slug, ok := got["entities/ripple.md"]; !ok || slug != "ripple" {
+		t.Errorf("module page missing or mis-slugged: %v", got)
+	}
+	if _, ok := got["synthesis/architecture-overview.md"]; !ok {
+		t.Errorf("synthesis page missing: %v", got)
+	}
+}
+
+func TestBuildValidatesStructuredOutputToo(t *testing.T) {
+	store := newMemStore()
+	// Frontmatter says concept, but the path files it under entities.
+	runner := &structuredRunner{byUnit: map[string][]agent.GeneratedPage{
+		"module:ripple": {{
+			Path: "entities/wrong.md", Type: "concept", Title: "Wrong",
+			Body: "# Wrong\n\n" + strings.Repeat("padding to clear the minimum body size. ", 5),
+		}},
+	}}
+
+	p := testPipeline(store, runner)
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"})
+
+	res, err := p.Build(context.Background(), testRequest(t, m, diff.ChangeSet{FullRebuild: true}))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// Structured output is data, not a trusted result: the same validation runs
+	// either way, so a schema-shaped mistake still fails.
+	if res.Summary.Status == StatusSucceeded {
+		t.Error("a type/directory mismatch was accepted from structured output")
 	}
 }
 
@@ -540,6 +651,43 @@ func TestBuildCapsPagesPerRun(t *testing.T) {
 	}
 	if len(res.Planned) != 2 {
 		t.Errorf("Planned = %d units, want the cap of 2", len(res.Planned))
+	}
+}
+
+func TestTruncatePreservingArch(t *testing.T) {
+	dirty := []diff.Key{
+		diff.ModuleKey("a"), diff.ModuleKey("b"), diff.ModuleKey("c"),
+		diff.ModuleKey("d"), diff.ArchOverview,
+	}
+
+	got := truncatePreservingArch(dirty, 3)
+	if len(got) != 3 {
+		t.Fatalf("got %d units, want 3", len(got))
+	}
+	// Architecture sorts last, so a plain slice would drop it every run and a
+	// repository with more modules than the cap would never get its synthesis.
+	if got[len(got)-1] != diff.ArchOverview {
+		t.Errorf("architecture was truncated away: %v", got)
+	}
+	if got[0] != diff.ModuleKey("a") || got[1] != diff.ModuleKey("b") {
+		t.Errorf("modules dropped out of order: %v", got)
+	}
+}
+
+func TestTruncatePreservingArchNoOps(t *testing.T) {
+	dirty := []diff.Key{diff.ModuleKey("a"), diff.ArchOverview}
+
+	if got := truncatePreservingArch(dirty, 5); len(got) != 2 {
+		t.Errorf("under the cap should be untouched, got %v", got)
+	}
+	if got := truncatePreservingArch(dirty, 0); len(got) != 2 {
+		t.Errorf("a zero cap means no cap, got %v", got)
+	}
+
+	// Without architecture in the list there is nothing to reserve a slot for.
+	modules := []diff.Key{diff.ModuleKey("a"), diff.ModuleKey("b"), diff.ModuleKey("c")}
+	if got := truncatePreservingArch(modules, 2); len(got) != 2 || got[1] != diff.ModuleKey("b") {
+		t.Errorf("plain truncation = %v", got)
 	}
 }
 

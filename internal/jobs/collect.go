@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/daiwa-zou/kiln/internal/agent"
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/mapper"
 	"github.com/daiwa-zou/kiln/internal/wiki"
@@ -64,6 +65,38 @@ func collectPages(scratchDir string) ([]*wiki.Page, error) {
 	})
 	if walkErr != nil {
 		return nil, walkErr
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+// pagesFrom takes whatever the runner produced and normalizes it to pages.
+//
+// The API runner returns page content as structured data and touches no
+// filesystem; the CLI runner writes files into the scratch directory. Reading
+// structured output when it is present is what lets the API path skip the
+// scratch directory, and with it the path-escape checks that only exist because
+// an agent with write access might stray outside it.
+func pagesFrom(res *agent.Result, scratchDir string) ([]*wiki.Page, error) {
+	if res == nil || res.Generation == nil {
+		return collectPages(scratchDir)
+	}
+
+	out := make([]*wiki.Page, 0, len(res.Generation.Pages))
+	for _, gp := range res.Generation.Pages {
+		out = append(out, &wiki.Page{
+			Path: gp.Path,
+			Slug: wiki.SlugFromPath(gp.Path),
+			Meta: wiki.Frontmatter{
+				Type:    wiki.PageType(gp.Type),
+				Title:   gp.Title,
+				Tags:    gp.Tags,
+				Related: gp.Related,
+				Sources: gp.Sources,
+			},
+			Body: gp.Body,
+		})
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
@@ -161,6 +194,42 @@ func buildLogLines(s RunSummary, spent float64) []string {
 		lines = append(lines, fmt.Sprintf("Cost: $%.4f across %d units", spent, len(s.Items)))
 	}
 	return lines
+}
+
+// truncatePreservingArch caps the work list while keeping the architecture
+// synthesis.
+//
+// Architecture sorts last so it regenerates after the modules it summarizes,
+// which means a plain slice would drop it first every time. On a repository with
+// more modules than the cap it would then never run, and the wiki would keep
+// per-module pages with no page tying them together.
+func truncatePreservingArch(dirty []diff.Key, cap int) []diff.Key {
+	if cap <= 0 || len(dirty) <= cap {
+		return dirty
+	}
+
+	var hasArch bool
+	for _, k := range dirty {
+		if k == diff.ArchOverview {
+			hasArch = true
+			break
+		}
+	}
+	if !hasArch {
+		return dirty[:cap]
+	}
+
+	// Reserve the final slot for architecture and fill the rest in order.
+	out := make([]diff.Key, 0, cap)
+	for _, k := range dirty {
+		if len(out) == cap-1 {
+			break
+		}
+		if k != diff.ArchOverview {
+			out = append(out, k)
+		}
+	}
+	return append(out, diff.ArchOverview)
 }
 
 // runStatus summarizes item outcomes into a single run status.
