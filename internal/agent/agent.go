@@ -47,6 +47,13 @@ type Request struct {
 	// JSONSchema, when set, forces structured output. Used for analyze so the
 	// plan needs no parsing heroics.
 	JSONSchema string
+	// CacheableContext is prompt content identical across every unit in a run --
+	// the rendered map and the steering documents. APIRunner puts a cache
+	// breakpoint after it, so all but the first unit reads it at a tenth of the
+	// input rate. Must be byte-identical between units or nothing caches.
+	CacheableContext string
+	// MaxTokens caps the response. Zero uses the runner's default.
+	MaxTokens int64
 }
 
 // Usage is the token accounting returned by the CLI.
@@ -76,6 +83,18 @@ type Result struct {
 	Usage             Usage              `json:"usage"`
 	Result            string             `json:"result"`
 	PermissionDenials []PermissionDenial `json:"permission_denials"`
+
+	// Model names the model that actually served the request.
+	Model string `json:"model,omitempty"`
+	// Generation is set by runners that return page content as structured data
+	// rather than writing files. ClaudeRunner leaves it nil and the pipeline
+	// collects from the scratch directory instead; APIRunner populates it and
+	// no filesystem is involved. This field is what lets both runners satisfy
+	// one interface without the pipeline caring which is in use.
+	Generation *GenerationResult `json:"-"`
+	// Analysis is the structured plan from an analyze step, when the runner
+	// returns one.
+	Analysis *AnalysisResult `json:"-"`
 }
 
 // PermissionDenial records a tool call the sandbox or hooks refused. These are

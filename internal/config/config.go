@@ -80,9 +80,32 @@ type Storage struct {
 	SoftDeleteRetention  time.Duration `mapstructure:"soft_delete_retention"`
 }
 
-// Agent holds settings for the sandboxed claude invocations.
+// AgentRunner selects how kiln reaches Claude.
+type AgentRunner string
+
+const (
+	// RunnerAPI calls the Anthropic API directly and asks for structured
+	// output, so the model returns page content as data and never touches a
+	// filesystem. This is the default: it needs no sandbox, no write guard, and
+	// no path-escape checks, and it allows explicit prompt caching across units.
+	RunnerAPI AgentRunner = "api"
+	// RunnerCLI shells out to the claude binary, which writes pages into a
+	// scratch directory. Kept for local development against an existing CLI
+	// session, and for anyone who would rather not manage an API key.
+	RunnerCLI AgentRunner = "cli"
+)
+
+// Agent holds settings for reaching Claude.
 type Agent struct {
-	Binary        string        `mapstructure:"binary"`
+	// Runner picks the transport. Defaults to the API.
+	Runner AgentRunner `mapstructure:"runner"`
+	// Binary is the claude executable, used only by the CLI runner.
+	Binary string `mapstructure:"binary"`
+	// BaseURL overrides the API endpoint, mainly for testing.
+	BaseURL string `mapstructure:"base_url"`
+	// Effort tunes thinking depth and spend: low, medium, high, xhigh, max.
+	Effort string `mapstructure:"effort"`
+
 	Model         string        `mapstructure:"model"`
 	AnalyzeModel  string        `mapstructure:"analyze_model"`
 	FallbackModel string        `mapstructure:"fallback_model"`

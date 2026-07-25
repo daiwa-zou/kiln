@@ -96,17 +96,17 @@ func main() {
 // script specified, so most tests need only state the field they care about.
 func envelopeJSON(overrides map[string]any, args []string) []byte {
 	env := map[string]any{
-		"type":              "result",
-		"subtype":           "success",
-		"is_error":          false,
-		"stop_reason":       "end_turn",
-		"terminal_reason":   "completed",
-		"api_error_status":  nil,
-		"session_id":        sessionID(args),
-		"num_turns":         1,
-		"total_cost_usd":    0.013459,
-		"duration_ms":       1156,
-		"result":            "ok",
+		"type":               "result",
+		"subtype":            "success",
+		"is_error":           false,
+		"stop_reason":        "end_turn",
+		"terminal_reason":    "completed",
+		"api_error_status":   nil,
+		"session_id":         sessionID(args),
+		"num_turns":          1,
+		"total_cost_usd":     0.013459,
+		"duration_ms":        1156,
+		"result":             "ok",
 		"permission_denials": []any{},
 		"usage": map[string]any{
 			"input_tokens":                1200,

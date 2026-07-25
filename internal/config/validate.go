@@ -56,8 +56,27 @@ func (c *Config) Validate() error {
 		problems = append(problems, fmt.Sprintf("storage: unknown backend %q (want s3 or fs)", c.Storage.Backend))
 	}
 
-	if c.Agent.Binary == "" {
-		problems = append(problems, "agent: binary is empty")
+	switch c.Agent.Runner {
+	case RunnerAPI, "":
+		// Empty means the API runner, matching what the factory does -- Load
+		// always fills the default in, but a hand-built Config should not have
+		// to restate it.
+		//
+		// An empty API key is also allowed: the SDK falls through to its own
+		// credential resolution, so ambient configuration keeps working.
+	case RunnerCLI:
+		if c.Agent.Binary == "" {
+			problems = append(problems, "agent: binary is required for the cli runner")
+		}
+	default:
+		problems = append(problems, fmt.Sprintf("agent: unknown runner %q (want api or cli)", c.Agent.Runner))
+	}
+
+	switch c.Agent.Effort {
+	case "", "low", "medium", "high", "xhigh", "max":
+	default:
+		problems = append(problems, fmt.Sprintf(
+			"agent: unknown effort %q (want low, medium, high, xhigh, or max)", c.Agent.Effort))
 	}
 	if c.Agent.Timeout <= 0 {
 		problems = append(problems, "agent: timeout must be positive")

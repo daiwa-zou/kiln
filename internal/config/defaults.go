@@ -36,10 +36,16 @@ func applyDefaults(v setter, role Role) {
 	v.SetDefault("storage.run_artifact_retention", 30*24*time.Hour)
 	v.SetDefault("storage.soft_delete_retention", 30*24*time.Hour)
 
+	// The API runner is the default: no sandbox, no write guard, no path-escape
+	// checks, and explicit prompt caching across units.
+	v.SetDefault("agent.runner", string(RunnerAPI))
 	v.SetDefault("agent.binary", "claude")
-	v.SetDefault("agent.model", "sonnet")
-	v.SetDefault("agent.analyze_model", "sonnet")
-	v.SetDefault("agent.fallback_model", "sonnet")
+	v.SetDefault("agent.effort", "high")
+	// Sonnet 5 by default; workspaces that warrant Opus 5 override it. Flipping
+	// this default would silently multiply every workspace's bill.
+	v.SetDefault("agent.model", "claude-sonnet-5")
+	v.SetDefault("agent.analyze_model", "claude-sonnet-5")
+	v.SetDefault("agent.fallback_model", "claude-sonnet-5")
 	v.SetDefault("agent.timeout", 12*time.Minute)
 	v.SetDefault("agent.analyze_budget_usd", 0.40)
 	v.SetDefault("agent.page_budget_usd", 1.50)
