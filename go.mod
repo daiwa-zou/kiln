@@ -3,9 +3,11 @@ module github.com/daiwa-zou/kiln
 go 1.25.0
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
+	golang.org/x/mod v0.38.0
 )
 
 require (
