@@ -37,11 +37,16 @@ against Postgres, and a Next.js frontend in its own container. Scale by adding w
 Requires Go 1.24, Postgres 16, and the `claude` CLI on `PATH`.
 
 ```bash
-make test            # unit + golden tests, no network
-make build           # -> bin/kiln
-make migrate         # apply schema (advisory-lock guarded, safe to run concurrently)
-make dev             # server + worker in one process
+make test              # hermetic: unit + golden tests, no network, no database
+make test-integration  # starts Postgres in Docker, runs everything including schema tests
+make build             # -> bin/kiln
+make migrate           # apply schema (advisory-lock guarded, safe to run concurrently)
+make dev               # server + worker in one process
+make db-up / db-down   # manage the test Postgres container
 ```
+
+Integration tests key off `KILN_TEST_DATABASE_URL` and skip themselves when it is
+unset, so `make test` stays fast and offline.
 
 ## License
 
