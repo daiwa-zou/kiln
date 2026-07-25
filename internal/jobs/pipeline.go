@@ -78,7 +78,10 @@ type BuildResult struct {
 	Planned []diff.Key
 	// EstimatedUSD is the projected spend shown before anything is charged.
 	EstimatedUSD float64
-	Violations   []wiki.Violation
+	// Deferred counts units the per-run page cap held back. They stay stale and
+	// are picked up by the next run.
+	Deferred   int
+	Violations []wiki.Violation
 }
 
 // defaultEstimatePerUnit is used until a workspace has real cost history.
@@ -122,6 +125,10 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	if p.Budget.MaxPages > 0 && len(dirty) > p.Budget.MaxPages {
 		log.Warn("truncating work to the per-run page cap",
 			"planned", len(dirty), "cap", p.Budget.MaxPages)
+		// Recorded rather than only logged: the preview is the number someone
+		// approves a spend against, and a plan that quietly covers half the
+		// repository would be confirmed as though it covered all of it.
+		res.Deferred = len(dirty) - p.Budget.MaxPages
 		dirty = truncatePreservingArch(dirty, p.Budget.MaxPages)
 	}
 

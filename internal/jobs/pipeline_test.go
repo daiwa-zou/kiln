@@ -894,3 +894,59 @@ func TestBuildSendsSourceMaterialAndCachesTheMap(t *testing.T) {
 		t.Errorf("%d grounded calls for the module unit, want 2 (analyze and generate)", grounded)
 	}
 }
+
+func TestDryRunReportsWorkHeldBackByTheCap(t *testing.T) {
+	// The preview is the number a spend is approved against. A plan that
+	// silently covers half the repository would be confirmed as though it
+	// covered all of it.
+	store := newMemStore()
+	p := testPipeline(store, newScriptedRunner())
+	p.Budget.MaxPages = 3
+
+	units := make([]mapper.Unit, 0, 10)
+	dirs := map[string]diff.Key{}
+	for i := range 10 {
+		slug := string(rune('a' + i))
+		units = append(units, mapper.Unit{
+			Key: "module:" + slug, Kind: "module", Slug: slug, Hash: "h" + slug,
+		})
+		dirs["apps/"+slug] = diff.ModuleKey(slug)
+	}
+
+	req := testRequest(t, testMap(units...), diff.ChangeSet{FullRebuild: true})
+	// A full rebuild draws its work from the router, so the router has to know
+	// about every module the map describes.
+	req.Router = diff.Router{ModuleDirs: dirs}
+	req.DryRun = true
+
+	res, err := p.Build(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(res.Planned) != 3 {
+		t.Errorf("planned %d units, want the cap of 3", len(res.Planned))
+	}
+	// 10 modules plus the architecture synthesis, minus the three that fit.
+	if res.Deferred != 8 {
+		t.Errorf("Deferred = %d, want 8", res.Deferred)
+	}
+}
+
+func TestDeferredIsZeroWhenEverythingFits(t *testing.T) {
+	store := newMemStore()
+	p := testPipeline(store, newScriptedRunner())
+
+	req := testRequest(t, testMap(mapper.Unit{
+		Key: "module:ripple", Slug: "ripple", Hash: "h",
+	}), diff.ChangeSet{FullRebuild: true})
+	req.DryRun = true
+
+	res, err := p.Build(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Deferred != 0 {
+		t.Errorf("Deferred = %d, want 0", res.Deferred)
+	}
+}

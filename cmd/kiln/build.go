@@ -308,6 +308,11 @@ func report(out io.Writer, res *jobs.BuildResult, dryRun bool, elapsed time.Dura
 		for _, k := range res.Planned {
 			fmt.Fprintf(out, "  %s\n", k)
 		}
+		if res.Deferred > 0 {
+			fmt.Fprintf(out, "\n%d more unit(s) exceed the per-run page cap and are not in this plan.\n",
+				res.Deferred)
+			fmt.Fprintln(out, "They stay stale until a later run; raise agent.max_pages_per_run to cover them in one.")
+		}
 		fmt.Fprintln(out, "\nno model calls were made (--dry-run)")
 		return nil
 	}
