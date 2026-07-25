@@ -37,7 +37,10 @@ run over unchanged sources costs nothing.`,
 	pf.StringVar(&g.logLevel, "log-level", "", "log level: debug, info, warn, error")
 	pf.BoolVar(&g.jsonOutput, "json", false, "emit machine-readable output")
 
-	cmd.AddCommand(newVersionCmd())
+	cmd.AddCommand(
+		newVersionCmd(),
+		newAdminCmd(&g),
+	)
 
 	return cmd
 }
