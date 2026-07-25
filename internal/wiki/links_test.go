@@ -61,61 +61,6 @@ func TestResolveLinks(t *testing.T) {
 	}
 }
 
-func TestPruneDeadLinks(t *testing.T) {
-	body := "See [[alpha]] and [[gone]] and [[also-gone|the other thing]].\n"
-	known := map[string]bool{"alpha": true}
-
-	got, removed := PruneDeadLinks(body, known)
-
-	// A live link survives; a dead one becomes plain text, keeping its alias so
-	// the sentence still reads correctly.
-	want := "See [[alpha]] and gone and the other thing.\n"
-	if got != want {
-		t.Errorf("body = %q, want %q", got, want)
-	}
-	if wantRemoved := []string{"also-gone", "gone"}; !reflect.DeepEqual(removed, wantRemoved) {
-		t.Errorf("removed = %v, want %v", removed, wantRemoved)
-	}
-}
-
-func TestPruneDeadLinksNoChange(t *testing.T) {
-	body := "All good: [[alpha]] and [[beta]].\n"
-	known := map[string]bool{"alpha": true, "beta": true}
-
-	got, removed := PruneDeadLinks(body, known)
-	if got != body {
-		t.Errorf("body was rewritten unnecessarily:\n got %q\nwant %q", got, body)
-	}
-	if len(removed) != 0 {
-		t.Errorf("removed = %v, want none", removed)
-	}
-}
-
-func TestFilterRelated(t *testing.T) {
-	known := map[string]bool{"alpha": true, "beta": true}
-
-	tests := []struct {
-		name    string
-		related []string
-		want    []string
-	}{
-		{"all live", []string{"alpha", "beta"}, []string{"alpha", "beta"}},
-		{"drops dead entries", []string{"alpha", "gone", "beta"}, []string{"alpha", "beta"}},
-		{"normalizes before matching", []string{"concepts/alpha"}, []string{"concepts/alpha"}},
-		{"all dead yields nil", []string{"gone", "also-gone"}, nil},
-		{"empty yields nil", nil, nil},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := FilterRelated(tt.related, known)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("FilterRelated(%v) = %v, want %v", tt.related, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestExtractLinksIgnoresNonLinks(t *testing.T) {
 	// Single brackets and unterminated pairs are ordinary markdown, not links.
 	body := "A [reference][1] and [a link](http://x) and [[unterminated\n"

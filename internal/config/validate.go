@@ -88,14 +88,13 @@ func (c *Config) Validate() error {
 		problems = append(problems, "agent: max_pages_per_run must be at least 1")
 	}
 
-	if c.Worker.Concurrency < 1 {
-		problems = append(problems, "worker: concurrency must be at least 1")
-	}
-	if c.Worker.SweepJitter < 0 {
-		problems = append(problems, "worker: sweep_jitter cannot be negative")
-	}
-	if c.Worker.SweepJitter >= c.Worker.SweepInterval && c.Worker.SweepInterval > 0 {
-		problems = append(problems, "worker: sweep_jitter must be smaller than sweep_interval")
+	switch c.Auth.Mode {
+	case AuthToken, AuthNone:
+	case "":
+		// A hand-built Config should not have to restate the default; Load
+		// always fills it in.
+	default:
+		problems = append(problems, fmt.Sprintf("auth: unknown mode %q (want token or none)", c.Auth.Mode))
 	}
 
 	if len(problems) == 0 {

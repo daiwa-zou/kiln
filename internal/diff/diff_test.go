@@ -1,7 +1,7 @@
 package diff
 
 import (
-	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -41,64 +41,6 @@ func TestKeysDoNotCollideAcrossNamespaces(t *testing.T) {
 	// synthesis, which is the whole reason keys are namespaced.
 	if DocKey("overview") == ArchOverview {
 		t.Error("doc:overview collides with arch:overview")
-	}
-}
-
-func TestHashDiff(t *testing.T) {
-	before := map[string]string{
-		"a.go":       "h1",
-		"b.go":       "h2",
-		"removed.go": "h3",
-	}
-	after := map[string]string{
-		"a.go":     "h1",    // unchanged
-		"b.go":     "h2new", // modified
-		"added.go": "h4",    // added
-	}
-
-	cs := HashDiff(before, after)
-	want := []Change{
-		{Path: "added.go", Kind: Added},
-		{Path: "b.go", Kind: Modified},
-		{Path: "removed.go", Kind: Deleted},
-	}
-
-	if !reflect.DeepEqual(cs.Changes, want) {
-		t.Errorf("Changes =\n  %+v\nwant\n  %+v", cs.Changes, want)
-	}
-
-	added, modified, deleted := cs.Counts()
-	if added != 1 || modified != 1 || deleted != 1 {
-		t.Errorf("Counts() = %d, %d, %d; want 1, 1, 1", added, modified, deleted)
-	}
-}
-
-func TestHashDiffUnchangedIsEmpty(t *testing.T) {
-	m := map[string]string{"a.go": "h1", "b.go": "h2"}
-
-	// This is the case that must cost nothing: identical inputs, no LLM call.
-	cs := HashDiff(m, m)
-	if !cs.Empty() {
-		t.Errorf("identical inputs produced changes: %+v", cs.Changes)
-	}
-}
-
-func TestHashDiffFirstRun(t *testing.T) {
-	cs := HashDiff(nil, map[string]string{"a.go": "h1"})
-	if !cs.FullRebuild {
-		t.Error("FullRebuild = false, want true when there is no baseline")
-	}
-}
-
-func TestHashDiffIsDeterministic(t *testing.T) {
-	before := map[string]string{"z.go": "1", "a.go": "2", "m.go": "3"}
-	after := map[string]string{"z.go": "9", "a.go": "9", "m.go": "9"}
-
-	first := HashDiff(before, after)
-	for range 20 {
-		if got := HashDiff(before, after); !reflect.DeepEqual(got.Changes, first.Changes) {
-			t.Fatal("HashDiff output varies between runs; map iteration order is leaking")
-		}
 	}
 }
 
@@ -229,27 +171,32 @@ func TestRouteNoRootModule(t *testing.T) {
 	}
 }
 
-func TestStaleAdjacentDoesNotCascade(t *testing.T) {
-	// Regenerating everything that links to a changed page would rebuild the
-	// whole wiki on any commit, so these are reported, not regenerated.
-	related := map[string][]string{
-		"alpha":     {"beta"},
-		"gamma":     {"alpha"},
-		"unrelated": {"delta"},
-	}
-	dirty := map[string]bool{"beta": true}
-
-	got := StaleAdjacent(related, dirty)
-	if want := []string{"alpha"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("StaleAdjacent = %v, want %v (gamma is two hops away and must not be included)", got, want)
-	}
+func containsKey(keys []Key, want Key) bool {
+	return slices.Contains(keys, want)
 }
 
-func containsKey(keys []Key, want Key) bool {
-	for _, k := range keys {
-		if k == want {
-			return true
+func TestRouteDocSectionsRideWithParent(t *testing.T) {
+	// Sections are spans of the parent file with no path of their own, so
+	// routing the document must route them too; the hash gate afterwards
+	// drops the chapters that did not change.
+	r := Router{
+		DocPaths: map[string]Key{"book.md": DocKey("book.md")},
+		DocSections: map[Key][]Key{
+			DocKey("book.md"): {Key("doc:book.md#one"), Key("doc:book.md#two")},
+		},
+	}
+
+	plan := r.Route(ChangeSet{Changes: []Change{{Path: "book.md", Kind: Modified}}})
+	for _, want := range []Key{DocKey("book.md"), "doc:book.md#one", "doc:book.md#two"} {
+		if !containsKey(plan.Dirty, want) {
+			t.Errorf("change to the parent did not route %s; dirty = %v", want, plan.Dirty)
 		}
 	}
-	return false
+
+	full := r.Route(ChangeSet{FullRebuild: true})
+	for _, want := range []Key{"doc:book.md#one", "doc:book.md#two"} {
+		if !containsKey(full.Dirty, want) {
+			t.Errorf("full rebuild did not route section %s", want)
+		}
+	}
 }

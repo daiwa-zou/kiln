@@ -109,4 +109,5 @@ const (
 	StatusNoChanges  = "no_changes"
 	StatusPartial    = "partial"
 	StatusOverBudget = "over_budget"
+	StatusCanceled   = "canceled"
 )

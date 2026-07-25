@@ -23,7 +23,11 @@ func New(cfg *config.Config) (Runner, error) {
 		}), nil
 
 	case config.RunnerCLI:
-		return NewClaudeRunner(cfg.Agent.Binary), nil
+		r := NewClaudeRunner(cfg.Agent.Binary)
+		// The subprocess reads untrusted source content; give it an explicit
+		// minimal environment so it can never inherit KILN_* secrets.
+		r.Env = MinimalChildEnv(cfg.Secrets.AnthropicAPIKey)
+		return r, nil
 
 	default:
 		return nil, fmt.Errorf("agent: unknown runner %q", cfg.Agent.Runner)
@@ -36,4 +40,13 @@ func New(cfg *config.Config) (Runner, error) {
 func WritesFiles(r Runner) bool {
 	_, isCLI := r.(*ClaudeRunner)
 	return isCLI
+}
+
+// EstimatesCost reports whether a runner's TotalCostUSD comes from the local
+// pricing table rather than being reported authoritatively by the CLI. Budget
+// enforcement needs to know: an estimated cost of zero means "unknown model",
+// not "free".
+func EstimatesCost(r Runner) bool {
+	_, isAPI := r.(*APIRunner)
+	return isAPI
 }

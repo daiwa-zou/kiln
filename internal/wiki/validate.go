@@ -33,6 +33,11 @@ type ValidateOptions struct {
 	// KnownSlugs are pages that already exist or are being written in this same
 	// batch, used to resolve wikilinks.
 	KnownSlugs map[string]bool
+	// ExistingBySlug maps a live page's slug to its path. The database keys
+	// pages by (wiki, slug), so a batch page reusing an existing slug at a
+	// different path would silently overwrite that row on import; it is
+	// rejected here instead.
+	ExistingBySlug map[string]string
 	// MaxUnresolvedLinks tolerated before the page is rejected outright. A
 	// couple of dangling links are pruned and reported; many mean the agent
 	// invented a structure that does not exist.
@@ -186,6 +191,10 @@ func ValidateBatch(pages []*Page, opts ValidateOptions) []Violation {
 	opts.KnownSlugs = known
 
 	seen := make(map[string]bool, len(pages))
+	// Slug is the page's database identity, so a duplicate slug is a data-loss
+	// bug even when the paths differ: the second upsert would silently rewrite
+	// the first row.
+	seenSlug := make(map[string]string, len(pages))
 	var out []Violation
 
 	for _, p := range pages {
@@ -194,6 +203,19 @@ func ValidateBatch(pages []*Page, opts ValidateOptions) []Violation {
 			continue
 		}
 		seen[p.Path] = true
+
+		if first, dup := seenSlug[p.Slug]; dup {
+			out = append(out, Violation{Path: p.Path, Reason: fmt.Sprintf(
+				"slug %q collides with %s in the same batch; page names must be unique across all type directories", p.Slug, first)})
+			continue
+		}
+		seenSlug[p.Slug] = p.Path
+
+		if existing, ok := opts.ExistingBySlug[p.Slug]; ok && existing != p.Path {
+			out = append(out, Violation{Path: p.Path, Reason: fmt.Sprintf(
+				"slug %q already belongs to existing page %s; pick a distinct name or write to that path", p.Slug, existing)})
+		}
+
 		out = append(out, ValidatePage(p, opts)...)
 	}
 	return out

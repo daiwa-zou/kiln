@@ -23,12 +23,33 @@ type Config struct {
 	HTTPAddr  string `mapstructure:"http_addr"`
 	PublicURL string `mapstructure:"public_url"`
 	LogLevel  string `mapstructure:"log_level"`
+	// CORSOrigins are browser origins allowed to call the API, for a
+	// separately hosted frontend. Empty means same-origin only.
+	CORSOrigins []string `mapstructure:"cors_origins"`
 
 	Database Database `mapstructure:"database"`
 	Storage  Storage  `mapstructure:"storage"`
 	Agent    Agent    `mapstructure:"agent"`
-	Worker   Worker   `mapstructure:"worker"`
+	Auth     Auth     `mapstructure:"auth"`
 	Secrets  Secrets  `mapstructure:"-"`
+}
+
+// AuthMode selects how the HTTP API authenticates callers.
+type AuthMode string
+
+const (
+	// AuthToken requires a bearer token from the tokens table on every API
+	// request. This is the default: a team deployment must opt out of
+	// authentication deliberately, never arrive without it by omission.
+	AuthToken AuthMode = "token"
+	// AuthNone disables authentication. Only defensible for a single-user
+	// instance bound to localhost.
+	AuthNone AuthMode = "none"
+)
+
+// Auth holds API authentication settings.
+type Auth struct {
+	Mode AuthMode `mapstructure:"mode"`
 }
 
 // Database holds Postgres connection and pool settings.
@@ -118,13 +139,6 @@ type Agent struct {
 	// WarnTurns triggers a log warning; the installed claude CLI has no
 	// --max-turns, so wall-clock capping is done with Timeout instead.
 	WarnTurns int `mapstructure:"warn_turns"`
-}
-
-// Worker holds job execution settings.
-type Worker struct {
-	Concurrency   int           `mapstructure:"concurrency"`
-	SweepInterval time.Duration `mapstructure:"sweep_interval"`
-	SweepJitter   time.Duration `mapstructure:"sweep_jitter"`
 }
 
 // Secrets holds values that must never be logged or serialized. They are kept

@@ -8,25 +8,23 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/daiwa-zou/kiln/internal/api"
+	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
 
 func newServeCmd(g *globalFlags) *cobra.Command {
-	var (
-		addr       string
-		withWorker bool
-	)
+	var addr string
 
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the API and the reading UI",
 		Long: `Runs the HTTP API and the embedded UI.
 
---with-worker also runs the job worker in this process, which is the single
-binary mode for a small deployment. At larger scale the worker runs as its own
-replicas against the same queue.`,
+The API requires a bearer token by default (mint one with
+"kiln admin token create"); set auth.mode = "none" to opt out on a
+single-user localhost deployment.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
@@ -55,19 +53,19 @@ replicas against the same queue.`,
 			}
 
 			srv := &api.Server{
-				Store: store.NewJobStore(db.Pool),
-				DB:    db,
-				Log:   log,
+				Store:       store.NewWikiStore(db.Pool),
+				DB:          db,
+				Log:         log,
+				CORSOrigins: cfg.CORSOrigins,
+			}
+			if cfg.Auth.Mode == config.AuthNone {
+				log.Warn("API authentication is disabled (auth.mode = none); every workspace is readable by anyone who can reach this port")
+			} else {
+				srv.Auth = &auth.Middleware{Source: &auth.PGSource{Pool: db.Pool}, Log: log}
 			}
 
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "kiln %s listening on %s\n", observability.Version, cfg.HTTPAddr)
-			if withWorker {
-				// The worker loop lands with the job queue; today builds are
-				// driven by `kiln build`, so this flag currently only affects
-				// what the process reports.
-				fmt.Fprintln(out, "  worker: in-process")
-			}
 			fmt.Fprintln(out, "  press ctrl-c to stop")
 
 			return srv.Serve(ctx, cfg.HTTPAddr)
@@ -75,7 +73,6 @@ replicas against the same queue.`,
 	}
 
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address (overrides config)")
-	cmd.Flags().BoolVar(&withWorker, "with-worker", false, "also run the job worker in this process")
 
 	return cmd
 }

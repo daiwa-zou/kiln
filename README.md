@@ -29,12 +29,17 @@ run, so navigation can't drift.
 
 ## Architecture
 
-Modular monolith plus a worker pool. One Go binary with two roles (`kiln serve`, `kiln worker`)
-against Postgres, and a Next.js frontend in its own container. Scale by adding workers.
+Modular monolith: one Go binary against Postgres. `kiln serve` runs the HTTP API and the
+embedded reading UI; `kiln build` runs the generation pipeline against a local directory.
+The API requires a bearer token by default — mint one with `kiln admin token create`.
+
+Planned, not yet built: a queue-backed `kiln worker` role (so builds are schedulable
+server-side and scale by adding workers) and a Next.js frontend in its own container.
 
 ## Development
 
-Requires Go 1.24, Postgres 16, and the `claude` CLI on `PATH`.
+Requires Go 1.25 and Postgres 16. The `claude` CLI is only needed when
+`agent.runner = "cli"`; the default runner calls the Anthropic API directly.
 
 ```bash
 make test              # hermetic: unit + golden tests, no network, no database

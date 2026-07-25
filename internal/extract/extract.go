@@ -168,7 +168,19 @@ func (p *PassthroughExtractor) Handles(f Format) bool {
 func (p *PassthroughExtractor) Available() bool { return true }
 func (p *PassthroughExtractor) Tool() string    { return "passthrough" }
 
+// MaxExtractBytes caps how much text one document may contribute. The full
+// text is held in memory through mapping and staging, so an unbounded read is
+// how a single oversized upload takes down a worker.
+const MaxExtractBytes = 32 << 20 // 32 MiB
+
 func (p *PassthroughExtractor) Extract(_ context.Context, path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Size() > MaxExtractBytes {
+		return "", fmt.Errorf("extract: %s is %d bytes, above the %d-byte limit", path, info.Size(), MaxExtractBytes)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
@@ -231,8 +243,10 @@ func (p *PandocExtractor) binary() string {
 
 func (p *PandocExtractor) Extract(ctx context.Context, path string) (string, error) {
 	// GitHub-flavored markdown without wrapping: hard-wrapped output would make
-	// every later diff noisy for no benefit.
-	return runTool(ctx, p.binary(), p.Timeout, "-t", "gfm", "--wrap=none", path)
+	// every later diff noisy for no benefit. --sandbox because the inputs are
+	// untrusted documents: it disables pandoc's file inclusion and network
+	// access from within a document.
+	return runTool(ctx, p.binary(), p.Timeout, "--sandbox", "-t", "gfm", "--wrap=none", path)
 }
 
 func runTool(ctx context.Context, binary string, timeout time.Duration, args ...string) (string, error) {

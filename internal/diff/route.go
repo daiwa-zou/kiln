@@ -14,6 +14,11 @@ type Router struct {
 	ModuleDirs map[string]Key
 	// DocPaths maps a repo-relative document path to its cache key.
 	DocPaths map[string]Key
+	// DocSections maps a document's cache key to the keys of its section
+	// units. Sections have no path of their own -- they are spans of the
+	// parent -- so they are routed whenever the parent is, and the hash gate
+	// then drops the chapters that did not change.
+	DocSections map[Key][]Key
 	// Cosmetic paths are indexed but never trigger a rebuild on their own.
 	Cosmetic func(path string) bool
 }
@@ -64,13 +69,21 @@ func (r Router) Route(cs ChangeSet) Plan {
 		}
 		reasons[k] = append(reasons[k], reason)
 	}
+	// A document's sections ride along with it: they are spans of the same
+	// file, so any reason that dirties the parent dirties them as candidates.
+	markDoc := func(k Key, reason string) {
+		mark(k, reason)
+		for _, s := range r.DocSections[k] {
+			mark(s, reason)
+		}
+	}
 
 	if cs.FullRebuild {
 		for _, k := range r.ModuleDirs {
 			mark(k, "full rebuild")
 		}
 		for _, k := range r.DocPaths {
-			mark(k, "full rebuild")
+			markDoc(k, "full rebuild")
 		}
 		mark(ArchOverview, "full rebuild")
 		return finish(reasons)
@@ -83,7 +96,7 @@ func (r Router) Route(cs ChangeSet) Plan {
 
 		// A document routes only to its own page: cheap and isolated.
 		if k, ok := r.DocPaths[c.Path]; ok {
-			mark(k, string(c.Kind)+" "+c.Path)
+			markDoc(k, string(c.Kind)+" "+c.Path)
 			continue
 		}
 
@@ -155,31 +168,4 @@ func longestPrefix(dirs []string, file string) string {
 		}
 	}
 	return ""
-}
-
-// StaleAdjacent returns pages that reference a dirty page but are not
-// themselves regenerated.
-//
-// These are deliberately not added to the dirty set. Regenerating every page
-// that merely links to a changed one cascades until the whole wiki rebuilds on
-// any commit; instead their inbound links are re-validated in the post-pass.
-func StaleAdjacent(related map[string][]string, dirtySlugs map[string]bool) []string {
-	seen := map[string]bool{}
-	var out []string
-
-	for slug, refs := range related {
-		if dirtySlugs[slug] {
-			continue
-		}
-		for _, ref := range refs {
-			if dirtySlugs[ref] && !seen[slug] {
-				seen[slug] = true
-				out = append(out, slug)
-				break
-			}
-		}
-	}
-
-	sort.Strings(out)
-	return out
 }

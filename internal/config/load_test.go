@@ -56,7 +56,7 @@ func TestLoadEnvOverridesDefaults(t *testing.T) {
 	t.Setenv("KILN_HTTP_ADDR", ":9999")
 	t.Setenv("KILN_DATABASE_MAX_CONNS", "42")
 	t.Setenv("KILN_AGENT_MODEL", "opus")
-	t.Setenv("KILN_WORKER_CONCURRENCY", "8")
+	t.Setenv("KILN_AUTH_MODE", "none")
 
 	cfg, err := Load(Options{})
 	if err != nil {
@@ -72,8 +72,8 @@ func TestLoadEnvOverridesDefaults(t *testing.T) {
 	if cfg.Agent.Model != "opus" {
 		t.Errorf("agent model = %q, want opus", cfg.Agent.Model)
 	}
-	if cfg.Worker.Concurrency != 8 {
-		t.Errorf("concurrency = %d, want 8", cfg.Worker.Concurrency)
+	if cfg.Auth.Mode != AuthNone {
+		t.Errorf("auth mode = %q, want none", cfg.Auth.Mode)
 	}
 }
 
@@ -197,7 +197,7 @@ func TestValidateReportsAllProblemsAtOnce(t *testing.T) {
 		Database: Database{Host: "", Port: 0, Name: "", MaxConns: 0, MinConns: -1},
 		Storage:  Storage{Backend: "elsewhere"},
 		Agent:    Agent{Binary: "", Timeout: 0, MaxPagesPerRun: 0},
-		Worker:   Worker{Concurrency: 0},
+		Auth:     Auth{Mode: "carrier-pigeon"},
 	}
 
 	err := cfg.Validate()
@@ -210,7 +210,7 @@ func TestValidateReportsAllProblemsAtOnce(t *testing.T) {
 
 	// Fixing configuration one error per container restart is miserable, so
 	// every problem must be reported in a single pass.
-	for _, want := range []string{"http_addr", "database", "storage", "agent", "worker"} {
+	for _, want := range []string{"http_addr", "database", "storage", "agent", "auth"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing mention of %q:\n%v", want, err)
 		}
@@ -224,7 +224,6 @@ func TestValidateStorageCredentialPairing(t *testing.T) {
 			Database: Database{Host: "h", Port: 5432, Name: "kiln", MaxConns: 10, MinConns: 2},
 			Storage:  Storage{Backend: BackendS3, Bucket: "kiln"},
 			Agent:    Agent{Binary: "claude", Timeout: time.Minute, MaxPagesPerRun: 12},
-			Worker:   Worker{Concurrency: 1, SweepInterval: time.Hour, SweepJitter: time.Minute},
 		}
 	}
 
@@ -249,17 +248,4 @@ func TestValidateStorageCredentialPairing(t *testing.T) {
 			t.Error("Validate passed with an access key and no secret key")
 		}
 	})
-}
-
-func TestValidateSweepJitterMustBeSmallerThanInterval(t *testing.T) {
-	c := &Config{
-		Role: RoleServer, HTTPAddr: ":8080",
-		Database: Database{Host: "h", Port: 5432, Name: "kiln", MaxConns: 10, MinConns: 2},
-		Storage:  Storage{Backend: BackendFS, Path: "/tmp/blobs"},
-		Agent:    Agent{Binary: "claude", Timeout: time.Minute, MaxPagesPerRun: 12},
-		Worker:   Worker{Concurrency: 1, SweepInterval: time.Hour, SweepJitter: 2 * time.Hour},
-	}
-	if err := c.Validate(); err == nil {
-		t.Error("Validate passed with jitter larger than the sweep interval")
-	}
 }

@@ -19,7 +19,9 @@ type Cascade struct {
 	// RegeneratePages are shared pages that survive but whose prose still
 	// describes the departed source.
 	RegeneratePages []string
-	// DeleteBlobs are blobs no remaining source references.
+	// DeleteBlobs are blobs no remaining source references. Consumed by the
+	// object-storage subsystem when it lands; until then the field is data,
+	// computed and tested but with no side effect.
 	DeleteBlobs []string
 	// DropSources are the source keys to remove.
 	DropSources []Key
@@ -94,20 +96,6 @@ func (c Cascade) Empty() bool {
 // PageCount is how many pages would be removed, which is the number a deletion
 // review shows the user before they confirm.
 func (c Cascade) PageCount() int { return len(c.DeletePages) }
-
-// StripSource removes a source key from a page's frontmatter sources list.
-func StripSource(sources []string, key string) []string {
-	out := make([]string, 0, len(sources))
-	for _, s := range sources {
-		if s != key {
-			out = append(out, s)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
 
 func sortedKeys(m map[string]bool) []string {
 	if len(m) == 0 {

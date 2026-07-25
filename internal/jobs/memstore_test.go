@@ -9,8 +9,11 @@ import (
 )
 
 // memStore is an in-memory Store for testing the pipeline without Postgres.
-// It mirrors the real semantics that matter: soft deletion, source records
-// gating regeneration, and imports being all-or-nothing.
+// It mirrors the real semantics that matter, because the pipeline suite runs
+// only against this fake: slug is the page identity (Postgres keys pages by
+// (wiki, slug), so a same-slug write replaces the row whatever its path),
+// deletion matches slug as well as path, artifacts are stored with
+// replace/append semantics, and imports are all-or-nothing.
 type memStore struct {
 	mu sync.Mutex
 
@@ -18,11 +21,15 @@ type memStore struct {
 	pages    map[string]wiki.Page
 	steering Steering
 
+	index    string
+	overview string
+	log      string
+
 	imports []ImportRequest
 	runs    []RunSummary
 
-	// failImport makes Import return an error, to prove nothing is recorded
-	// when the commit fails.
+	// failImport makes Import return an error, to prove the run is still
+	// ledgered as failed when the commit does not land.
 	failImport error
 }
 
@@ -70,16 +77,46 @@ func (m *memStore) Import(_ context.Context, in ImportRequest) error {
 	}
 
 	for _, p := range in.UpsertPages {
+		// Postgres upserts ON CONFLICT (wiki_id, slug): a page reusing an
+		// existing slug replaces that row even when its path moved.
+		for path, existing := range m.pages {
+			if existing.Slug == p.Slug && path != p.Path {
+				delete(m.pages, path)
+			}
+		}
 		m.pages[p.Path] = p
 	}
 	for _, path := range in.SoftDeletePages {
-		delete(m.pages, path)
+		// The real store matches slug as well as path, so a page whose type
+		// change moved it still deletes.
+		slug := wiki.SlugFromPath(path)
+		for existingPath, existing := range m.pages {
+			if existingPath == path || existing.Slug == slug {
+				delete(m.pages, existingPath)
+			}
+		}
 	}
 	for _, s := range in.UpsertSources {
 		m.sources[s.Key] = s
 	}
 	for _, k := range in.DropSources {
 		delete(m.sources, k)
+	}
+
+	// Artifacts mirror writeArtifacts: index and overview replaced wholesale,
+	// the log appended.
+	if in.Index != "" {
+		m.index = in.Index
+	}
+	if in.Overview != "" {
+		m.overview = in.Overview
+	}
+	if in.LogEntry != "" {
+		if m.log == "" {
+			m.log = wiki.LogHeader + "\n\n" + in.LogEntry
+		} else {
+			m.log += "\n" + in.LogEntry
+		}
 	}
 
 	m.imports = append(m.imports, in)

@@ -117,9 +117,6 @@ func (f Frontmatter) Render() string {
 	return b.String()
 }
 
-// Today returns the current date in frontmatter format.
-func Today() string { return time.Now().UTC().Format(DateFormat) }
-
 // ValidDate reports whether s is a well-formed frontmatter date.
 func ValidDate(s string) bool {
 	_, err := time.Parse(DateFormat, s)

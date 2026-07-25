@@ -2,6 +2,8 @@ package docmap
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -206,8 +208,17 @@ func TestMapperSatisfiesTheInterface(t *testing.T) {
 }
 
 func TestMapViaSourceSet(t *testing.T) {
+	// Map reads the staged text off disk -- that read is what lets a long
+	// document split into sections on the generic path.
+	root := t.TempDir()
+	long := "# One\n\n" + strings.Repeat("alpha content here. ", 800) +
+		"\n\n# Two\n\n" + strings.Repeat("beta content here. ", 800)
+	if err := os.WriteFile(filepath.Join(root, "a.md"), []byte(long), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	set := &mapper.SourceSet{
-		Root: "/docs",
+		Root: root,
 		Kind: "upload",
 		Items: []mapper.SourceItem{
 			{Key: "doc:a.md", Path: "a.md", Title: "A", Hash: "h1"},
@@ -218,8 +229,14 @@ func TestMapViaSourceSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Map: %v", err)
 	}
-	if len(wm.Units) != 1 || wm.Units[0].Key != "doc:a.md" {
-		t.Errorf("units = %+v", wm.Units)
+	if len(wm.Units) != 3 || wm.Units[0].Key != "doc:a.md" {
+		t.Errorf("units = %+v, want the whole doc plus two sections", unitKeys(wm))
+	}
+
+	// A missing staged file is an error, not a silently empty document.
+	set.Items[0].Path = "missing.md"
+	if _, err := testMapper().Map(context.Background(), set); err == nil {
+		t.Error("Map succeeded with unreadable staged text")
 	}
 }
 

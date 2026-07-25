@@ -26,7 +26,10 @@ const (
 // Request is one claude invocation.
 type Request struct {
 	Step Step
-	// SessionID ties analyze and generate together. Generate resumes it.
+	// SessionID ties analyze and generate together on the CLI runner, which
+	// resumes the session. The API runner is stateless and ignores it; the
+	// pipeline compensates by passing the analysis plan explicitly in the
+	// generate prompt.
 	SessionID string
 	// WorkDir is the process working directory: the materialized sources. The
 	// installed CLI has no --cwd flag, so this is set on the command itself.
@@ -36,7 +39,9 @@ type Request struct {
 
 	Model         string
 	FallbackModel string
-	// BudgetUSD caps spend via --max-budget-usd, enforced by the CLI itself.
+	// BudgetUSD caps spend. The CLI enforces it itself via --max-budget-usd;
+	// the API runner can only measure after the fact and sets
+	// Result.OverBudget for the pipeline to surface.
 	BudgetUSD float64
 	// Timeout bounds wall-clock. The installed CLI has no --max-turns, so this
 	// is the only hard stop on a runaway session.
@@ -86,6 +91,10 @@ type Result struct {
 
 	// Model names the model that actually served the request.
 	Model string `json:"model,omitempty"`
+	// OverBudget marks a call whose cost exceeded its per-call budget. The CLI
+	// enforces its budget itself; the API runner can only measure after the
+	// fact, so this is a flag for the pipeline to surface, not a hard stop.
+	OverBudget bool `json:"-"`
 	// Generation is set by runners that return page content as structured data
 	// rather than writing files. ClaudeRunner leaves it nil and the pipeline
 	// collects from the scratch directory instead; APIRunner populates it and
@@ -97,9 +106,10 @@ type Result struct {
 	Analysis *AnalysisResult `json:"-"`
 }
 
-// PermissionDenial records a tool call the sandbox or hooks refused. These are
-// surfaced on the run rather than swallowed: a denial usually means the agent
-// tried to do something the design forbids, which is worth seeing.
+// PermissionDenial records a tool call the sandbox or hooks refused. The
+// pipeline logs these per unit rather than swallowing them: a denial usually
+// means the agent tried to do something the design forbids, which is worth
+// seeing.
 type PermissionDenial struct {
 	ToolName string `json:"tool_name"`
 	Reason   string `json:"reason,omitempty"`

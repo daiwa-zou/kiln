@@ -157,22 +157,51 @@ func schemaFor(req Request) map[string]any {
 
 // send streams when the output ceiling is high enough that a non-streaming
 // request would risk an HTTP timeout.
+//
+// The SDK retries HTTP-level failures (429s, 5xxs) itself; what it cannot
+// retry is a stream that dies mid-response, because partial output has no
+// resume point. Those are retried here from scratch -- a network blip should
+// cost one extra call, not the whole unit.
 func (r *APIRunner) send(ctx context.Context, params anthropic.MessageNewParams, maxTokens int64) (*anthropic.Message, error) {
 	if maxTokens <= streamingThreshold {
 		return r.client.Messages.New(ctx, params)
 	}
 
-	stream := r.client.Messages.NewStreaming(ctx, params)
-	msg := anthropic.Message{}
-	for stream.Next() {
-		if err := msg.Accumulate(stream.Current()); err != nil {
-			return nil, fmt.Errorf("accumulate stream: %w", err)
+	const streamAttempts = 3
+	var lastErr error
+	for attempt := range streamAttempts {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, lastErr
+			case <-time.After(time.Duration(attempt) * 2 * time.Second):
+			}
 		}
+
+		stream := r.client.Messages.NewStreaming(ctx, params)
+		msg := anthropic.Message{}
+		accumulated := true
+		for stream.Next() {
+			if err := msg.Accumulate(stream.Current()); err != nil {
+				lastErr = fmt.Errorf("accumulate stream: %w", err)
+				accumulated = false
+				break
+			}
+		}
+		if !accumulated {
+			continue
+		}
+		if err := stream.Err(); err != nil {
+			if ctx.Err() != nil {
+				// Cancellation and timeouts are not transient; stop retrying.
+				return nil, err
+			}
+			lastErr = err
+			continue
+		}
+		return &msg, nil
 	}
-	if err := stream.Err(); err != nil {
-		return nil, err
-	}
-	return &msg, nil
+	return nil, fmt.Errorf("stream failed after %d attempts: %w", streamAttempts, lastErr)
 }
 
 func (r *APIRunner) buildResult(req Request, msg *anthropic.Message, model string, start time.Time) (*Result, error) {
@@ -190,7 +219,18 @@ func (r *APIRunner) buildResult(req Request, msg *anthropic.Message, model strin
 			CacheReadInputTokens:     int(msg.Usage.CacheReadInputTokens),
 		},
 	}
-	res.TotalCostUSD = EstimateCostUSD(model, res.Usage)
+	// Price the model that actually served the request; a fallback-served
+	// response priced at the requested model's rate would be wrong in both
+	// directions. The requested id is only used when the served id is missing
+	// or unknown to the table.
+	priced := string(msg.Model)
+	if !KnownModel(priced) {
+		priced = model
+	}
+	res.TotalCostUSD = EstimateCostUSD(priced, res.Usage)
+	if req.BudgetUSD > 0 && res.TotalCostUSD > req.BudgetUSD {
+		res.OverBudget = true
+	}
 
 	// A refusal arrives as a successful HTTP response, so checking the transport
 	// alone would treat a declined request as a completed one.

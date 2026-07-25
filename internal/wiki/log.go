@@ -40,24 +40,6 @@ func RenderLogEntry(e LogEntry) string {
 	return b.String()
 }
 
-// AppendLogEntry adds an entry to an existing log, seeding the header when the
-// log is new. The log is append-only: history is never rewritten, because it is
-// the record of how the wiki reached its current state.
-func AppendLogEntry(existing string, e LogEntry) string {
-	var b strings.Builder
-
-	trimmed := strings.TrimRight(existing, "\n")
-	if strings.TrimSpace(trimmed) == "" {
-		b.WriteString(LogHeader + "\n")
-	} else {
-		b.WriteString(trimmed + "\n")
-	}
-
-	b.WriteString("\n")
-	b.WriteString(RenderLogEntry(e))
-	return b.String()
-}
-
 // SummarizeChanges builds the standard bullet lines for a build entry. Counts
 // of zero are omitted so an entry states only what actually happened.
 func SummarizeChanges(created, updated, deleted int) []string {

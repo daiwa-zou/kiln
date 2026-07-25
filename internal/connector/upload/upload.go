@@ -53,6 +53,10 @@ type SkipReason struct {
 // corrupt PDF in a folder of fifty should not cost the other forty-nine, and
 // the skip is reported so it is visible rather than silent.
 func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) (*connector.SourceSet, error) {
+	// SECURITY: "path" may name any directory the process can read. That is
+	// fine while only the CLI supplies it; the moment connector configs become
+	// API- or database-driven, this is a local-file-inclusion primitive and
+	// needs an allowlist of permitted roots before that ships.
 	root, err := cfg.RequireString("path")
 	if err != nil {
 		return nil, err

@@ -191,27 +191,6 @@ func TestRenderLogEntryGolden(t *testing.T) {
 	assertGolden(t, "log_entry.md", RenderLogEntry(entry))
 }
 
-func TestAppendLogEntryGolden(t *testing.T) {
-	existing := "# Wiki Log\n\n## [2026-07-24] build | watchtower @ a1b2c3d\n\n- Pages: 2 created\n"
-
-	entry := LogEntry{
-		Date: "2026-07-25", Action: "build", Subject: "watchtower", Ref: "7dfadb6",
-		Lines: []string{"Pages: 1 updated"},
-	}
-	assertGolden(t, "log_appended.md", AppendLogEntry(existing, entry))
-}
-
-func TestAppendLogEntrySeedsHeader(t *testing.T) {
-	entry := LogEntry{Date: "2026-07-25", Action: "build", Subject: "kiln", Lines: []string{"Pages: 1 created"}}
-
-	for _, existing := range []string{"", "\n\n", "   \n"} {
-		got := AppendLogEntry(existing, entry)
-		if got[:len(LogHeader)] != LogHeader {
-			t.Errorf("AppendLogEntry(%q) did not seed the header, got:\n%s", existing, got)
-		}
-	}
-}
-
 func TestSummarizeChanges(t *testing.T) {
 	tests := []struct {
 		name                      string

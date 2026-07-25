@@ -49,7 +49,7 @@ func main() {
 	args := os.Args[1:]
 
 	if s.RecordArgsTo != "" {
-		record := map[string]any{"args": args, "cwd": mustGetwd()}
+		record := map[string]any{"args": args, "cwd": mustGetwd(), "env": os.Environ()}
 		if b, err := json.MarshalIndent(record, "", "  "); err == nil {
 			_ = os.WriteFile(s.RecordArgsTo, b, 0o644)
 		}

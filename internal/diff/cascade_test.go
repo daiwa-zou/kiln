@@ -116,25 +116,3 @@ func TestPlanCascadeIsDeterministic(t *testing.T) {
 		}
 	}
 }
-
-func TestStripSource(t *testing.T) {
-	tests := []struct {
-		name    string
-		sources []string
-		key     string
-		want    []string
-	}{
-		{"removes one", []string{"a.pdf", "b.pdf"}, "a.pdf", []string{"b.pdf"}},
-		{"last one yields nil", []string{"a.pdf"}, "a.pdf", nil},
-		{"absent key is a no-op", []string{"a.pdf"}, "z.pdf", []string{"a.pdf"}},
-		{"empty input", nil, "a.pdf", nil},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := StripSource(tt.sources, tt.key); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("StripSource(%v, %q) = %v, want %v", tt.sources, tt.key, got, tt.want)
-			}
-		})
-	}
-}

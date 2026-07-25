@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -12,10 +15,118 @@ import (
 func newAdminCmd(g *globalFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "admin",
-		Short: "Operational commands: migrations, diagnostics, users",
+		Short: "Operational commands: migrations, diagnostics, tokens",
 	}
-	cmd.AddCommand(newMigrateCmd(g), newDoctorCmd(g))
+	cmd.AddCommand(newMigrateCmd(g), newDoctorCmd(g), newTokenCmd(g))
 	return cmd
+}
+
+func newTokenCmd(g *globalFlags) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "token",
+		Short: "Mint and revoke API bearer tokens",
+	}
+
+	var (
+		login  string
+		org    string
+		name   string
+		scopes string
+		admin  bool
+		ttl    time.Duration
+	)
+
+	create := &cobra.Command{
+		Use:   "create",
+		Short: "Mint a bearer token, creating the user and org membership as needed",
+		Long: `Mints a token and prints it exactly once; only its hash is stored. Pass the
+token as "Authorization: Bearer <token>" on API requests, or paste it into the
+reading UI when prompted.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+
+			cfg, err := config.Load(config.Options{File: g.configFile})
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(ctx, cfg)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			plain, err := auth.Mint(ctx, db.Pool, auth.MintRequest{
+				Login:  login,
+				Org:    org,
+				Name:   name,
+				Scopes: splitScopes(scopes),
+				Admin:  admin,
+				TTL:    ttl,
+			})
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "%s\n", plain)
+			fmt.Fprintln(cmd.ErrOrStderr(), "shown once; store it now -- only its hash is kept")
+			return nil
+		},
+	}
+	create.Flags().StringVar(&login, "login", "", "user login the token belongs to (required)")
+	create.Flags().StringVar(&org, "org", "local", "org to grant membership in (empty to skip)")
+	create.Flags().StringVar(&name, "name", "default", "token name, for identification and revocation")
+	create.Flags().StringVar(&scopes, "scopes", "read", "comma-separated scopes")
+	create.Flags().BoolVar(&admin, "admin", false, "grant the user admin (visibility into every org)")
+	create.Flags().DurationVar(&ttl, "ttl", 0, "expiry, e.g. 720h (0 = never)")
+	_ = create.MarkFlagRequired("login")
+
+	var (
+		revokeLogin string
+		revokeName  string
+	)
+	revoke := &cobra.Command{
+		Use:   "revoke",
+		Short: "Revoke a user's named tokens",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+
+			cfg, err := config.Load(config.Options{File: g.configFile})
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(ctx, cfg)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			n, err := auth.Revoke(ctx, db.Pool, revokeLogin, revokeName)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "revoked %d token(s)\n", n)
+			return nil
+		},
+	}
+	revoke.Flags().StringVar(&revokeLogin, "login", "", "user login (required)")
+	revoke.Flags().StringVar(&revokeName, "name", "default", "token name")
+	_ = revoke.MarkFlagRequired("login")
+
+	cmd.AddCommand(create, revoke)
+	return cmd
+}
+
+func splitScopes(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func newMigrateCmd(g *globalFlags) *cobra.Command {

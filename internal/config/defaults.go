@@ -53,9 +53,10 @@ func applyDefaults(v setter, role Role) {
 	v.SetDefault("agent.max_pages_per_run", 12)
 	v.SetDefault("agent.warn_turns", 40)
 
-	v.SetDefault("worker.concurrency", 2)
-	v.SetDefault("worker.sweep_interval", 6*time.Hour)
-	v.SetDefault("worker.sweep_jitter", 20*time.Minute)
+	// Token auth by default: a shared deployment should have to opt out of
+	// authentication deliberately rather than ship open by omission.
+	v.SetDefault("auth.mode", string(AuthToken))
+
 }
 
 func defaultMaxConns(role Role) int32 {

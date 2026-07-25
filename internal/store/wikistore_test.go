@@ -12,13 +12,13 @@ import (
 )
 
 // jobStore returns a store over a freshly migrated schema plus a workspace.
-func jobStore(t *testing.T) (*JobStore, string) {
+func jobStore(t *testing.T) (*WikiStore, string) {
 	t.Helper()
 
 	pool := testPool(t)
 	freshSchema(t, pool)
 
-	js := NewJobStore(pool)
+	js := NewWikiStore(pool)
 	wsID, err := js.EnsureWorkspace(context.Background(), "test-org", "test-ws", "Test Workspace")
 	if err != nil {
 		t.Fatalf("EnsureWorkspace: %v", err)

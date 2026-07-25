@@ -153,11 +153,45 @@
 const $ = (id) => document.getElementById(id);
 const state = { workspace: null, pages: [], slugs: new Set(), view: "overview" };
 
+const TOKEN_KEY = "kiln.token";
+
 const api = async (path) => {
-  const res = await fetch(`/api/v1${path}`);
+  const headers = {};
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`/api/v1${path}`, { headers });
+  if (res.status === 401) {
+    showTokenForm(Boolean(token));
+    const err = new Error("401 unauthorized");
+    err.handled = true; // the form is already on screen; don't overwrite it
+    throw err;
+  }
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 };
+
+// The API requires a bearer token (kiln admin token create). The token lives
+// in localStorage; a rejected one falls back here rather than looping.
+function showTokenForm(hadToken) {
+  $("main").innerHTML = `
+    ${hadToken ? `<div class="banner">That token was rejected. It may be revoked or expired.</div>` : ""}
+    <h1>Sign in</h1>
+    <p class="hint">This kiln requires an access token. Mint one with
+      <code>kiln admin token create --login you</code> and paste it here.
+      It is stored only in this browser.</p>
+    <input id="token-input" type="password" placeholder="kiln_…" aria-label="Access token">
+    <button id="token-save" class="nav-button" style="padding:7px 16px;border:1px solid var(--ember);
+      border-radius:6px;background:var(--ember);color:#fff;cursor:pointer">Save token</button>`;
+  const save = () => {
+    const v = $("token-input").value.trim();
+    if (!v) return;
+    localStorage.setItem(TOKEN_KEY, v);
+    location.reload();
+  };
+  $("token-save").addEventListener("click", save);
+  $("token-input").addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+}
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -280,6 +314,7 @@ async function showPage(slug) {
         <div class="meta">${p.sources.map((s) => `<span class="chip mono">${esc(s)}</span>`).join("")}</div>
       </div>` : ""}`;
   } catch (err) {
+    if (err.handled) return;
     $("main").innerHTML = `<div class="banner">Could not load that page: ${esc(err.message)}</div>`;
   }
 }
@@ -367,6 +402,7 @@ async function boot() {
 
     await loadWorkspace(workspaces[0].slug);
   } catch (err) {
+    if (err.handled) return;
     $("main").innerHTML = `<div class="banner">Could not reach the API: ${esc(err.message)}</div>`;
   }
 }

@@ -14,22 +14,22 @@ import (
 	"github.com/daiwa-zou/kiln/internal/wiki"
 )
 
-// JobStore implements jobs.Store against Postgres.
+// WikiStore implements jobs.Store against Postgres.
 //
 // The interface is declared by the consumer (internal/jobs), so the SQL lives
 // here and the pipeline stays testable against an in-memory fake.
-type JobStore struct {
+type WikiStore struct {
 	pool *pgxpool.Pool
 }
 
-// NewJobStore wraps a pool.
-func NewJobStore(pool *pgxpool.Pool) *JobStore { return &JobStore{pool: pool} }
+// NewWikiStore wraps a pool.
+func NewWikiStore(pool *pgxpool.Pool) *WikiStore { return &WikiStore{pool: pool} }
 
-var _ jobs.Store = (*JobStore)(nil)
+var _ jobs.Store = (*WikiStore)(nil)
 
 // LoadSources returns the live source records for a workspace. These are the
 // baseline for both incremental skip and cascade deletion.
-func (s *JobStore) LoadSources(ctx context.Context, workspaceID string) ([]diff.SourceRecord, error) {
+func (s *WikiStore) LoadSources(ctx context.Context, workspaceID string) ([]diff.SourceRecord, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT key, input_hash, files_written, blob_keys
 		FROM sources
@@ -64,7 +64,7 @@ func (s *JobStore) LoadSources(ctx context.Context, workspaceID string) ([]diff.
 
 // LoadPages returns live pages for a workspace, used to resolve wikilinks and
 // to rebuild the index.
-func (s *JobStore) LoadPages(ctx context.Context, workspaceID string) ([]wiki.Page, error) {
+func (s *WikiStore) LoadPages(ctx context.Context, workspaceID string) ([]wiki.Page, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT p.path, p.slug, p.type, p.title, p.frontmatter, p.body
 		FROM pages p
@@ -106,7 +106,7 @@ func (s *JobStore) LoadPages(ctx context.Context, workspaceID string) ([]wiki.Pa
 // Corrections are what let human knowledge survive regeneration: pages are
 // never hand-edited, so a correction lives outside the page and is re-injected
 // into every prompt that rebuilds it.
-func (s *JobStore) LoadSteering(ctx context.Context, workspaceID string) (jobs.Steering, error) {
+func (s *WikiStore) LoadSteering(ctx context.Context, workspaceID string) (jobs.Steering, error) {
 	out := jobs.Steering{Corrections: map[string][]string{}}
 
 	rows, err := s.pool.Query(ctx,
@@ -159,12 +159,21 @@ func (s *JobStore) LoadSteering(ctx context.Context, workspaceID string) (jobs.S
 // Everything lands in a single transaction on purpose: pages, links, sources,
 // and the revision bump have to agree, or a crash mid-write leaves a wiki whose
 // index describes pages that were never stored.
-func (s *JobStore) Import(ctx context.Context, in jobs.ImportRequest) error {
+func (s *WikiStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin import: %w", err)
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	// One import per workspace at a time. Two concurrent imports would
+	// interleave read-modify-write on pages, links, and artifacts with
+	// last-writer-wins results; the transaction-scoped advisory lock
+	// serializes them and releases automatically on commit or rollback.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('kiln:import:' || $1))`, in.WorkspaceID); err != nil {
+		return fmt.Errorf("store: acquire import lock: %w", err)
+	}
 
 	wikiID, err := ensureWiki(ctx, tx, in.WorkspaceID)
 	if err != nil {
@@ -216,10 +225,13 @@ func (s *JobStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 // is appended, because it is the record of how the wiki reached its current
 // state and rewriting it would erase that.
 func writeArtifacts(ctx context.Context, tx pgx.Tx, wikiID string, in jobs.ImportRequest) error {
-	for kind, body := range map[string]string{
-		"index":    in.Index,
-		"overview": in.Overview,
+	// Fixed order, not a map: concurrent imports taking these row locks in
+	// randomized order is a deadlock waiting for traffic.
+	for _, artifact := range []struct{ kind, body string }{
+		{"index", in.Index},
+		{"overview", in.Overview},
 	} {
+		kind, body := artifact.kind, artifact.body
 		if body == "" {
 			continue
 		}
@@ -249,7 +261,7 @@ func writeArtifacts(ctx context.Context, tx pgx.Tx, wikiID string, in jobs.Impor
 }
 
 // LoadArtifact returns a derived artifact, or empty when it has not been built.
-func (s *JobStore) LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error) {
+func (s *WikiStore) LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error) {
 	var body string
 	err := s.pool.QueryRow(ctx, `
 		SELECT a.body FROM wiki_artifacts a
@@ -265,20 +277,16 @@ func (s *JobStore) LoadArtifact(ctx context.Context, workspaceID, kind string) (
 }
 
 func ensureWiki(ctx context.Context, tx pgx.Tx, workspaceID string) (string, error) {
+	// A single upsert rather than check-then-insert: two concurrent first
+	// builds would otherwise race to the INSERT and one would fail on the
+	// unique constraint. The no-op DO UPDATE exists so RETURNING yields the id
+	// on the conflict path too.
 	var id string
-	err := tx.QueryRow(ctx,
-		`SELECT id FROM wikis WHERE workspace_id = $1`, workspaceID).Scan(&id)
-	if err == nil {
-		return id, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return "", fmt.Errorf("store: find wiki: %w", err)
-	}
-
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO wikis (workspace_id) VALUES ($1) RETURNING id`,
-		workspaceID).Scan(&id); err != nil {
-		return "", fmt.Errorf("store: create wiki: %w", err)
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO wikis (workspace_id) VALUES ($1)
+		ON CONFLICT (workspace_id) DO UPDATE SET workspace_id = EXCLUDED.workspace_id
+		RETURNING id`, workspaceID).Scan(&id); err != nil {
+		return "", fmt.Errorf("store: ensure wiki: %w", err)
 	}
 	return id, nil
 }
@@ -348,13 +356,16 @@ func resolveLinks(ctx context.Context, tx pgx.Tx, wikiID string) error {
 	}
 
 	// A target that has since been deleted must not stay marked resolved.
+	// Scoped to this wiki's own links: without the wiki_id predicate this
+	// statement would scan and lock page_links for every tenant on every import.
 	if _, err := tx.Exec(ctx, `
 		UPDATE page_links l
 		SET to_page_id = NULL, resolved = false
 		WHERE l.resolved
+		  AND l.from_page_id IN (SELECT id FROM pages WHERE wiki_id = $1)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM pages t
-		      WHERE t.id = l.to_page_id AND t.deleted_at IS NULL)`); err != nil {
+		      WHERE t.id = l.to_page_id AND t.deleted_at IS NULL)`, wikiID); err != nil {
 		return fmt.Errorf("store: unresolve dead links: %w", err)
 	}
 	return nil
@@ -364,14 +375,23 @@ func resolveLinks(ctx context.Context, tx pgx.Tx, wikiID string) error {
 //
 // kiln never deletes automatically, and a retention window makes an approved
 // deletion recoverable, so this is a timestamp rather than a DELETE.
+//
+// Matching is by slug, the page's database identity, as well as by the
+// recorded path: a page whose type changed moved directories, and its old
+// source record still names the old path. A path-only match would silently
+// delete nothing.
 func softDeletePages(ctx context.Context, tx pgx.Tx, wikiID string, paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
+	slugs := make([]string, 0, len(paths))
+	for _, p := range paths {
+		slugs = append(slugs, wiki.SlugFromPath(p))
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE pages SET deleted_at = now(), updated_at = now()
-		WHERE wiki_id = $1 AND path = ANY($2) AND deleted_at IS NULL`,
-		wikiID, paths); err != nil {
+		WHERE wiki_id = $1 AND (path = ANY($2) OR slug = ANY($3)) AND deleted_at IS NULL`,
+		wikiID, paths, slugs); err != nil {
 		return fmt.Errorf("store: soft delete pages: %w", err)
 	}
 	return nil
@@ -420,7 +440,7 @@ func dropSources(ctx context.Context, tx pgx.Tx, workspaceID string, keys []diff
 }
 
 // RecordRun persists the run summary and its per-unit outcomes.
-func (s *JobStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
+func (s *WikiStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin run record: %w", err)
@@ -472,7 +492,7 @@ func (s *JobStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 
 // EnsureWorkspace finds or creates the org/workspace/wiki chain for a slug and
 // returns the workspace ID. Used to bootstrap a local build without a UI.
-func (s *JobStore) EnsureWorkspace(ctx context.Context, orgSlug, wsSlug, name string) (string, error) {
+func (s *WikiStore) EnsureWorkspace(ctx context.Context, orgSlug, wsSlug, name string) (string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("store: begin ensure workspace: %w", err)

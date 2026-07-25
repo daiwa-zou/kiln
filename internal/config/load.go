@@ -122,7 +122,7 @@ func searchPaths() []string {
 // keys that are absent from a config file, which is exactly the container case.
 func bindEnv(v *viper.Viper) error {
 	keys := []string{
-		"http_addr", "public_url", "log_level",
+		"http_addr", "public_url", "log_level", "cors_origins",
 		"database.url", "database.host", "database.port", "database.name",
 		"database.user", "database.password", "database.sslmode", "database.sslrootcert",
 		"database.max_conns", "database.min_conns",
@@ -135,7 +135,7 @@ func bindEnv(v *viper.Viper) error {
 		"agent.model", "agent.analyze_model", "agent.fallback_model",
 		"agent.timeout", "agent.analyze_budget_usd", "agent.page_budget_usd",
 		"agent.run_budget_usd", "agent.max_pages_per_run", "agent.warn_turns",
-		"worker.concurrency", "worker.sweep_interval", "worker.sweep_jitter",
+		"auth.mode",
 	}
 	for _, k := range keys {
 		if err := v.BindEnv(k); err != nil {

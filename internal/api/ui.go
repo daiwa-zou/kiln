@@ -3,6 +3,7 @@ package api
 import (
 	_ "embed"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -29,7 +30,7 @@ func mountUI(r chi.Router) {
 	r.Get("/", serve)
 	// Any non-API path renders the app, so deep links to a page work on reload.
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-		if len(req.URL.Path) >= 5 && req.URL.Path[:5] == "/api/" {
+		if strings.HasPrefix(req.URL.Path, "/api/") {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}

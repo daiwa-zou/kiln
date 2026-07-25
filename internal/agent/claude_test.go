@@ -214,6 +214,63 @@ func TestRunSetsWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestRunChildEnvExcludesSecrets(t *testing.T) {
+	// The child processes untrusted source content; a leaked KILN_MASTER_KEY in
+	// its environment would hand the platform's secrets to a prompt injection.
+	t.Setenv("KILN_MASTER_KEY", "leak-me")
+	t.Setenv("KILN_SESSION_SECRET", "leak-me-too")
+
+	record := filepath.Join(t.TempDir(), "argv.json")
+	script, err := json.Marshal(map[string]any{"record_args_to": record})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := MinimalChildEnv("sk-test")
+	// The fake needs its script; the production env never carries it.
+	env = append(env, "KILN_FAKE_SCRIPT="+string(script))
+
+	r := &ClaudeRunner{Binary: fakeClaude(t), Env: env}
+	if _, err := r.Run(context.Background(), analyzeReq(t.TempDir())); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var got struct {
+		Env []string `json:"env"`
+	}
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+
+	sawAPIKey := false
+	for _, kv := range got.Env {
+		if strings.HasPrefix(kv, "KILN_MASTER_KEY=") || strings.HasPrefix(kv, "KILN_SESSION_SECRET=") {
+			t.Errorf("secret leaked into the child environment: %s", kv)
+		}
+		if kv == "ANTHROPIC_API_KEY=sk-test" {
+			sawAPIKey = true
+		}
+	}
+	if !sawAPIKey {
+		t.Error("ANTHROPIC_API_KEY did not reach the child")
+	}
+}
+
+func TestMinimalChildEnvOmitsUnsetKey(t *testing.T) {
+	for _, kv := range MinimalChildEnv("") {
+		if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			t.Errorf("empty key should be omitted, got %s", kv)
+		}
+		if strings.HasPrefix(kv, "KILN_") {
+			t.Errorf("KILN_* variable in minimal env: %s", kv)
+		}
+	}
+}
+
 func TestRunErrorEnvelope(t *testing.T) {
 	setScript(t, map[string]any{
 		"envelope": map[string]any{

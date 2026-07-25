@@ -110,6 +110,48 @@ func TestScanSubPartitionsLargeModule(t *testing.T) {
 	}
 }
 
+func TestScanParentHashExcludesChildFiles(t *testing.T) {
+	// Change attribution routes to the deepest module, so the parent's hash
+	// must cover only files no child claims: otherwise editing a child changes
+	// the parent's hash without the parent ever being routed, and its page
+	// goes permanently stale.
+	files := map[string]string{
+		"go.mod":  "module example.com/big\n\ngo 1.24\n",
+		"main.go": "package main\n\nfunc main() {}\n",
+	}
+	body := strings.Repeat("// filler line\n", SubPartitionMinLOC)
+	files["internal/auth/file.go"] = "package auth\n" + body
+
+	before := scanFixture(t, files)
+
+	// Edit only the child-owned file.
+	files["internal/auth/file.go"] = "package auth\n// changed\n" + body
+	after := scanFixture(t, files)
+
+	parentBefore, parentAfter := moduleBySlug(before, RootModuleSlug), moduleBySlug(after, RootModuleSlug)
+	if parentBefore == nil || parentAfter == nil {
+		t.Fatal("root module missing")
+	}
+	if parentBefore.Hash != parentAfter.Hash {
+		t.Error("parent hash changed on a child-only edit; the parent would go stale unrouted")
+	}
+
+	childBefore, childAfter := moduleBySlug(before, "internal-auth"), moduleBySlug(after, "internal-auth")
+	if childBefore == nil || childAfter == nil {
+		t.Fatal("sub-partition missing")
+	}
+	if childBefore.Hash == childAfter.Hash {
+		t.Error("child hash did not change on a child edit")
+	}
+
+	// A parent-owned edit still moves the parent hash.
+	files["main.go"] = "package main\n\nfunc main() { println() }\n"
+	third := scanFixture(t, files)
+	if p := moduleBySlug(third, RootModuleSlug); p != nil && p.Hash == parentAfter.Hash {
+		t.Error("parent hash ignored an edit to its own file")
+	}
+}
+
 func TestScanDoesNotSubPartitionSmallModule(t *testing.T) {
 	rm := scanFixture(t, map[string]string{
 		"go.mod":                "module example.com/small\n\ngo 1.24\n",

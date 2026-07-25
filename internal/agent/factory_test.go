@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/daiwa-zou/kiln/internal/config"
@@ -38,6 +39,39 @@ func TestNewSelectsRunner(t *testing.T) {
 				t.Errorf("WritesFiles() = %v, want %v", got, tt.wantsFiles)
 			}
 		})
+	}
+}
+
+func TestNewCLIRunnerIsolatesEnvironment(t *testing.T) {
+	t.Setenv("KILN_MASTER_KEY", "leak-me")
+
+	cfg := &config.Config{
+		Agent:   config.Agent{Runner: config.RunnerCLI, Binary: "claude"},
+		Secrets: config.Secrets{AnthropicAPIKey: "sk-test"},
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cli, ok := r.(*ClaudeRunner)
+	if !ok {
+		t.Fatal("expected a ClaudeRunner")
+	}
+	if cli.Env == nil {
+		t.Fatal("factory left Env nil: the child would inherit every KILN_* secret")
+	}
+
+	sawAPIKey := false
+	for _, kv := range cli.Env {
+		if strings.HasPrefix(kv, "KILN_") {
+			t.Errorf("KILN_* variable in the child env: %s", kv)
+		}
+		if kv == "ANTHROPIC_API_KEY=sk-test" {
+			sawAPIKey = true
+		}
+	}
+	if !sawAPIKey {
+		t.Error("configured API key missing from the child env")
 	}
 }
 

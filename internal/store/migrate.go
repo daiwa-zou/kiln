@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -49,14 +50,28 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (applied []int, err error)
 	}
 	defer conn.Release()
 
-	// Hold the lock for the whole run; released implicitly when the session ends.
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrateLockKey); err != nil {
+	// Hold the lock for the whole run; released explicitly below, or with the
+	// session. Bounded acquisition so an operator waiting behind a hung
+	// migration gets a diagnosis instead of an indefinite silent block.
+	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if _, err := conn.Exec(lockCtx, `SELECT pg_advisory_lock($1)`, migrateLockKey); err != nil {
+		if lockCtx.Err() != nil && ctx.Err() == nil {
+			return nil, fmt.Errorf("store: migration lock not acquired within 5m; another migration may be hung: %w", err)
+		}
 		return nil, fmt.Errorf("store: acquire migration lock: %w", err)
 	}
 	defer func() {
 		if _, unlockErr := conn.Exec(context.WithoutCancel(ctx),
-			`SELECT pg_advisory_unlock($1)`, migrateLockKey); unlockErr != nil && err == nil {
-			err = fmt.Errorf("store: release migration lock: %w", unlockErr)
+			`SELECT pg_advisory_unlock($1)`, migrateLockKey); unlockErr != nil {
+			// The session still holds the lock. Close the underlying
+			// connection so Release destroys it instead of returning it to
+			// the pool, where the lock would silently outlive this call and
+			// wedge every later migration.
+			_ = conn.Conn().Close(context.WithoutCancel(ctx))
+			if err == nil {
+				err = fmt.Errorf("store: release migration lock: %w", unlockErr)
+			}
 		}
 	}()
 

@@ -2,10 +2,12 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/daiwa-zou/kiln/internal/agent"
@@ -37,6 +39,9 @@ type Pipeline struct {
 	// MaxRetries is the number of corrective attempts after a validation
 	// failure. The first re-states the errors; the second halves the work.
 	MaxRetries int
+	// WarnTurns logs a warning when a single agent call uses more turns than
+	// this. Zero disables the check.
+	WarnTurns int
 	// Now is injectable so tests can pin dates in frontmatter.
 	Now func() time.Time
 }
@@ -65,6 +70,10 @@ type BuildRequest struct {
 	// is ever deleted without this, because a suspended token and a genuine
 	// deletion look identical at the sync layer.
 	ApprovedDeletions []diff.Key
+
+	// Force skips the content-hash gate so every routed unit regenerates, for
+	// recovering from bad output or a prompt change.
+	Force bool
 
 	// DryRun plans and estimates without invoking the agent at all.
 	DryRun bool
@@ -99,6 +108,10 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		},
 	}
 
+	if err := p.checkBudgetEnforceable(); err != nil {
+		return nil, err
+	}
+
 	sources, err := p.Store.LoadSources(ctx, req.WorkspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("jobs: load sources: %w", err)
@@ -112,9 +125,18 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	// unchanged. This gate is the primary cost control: an unchanged workspace
 	// costs nothing, so sweeps and no-op webhooks are free.
 	plan := req.Router.Route(req.Changes)
-	dirty := p.filterUnchanged(plan.Dirty, req.Map, sources)
+	dirty := plan.Dirty
+	if req.Force {
+		log.Info("hash gate skipped; every routed unit regenerates", "units", len(dirty))
+	} else {
+		dirty = p.filterUnchanged(dirty, req.Map, sources)
+	}
 
 	cascade := diff.PlanCascade(sources, req.ApprovedDeletions)
+	// Pages that survive a deletion but still describe the departed source are
+	// regenerated, not merely kept: leaving them is how a wiki accumulates
+	// confident claims about deleted code.
+	dirty = append(dirty, regenKeysFor(cascade, sources, dirty)...)
 
 	if len(dirty) == 0 && cascade.Empty() {
 		log.Info("nothing to do; no agent calls")
@@ -149,6 +171,16 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	known := knownSlugs(pages)
 	units := unitsByKey(req.Map)
 
+	// Slug is the database's page identity and Created survives regeneration;
+	// both maps are maintained through the loop so a later unit sees pages an
+	// earlier unit just wrote.
+	existingBySlug := make(map[string]string, len(pages))
+	existingCreated := make(map[string]string, len(pages))
+	for _, pg := range pages {
+		existingBySlug[pg.Slug] = pg.Path
+		existingCreated[pg.Slug] = pg.Meta.Created
+	}
+
 	var (
 		written    []wiki.Page
 		newSources []diff.SourceRecord
@@ -160,6 +192,14 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	)
 
 	for _, key := range dirty {
+		if ctx.Err() != nil {
+			// Break rather than fail: units already generated are still valid
+			// and are imported below on an uncancelable context, so a Ctrl-C
+			// costs the remainder of the run, not the work already paid for.
+			log.Warn("run canceled; importing what completed", "cause", ctx.Err())
+			res.Summary.Status = StatusCanceled
+			break
+		}
 		if p.Budget.RunUSD > 0 && spent >= p.Budget.RunUSD {
 			// Stop scheduling rather than failing: work already imported is
 			// good, and the remainder keeps its stale hash so it retries.
@@ -169,13 +209,25 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 			break
 		}
 
+		var remaining float64
+		if p.Budget.RunUSD > 0 {
+			remaining = p.Budget.RunUSD - spent
+		}
+
 		unit := units[string(key)]
 		item := ItemSummary{Key: key, Status: StatusPending}
 
-		out := p.generateUnit(ctx, req, key, unit, steering, known)
+		out := p.generateUnit(ctx, req, key, unit, unitScope{
+			steering:        steering,
+			known:           known,
+			existingBySlug:  existingBySlug,
+			existingCreated: existingCreated,
+			remainingUSD:    remaining,
+		})
 		spent += out.CostUSD
 		item.CostUSD = out.CostUSD
 		item.Turns = out.Turns
+		res.Summary.Tokens += out.Tokens
 
 		switch {
 		case out.Err != nil:
@@ -193,14 +245,23 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 			findings = append(findings, out.Findings...)
 
 			// The source record is only updated on success, so a failed unit
-			// keeps its old hash and is retried on the next run.
+			// keeps its old hash and is retried on the next run. The
+			// architecture synthesis has no unit of its own; the whole-map
+			// hash is its input, and recording it is what makes an unchanged
+			// repeat build genuinely free.
+			hash := unit.Hash
+			if key == diff.ArchOverview {
+				hash = req.Map.Hash
+			}
 			newSources = append(newSources, diff.SourceRecord{
 				Key:          key,
-				InputHash:    unit.Hash,
+				InputHash:    hash,
 				FilesWritten: pagePaths(out.Pages),
 			})
 			for _, pg := range out.Pages {
 				known[pg.Slug] = true
+				existingBySlug[pg.Slug] = pg.Path
+				existingCreated[pg.Slug] = pg.Meta.Created
 			}
 		}
 
@@ -233,7 +294,12 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		Lines:   buildLogLines(res.Summary, spent),
 	})
 
-	if err := p.Store.Import(ctx, ImportRequest{
+	// Import and the run record survive cancellation: the money is already
+	// spent, so a canceled run must still persist what it produced and what it
+	// cost.
+	importCtx := context.WithoutCancel(ctx)
+
+	if err := p.Store.Import(importCtx, ImportRequest{
 		WorkspaceID:     req.WorkspaceID,
 		RunID:           req.RunID,
 		UpsertPages:     written,
@@ -244,13 +310,46 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		Overview:        overview,
 		LogEntry:        logEntry,
 	}); err != nil {
+		// The agent calls above are already billed; a run that fails at import
+		// must still be ledgered or budget windows undercount forever.
+		res.Summary.Status = StatusFailed
+		res.Summary.Err = "import: " + err.Error()
+		if rerr := p.Store.RecordRun(importCtx, res.Summary); rerr != nil {
+			log.Error("run could not be ledgered after import failure", "err", rerr)
+		}
 		return nil, fmt.Errorf("jobs: import: %w", err)
 	}
 
 	if res.Summary.Status == StatusRunning {
 		res.Summary.Status = runStatus(res.Summary.Items)
 	}
-	return res, p.Store.RecordRun(ctx, res.Summary)
+	if res.Summary.Err == "" && res.Summary.Status != StatusSucceeded && res.Summary.Status != StatusNoChanges {
+		for _, it := range res.Summary.Items {
+			if it.Err != "" {
+				res.Summary.Err = fmt.Sprintf("%s: %s", it.Key, it.Err)
+				break
+			}
+		}
+	}
+	return res, p.Store.RecordRun(importCtx, res.Summary)
+}
+
+// checkBudgetEnforceable refuses to start a budgeted run whose costs would
+// estimate to zero. On runners that estimate from the pricing table, an
+// unknown model id prices every call at $0 and silently disables the budget --
+// the opposite of what configuring a budget asked for. CLI-reported costs are
+// authoritative, so the check does not apply there.
+func (p *Pipeline) checkBudgetEnforceable() error {
+	if p.Budget.RunUSD <= 0 || !agent.EstimatesCost(p.Runner) {
+		return nil
+	}
+	for _, m := range []string{p.Model, p.AnalyzeModel, p.FallbackModel} {
+		if m != "" && !agent.KnownModel(m) {
+			return fmt.Errorf(
+				"jobs: run budget cannot be enforced: model %q has no pricing entry (fix the model id or add pricing)", m)
+		}
+	}
+	return nil
 }
 
 // filterUnchanged drops units whose content hash matches what the last
@@ -264,10 +363,20 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 
 	out := make([]diff.Key, 0, len(dirty))
 	for _, k := range dirty {
-		unit, ok := units[string(k)]
-		// Units with no hash (the architecture synthesis) always regenerate
-		// when routed, since their input is the whole map.
-		if !ok || unit.Hash == "" || prior[k] != unit.Hash {
+		var hash string
+		if k == diff.ArchOverview {
+			// The synthesis has no unit of its own; its input is the whole
+			// map, so the map hash gates it. Without this every build --
+			// including a completely unchanged one -- would pay for an
+			// architecture regeneration.
+			if m != nil {
+				hash = m.Hash
+			}
+		} else if unit, ok := units[string(k)]; ok {
+			hash = unit.Hash
+		}
+		// No hash means no basis for skipping: regenerate.
+		if hash == "" || prior[k] != hash {
 			out = append(out, k)
 		}
 	}
@@ -282,19 +391,37 @@ type unitResult struct {
 	Findings   []string
 	CostUSD    float64
 	Turns      int
+	Tokens     int
 	Violations []wiki.Violation
 	Err        error
 }
 
-// generateUnit runs analyze then generate for one unit, retrying on validation
-// failure with the errors stated back to the agent.
+// unitScope is the run-level context a unit is generated against.
+type unitScope struct {
+	steering Steering
+	// known resolves wikilinks: existing slugs plus everything written so far
+	// in this run.
+	known map[string]bool
+	// existingBySlug rejects slug collisions against live pages, since slug is
+	// the database's page identity.
+	existingBySlug map[string]string
+	// existingCreated preserves a page's original Created date across
+	// regeneration.
+	existingCreated map[string]string
+	// remainingUSD is what is left of the run budget; zero means unlimited.
+	remainingUSD float64
+}
+
+// generateUnit runs analyze once and then generate for one unit, retrying
+// generation on validation failure with the errors stated back to the agent.
+// The analysis is not re-run on retry: only generation failed, and the plan
+// does not change because a page body was malformed.
 func (p *Pipeline) generateUnit(
 	ctx context.Context,
 	req BuildRequest,
 	key diff.Key,
 	unit mapper.Unit,
-	steering Steering,
-	known map[string]bool,
+	sc unitScope,
 ) unitResult {
 	var res unitResult
 
@@ -310,30 +437,44 @@ func (p *Pipeline) generateUnit(
 	}
 
 	sessionID := req.RunID + "-" + sanitize(string(key))
+	overBudget := func() bool { return sc.remainingUSD > 0 && res.CostUSD >= sc.remainingUSD }
+
+	analyzeRes, aerr := p.Runner.Run(ctx, agent.Request{
+		Step: agent.StepAnalyze, SessionID: sessionID,
+		WorkDir: req.SourceDir, Model: p.AnalyzeModel,
+		BudgetUSD: p.Budget.AnalyzeUSD, Timeout: p.Timeout,
+		SystemPrompt: analyzeSystemPrompt(sc.steering),
+		// The rendered map is identical for every unit in the run, so it
+		// rides the cache breakpoint and all but the first unit reads it at
+		// a fraction of the input rate.
+		CacheableContext: req.Map.Summary,
+		Prompt:           analyzePrompt(key, unit, req.SourceDir, sc.steering, 0, nil),
+		JSONSchema:       AnalysisSchema,
+	})
+	if aerr != nil {
+		res.Err = aerr
+		return res
+	}
+	res.CostUSD += analyzeRes.TotalCostUSD
+	res.Turns += analyzeRes.NumTurns
+	res.Tokens += analyzeRes.Usage.Total()
+	p.noteAgentEvents(key, analyzeRes)
+	if err := analyzeRes.Err(); err != nil {
+		res.Err = err
+		return res
+	}
+
+	// The plan is handed to generation explicitly. The CLI runner also resumes
+	// the session, but the default API runner is stateless -- without this the
+	// analyze step would be paid for and never read.
+	plan, planned := planFrom(analyzeRes)
+
 	attempts := p.MaxRetries + 1
 	var lastViolations []wiki.Violation
 
 	for attempt := range attempts {
-		analyzeRes, aerr := p.Runner.Run(ctx, agent.Request{
-			Step: agent.StepAnalyze, SessionID: sessionID,
-			WorkDir: req.SourceDir, Model: p.AnalyzeModel,
-			BudgetUSD: p.Budget.AnalyzeUSD, Timeout: p.Timeout,
-			SystemPrompt: analyzeSystemPrompt(steering),
-			// The rendered map is identical for every unit in the run, so it
-			// rides the cache breakpoint and all but the first unit reads it at
-			// a fraction of the input rate.
-			CacheableContext: req.Map.Summary,
-			Prompt:           analyzePrompt(key, unit, req.SourceDir, steering, attempt, lastViolations),
-			JSONSchema:       AnalysisSchema,
-		})
-		if aerr != nil {
-			res.Err = aerr
-			return res
-		}
-		res.CostUSD += analyzeRes.TotalCostUSD
-		res.Turns += analyzeRes.NumTurns
-		if err := analyzeRes.Err(); err != nil {
-			res.Err = err
+		if overBudget() {
+			res.Err = fmt.Errorf("run budget exhausted mid-unit after $%.4f", res.CostUSD)
 			return res
 		}
 
@@ -342,9 +483,9 @@ func (p *Pipeline) generateUnit(
 			WorkDir: req.SourceDir, ScratchDir: scratch,
 			Model: p.modelFor(attempt), FallbackModel: p.FallbackModel,
 			BudgetUSD: p.Budget.PageUSD, Timeout: p.Timeout,
-			SystemPrompt:     generateSystemPrompt(steering),
+			SystemPrompt:     generateSystemPrompt(sc.steering),
 			CacheableContext: req.Map.Summary,
-			Prompt:           generatePrompt(key, unit, req.SourceDir, steering, attempt, lastViolations),
+			Prompt:           generatePrompt(key, unit, req.SourceDir, sc.steering, plan, attempt, lastViolations),
 		})
 		if gerr != nil {
 			res.Err = gerr
@@ -352,6 +493,8 @@ func (p *Pipeline) generateUnit(
 		}
 		res.CostUSD += genRes.TotalCostUSD
 		res.Turns += genRes.NumTurns
+		res.Tokens += genRes.Usage.Total()
+		p.noteAgentEvents(key, genRes)
 		if err := genRes.Err(); err != nil {
 			res.Err = err
 			return res
@@ -361,16 +504,20 @@ func (p *Pipeline) generateUnit(
 		// structured data, the CLI runner writes them into the scratch
 		// directory. Everything after this point is identical, which is what
 		// lets both satisfy one interface.
-		collected, cerr := pagesFrom(genRes, scratch)
+		collected, parseViolations, cerr := pagesFrom(genRes, scratch)
 		if cerr != nil {
 			res.Err = cerr
 			return res
 		}
 
-		lastViolations = wiki.ValidateBatch(collected, wiki.ValidateOptions{
-			KnownSlugs:   known,
-			RequireDates: false,
-		})
+		p.stampDates(collected, sc.existingCreated)
+
+		lastViolations = append(parseViolations, wiki.ValidateBatch(collected, wiki.ValidateOptions{
+			KnownSlugs:     sc.known,
+			ExistingBySlug: sc.existingBySlug,
+			Planned:        planned,
+			RequireDates:   true,
+		})...)
 		if len(lastViolations) == 0 {
 			res.Pages = derefPages(collected)
 			if genRes.Generation != nil {
@@ -398,11 +545,76 @@ func (p *Pipeline) generateUnit(
 	return res
 }
 
-// modelFor escalates one tier on the final attempt rather than starting
-// expensive.
+// planFrom extracts the analysis for the generate prompt: the serialized plan,
+// and the set of paths it authorized, which validation enforces as the
+// quarantine boundary on what the agent may write.
+func planFrom(res *agent.Result) (plan string, planned map[string]bool) {
+	analysis := res.Analysis
+	if analysis == nil {
+		// The CLI runner returns the schema-constrained JSON as envelope text.
+		parsed, err := agent.ParseAnalysis(res.Result)
+		if err != nil {
+			// Unparseable analysis text still carries signal; pass it through
+			// verbatim with no quarantine rather than dropping it.
+			return strings.TrimSpace(res.Result), nil
+		}
+		analysis = parsed
+	}
+
+	if b, err := json.Marshal(analysis); err == nil {
+		plan = string(b)
+	}
+	if len(analysis.Pages) > 0 {
+		planned = make(map[string]bool, len(analysis.Pages))
+		for _, pg := range analysis.Pages {
+			planned[pg.Path] = true
+		}
+	}
+	return plan, planned
+}
+
+// stampDates fills created/updated. Updated is always the run date -- the page
+// was regenerated today -- while Created survives from the page being replaced,
+// which is the contract the frontmatter documents.
+func (p *Pipeline) stampDates(pages []*wiki.Page, existingCreated map[string]string) {
+	today := p.now().Format(wiki.DateFormat)
+	for _, pg := range pages {
+		if pg.Meta.Created == "" {
+			if c := existingCreated[pg.Slug]; c != "" {
+				pg.Meta.Created = c
+			} else {
+				pg.Meta.Created = today
+			}
+		}
+		pg.Meta.Updated = today
+	}
+}
+
+// noteAgentEvents surfaces per-call telemetry that would otherwise be
+// swallowed: sandbox denials usually mean the agent tried something the design
+// forbids, and an unusual turn count is the early sign of a runaway session.
+func (p *Pipeline) noteAgentEvents(key diff.Key, res *agent.Result) {
+	if n := len(res.PermissionDenials); n > 0 {
+		tools := make([]string, 0, n)
+		for _, d := range res.PermissionDenials {
+			tools = append(tools, d.ToolName)
+		}
+		p.logger().Warn("sandbox denied agent tool calls", "key", key, "count", n, "tools", tools)
+	}
+	if p.WarnTurns > 0 && res.NumTurns > p.WarnTurns {
+		p.logger().Warn("agent call used an unusual number of turns",
+			"key", key, "turns", res.NumTurns, "warn_at", p.WarnTurns)
+	}
+	if res.OverBudget {
+		p.logger().Warn("agent call exceeded its per-call budget", "key", key, "cost", res.TotalCostUSD)
+	}
+}
+
+// modelFor escalates to the fallback model on the final attempt rather than
+// starting expensive.
 func (p *Pipeline) modelFor(attempt int) string {
 	if attempt > 0 && p.FallbackModel != "" && attempt >= p.MaxRetries {
-		return p.Model
+		return p.FallbackModel
 	}
 	return p.Model
 }

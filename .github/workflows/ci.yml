@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Hermetic: vet + unit and golden tests, no network, no database. This is
+  # the same gate as `make test` locally.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: gofmt -l . | tee /dev/stderr | wc -l | grep -q '^0$'
+        name: gofmt
+      - run: go test -race ./...
+
+  # Everything, including the schema and API tests that need Postgres. These
+  # skip themselves when KILN_TEST_DATABASE_URL is unset, so this job is the
+  # only place they run automatically -- without it the store layer is
+  # effectively unreviewed by machines.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: kiln
+          POSTGRES_PASSWORD: kiln
+          POSTGRES_DB: kiln
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U kiln"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KILN_TEST_DATABASE_URL: postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./... -count=1

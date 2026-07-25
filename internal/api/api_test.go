@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
 	"github.com/daiwa-zou/kiln/internal/wiki"
@@ -21,7 +22,7 @@ import (
 // hermetic.
 // The returned string is the workspace ID; the API resolves the "demo" slug
 // to it, which the slug-vs-UUID test relies on.
-func testServer(t *testing.T) (*httptest.Server, *store.JobStore, string) {
+func testServer(t *testing.T) (*httptest.Server, *store.WikiStore, string) {
 	t.Helper()
 
 	dsn := os.Getenv("KILN_TEST_DATABASE_URL")
@@ -43,7 +44,7 @@ func testServer(t *testing.T) (*httptest.Server, *store.JobStore, string) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	js := store.NewJobStore(pool)
+	js := store.NewWikiStore(pool)
 	wsID, err := js.EnsureWorkspace(ctx, "test-org", "demo", "Demo")
 	if err != nil {
 		t.Fatalf("EnsureWorkspace: %v", err)
@@ -71,7 +72,7 @@ func get(t *testing.T, srv *httptest.Server, path string, into any) int {
 	return res.StatusCode
 }
 
-func seed(t *testing.T, js *store.JobStore, ws string) {
+func seed(t *testing.T, js *store.WikiStore, ws string) {
 	t.Helper()
 
 	pages := []wiki.Page{
@@ -109,6 +110,42 @@ func TestHealthAnswersWithoutTheDatabase(t *testing.T) {
 
 	if code := get(t, srv, "/healthz", nil); code != http.StatusOK {
 		t.Errorf("/healthz = %d, want 200 with no database wired", code)
+	}
+}
+
+type stubSource struct{ id auth.Identity }
+
+func (s *stubSource) IdentityForToken(_ context.Context, hash string) (auth.Identity, error) {
+	if hash == auth.HashToken("kiln_valid") {
+		return s.id, nil
+	}
+	return auth.Identity{}, auth.ErrUnauthenticated
+}
+
+func TestAuthGuardsAPIRoutes(t *testing.T) {
+	// Hermetic: rejection happens in the middleware, before any handler or
+	// database is touched, so no Postgres is needed to prove the perimeter.
+	srv := httptest.NewServer((&Server{
+		Auth: &auth.Middleware{Source: &stubSource{id: auth.Identity{UserID: "u1", Scopes: []string{"read"}}}},
+	}).Router())
+	defer srv.Close()
+
+	for _, path := range []string{
+		"/api/v1/workspaces",
+		"/api/v1/workspaces/demo/pages",
+		"/api/v1/workspaces/demo/search?q=x",
+	} {
+		if code := get(t, srv, path, nil); code != http.StatusUnauthorized {
+			t.Errorf("GET %s without a token = %d, want 401", path, code)
+		}
+	}
+
+	// The pre-auth allowlist is exactly liveness, readiness-shape, and version.
+	if code := get(t, srv, "/api/v1/version", nil); code != http.StatusOK {
+		t.Errorf("/api/v1/version = %d, want 200 without a token", code)
+	}
+	if code := get(t, srv, "/healthz", nil); code != http.StatusOK {
+		t.Errorf("/healthz = %d, want 200 without a token", code)
 	}
 }
 

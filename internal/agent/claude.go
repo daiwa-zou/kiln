@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -26,9 +27,11 @@ var (
 type ClaudeRunner struct {
 	// Binary is the executable name or path. Resolved via PATH when bare.
 	Binary string
-	// Env, when non-nil, replaces the child environment entirely. The sandbox
-	// passes only ANTHROPIC_API_KEY and the minimum needed to run; connector
-	// credentials never appear here.
+	// Env, when non-nil, replaces the child environment entirely. Production
+	// construction (agent.New) always sets it to MinimalChildEnv, so KILN_*
+	// secrets and connector credentials never reach a process that reads
+	// untrusted source content. A nil Env inherits the parent environment;
+	// only tests, which drive fakeclaude through KILN_FAKE_SCRIPT, rely on that.
 	Env []string
 }
 
@@ -38,6 +41,26 @@ func NewClaudeRunner(binary string) *ClaudeRunner {
 		binary = "claude"
 	}
 	return &ClaudeRunner{Binary: binary}
+}
+
+// MinimalChildEnv builds the environment for the claude subprocess: enough for
+// the binary to run and authenticate, and nothing else. The child processes
+// untrusted source content, so the parent's KILN_* secrets (master key, session
+// secret, database password) must never be inherited by it.
+//
+// HOME is passed so a logged-in CLI session's credentials still resolve when no
+// API key is configured.
+func MinimalChildEnv(apiKey string) []string {
+	env := make([]string, 0, 6)
+	for _, k := range []string{"PATH", "HOME", "TMPDIR", "TERM", "LANG"} {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	if apiKey != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+apiKey)
+	}
+	return env
 }
 
 // Run executes one request and parses the result envelope.
@@ -93,6 +116,8 @@ func (req Request) validate() error {
 	switch {
 	case req.WorkDir == "":
 		return errors.New("agent: WorkDir is required")
+	case strings.TrimSpace(req.Prompt) == "":
+		return errors.New("agent: Prompt is required")
 	case req.Step == StepGenerate && req.ScratchDir == "":
 		return errors.New("agent: ScratchDir is required for the generate step")
 	case req.Step != StepAnalyze && req.Step != StepGenerate:
@@ -127,8 +152,18 @@ func BuildArgs(req Request) []string {
 	if req.BudgetUSD > 0 {
 		args = append(args, "--max-budget-usd", strconv.FormatFloat(req.BudgetUSD, 'f', -1, 64))
 	}
-	if req.SystemPrompt != "" {
-		args = append(args, "--append-system-prompt", req.SystemPrompt)
+	// CacheableContext rides the system prompt: the CLI manages its own prompt
+	// caching, and dropping the rendered map here would mean the agent never
+	// sees the workspace overview at all.
+	system := req.SystemPrompt
+	if req.CacheableContext != "" {
+		if system != "" {
+			system += "\n\n"
+		}
+		system += req.CacheableContext
+	}
+	if system != "" {
+		args = append(args, "--append-system-prompt", system)
 	}
 
 	switch req.Step {

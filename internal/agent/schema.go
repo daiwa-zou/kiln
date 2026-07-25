@@ -143,6 +143,19 @@ func GenerationSchemaJSON() map[string]any {
 	}
 }
 
+// AnalysisSchemaText is the analyze schema serialized for transports that take
+// a string (the CLI's --json-schema flag). Derived from AnalysisSchemaJSON so
+// the two runners can never enforce different contracts.
+func AnalysisSchemaText() string {
+	b, err := json.Marshal(AnalysisSchemaJSON())
+	if err != nil {
+		// The schema is a compile-time constant structure; failure here is a
+		// programming error, not a runtime condition.
+		panic("agent: marshal analysis schema: " + err.Error())
+	}
+	return string(b)
+}
+
 // ParseGeneration decodes a structured generate response.
 func ParseGeneration(raw string) (*GenerationResult, error) {
 	var out GenerationResult

@@ -1,6 +1,8 @@
 package jobs
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -19,16 +21,23 @@ import (
 // Paths are made relative to the scratch root and then validated; a file that
 // escaped via symlink is reported rather than silently read, since the scratch
 // directory is the only place the agent is permitted to write.
-func collectPages(scratchDir string) ([]*wiki.Page, error) {
+//
+// A file that fails to parse is returned as a violation carrying the real
+// parse error -- "unterminated frontmatter" reaches the corrective prompt as
+// exactly that, not as a misleading "body is empty".
+func collectPages(scratchDir string) ([]*wiki.Page, []wiki.Violation, error) {
 	root, err := filepath.EvalSymlinks(scratchDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("resolve scratch dir: %w", err)
+		return nil, nil, fmt.Errorf("resolve scratch dir: %w", err)
 	}
 
-	var out []*wiki.Page
+	var (
+		out        []*wiki.Page
+		violations []wiki.Violation
+	)
 
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -54,21 +63,23 @@ func collectPages(scratchDir string) ([]*wiki.Page, error) {
 
 		page, err := wiki.ParsePage(filepath.ToSlash(rel), raw)
 		if err != nil {
-			// A malformed page is a validation problem, not a read failure, so
-			// it is carried forward as an unparseable page rather than aborting
-			// the whole batch.
-			out = append(out, &wiki.Page{Path: filepath.ToSlash(rel), Slug: wiki.SlugFromPath(rel)})
+			// A malformed page is a validation problem, not a read failure:
+			// carry the actual parse error so the retry fixes the real defect.
+			violations = append(violations, wiki.Violation{
+				Path:   filepath.ToSlash(rel),
+				Reason: fmt.Sprintf("page failed to parse: %v", err),
+			})
 			return nil
 		}
 		out = append(out, page)
 		return nil
 	})
 	if walkErr != nil {
-		return nil, walkErr
+		return nil, nil, walkErr
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, nil
+	return out, violations, nil
 }
 
 // pagesFrom takes whatever the runner produced and normalizes it to pages.
@@ -78,7 +89,7 @@ func collectPages(scratchDir string) ([]*wiki.Page, error) {
 // structured output when it is present is what lets the API path skip the
 // scratch directory, and with it the path-escape checks that only exist because
 // an agent with write access might stray outside it.
-func pagesFrom(res *agent.Result, scratchDir string) ([]*wiki.Page, error) {
+func pagesFrom(res *agent.Result, scratchDir string) ([]*wiki.Page, []wiki.Violation, error) {
 	if res == nil || res.Generation == nil {
 		return collectPages(scratchDir)
 	}
@@ -100,7 +111,7 @@ func pagesFrom(res *agent.Result, scratchDir string) ([]*wiki.Page, error) {
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, nil
+	return out, nil, nil
 }
 
 func derefPages(in []*wiki.Page) []wiki.Page {
@@ -203,8 +214,8 @@ func buildLogLines(s RunSummary, spent float64) []string {
 // which means a plain slice would drop it first every time. On a repository with
 // more modules than the cap it would then never run, and the wiki would keep
 // per-module pages with no page tying them together.
-func truncatePreservingArch(dirty []diff.Key, cap int) []diff.Key {
-	if cap <= 0 || len(dirty) <= cap {
+func truncatePreservingArch(dirty []diff.Key, limit int) []diff.Key {
+	if limit <= 0 || len(dirty) <= limit {
 		return dirty
 	}
 
@@ -216,13 +227,13 @@ func truncatePreservingArch(dirty []diff.Key, cap int) []diff.Key {
 		}
 	}
 	if !hasArch {
-		return dirty[:cap]
+		return dirty[:limit]
 	}
 
 	// Reserve the final slot for architecture and fill the rest in order.
-	out := make([]diff.Key, 0, cap)
+	out := make([]diff.Key, 0, limit)
 	for _, k := range dirty {
-		if len(out) == cap-1 {
+		if len(out) == limit-1 {
 			break
 		}
 		if k != diff.ArchOverview {
@@ -256,9 +267,49 @@ func runStatus(items []ItemSummary) string {
 	}
 }
 
-// sanitize makes a cache key safe as a directory name.
-func sanitize(key string) string {
-	return strings.NewReplacer("/", "_", ":", "_", "\\", "_", "..", "_").Replace(key)
+// regenKeysFor maps pages the cascade marked for regeneration back to the
+// surviving source units that own them, so their prose stops describing
+// deleted material. The keys are appended after the hash gate on purpose: a
+// regeneration forced by a departed sibling has, by definition, an unchanged
+// input hash.
+func regenKeysFor(cascade diff.Cascade, sources []diff.SourceRecord, already []diff.Key) []diff.Key {
+	if len(cascade.RegeneratePages) == 0 {
+		return nil
+	}
+	regen := make(map[string]bool, len(cascade.RegeneratePages))
+	for _, p := range cascade.RegeneratePages {
+		regen[p] = true
+	}
+	dropping := make(map[diff.Key]bool, len(cascade.DropSources))
+	for _, k := range cascade.DropSources {
+		dropping[k] = true
+	}
+	have := make(map[diff.Key]bool, len(already))
+	for _, k := range already {
+		have[k] = true
+	}
+
+	var out []diff.Key
+	for _, s := range sources {
+		if dropping[s.Key] || have[s.Key] {
+			continue
+		}
+		for _, p := range s.FilesWritten {
+			if regen[p] {
+				out = append(out, s.Key)
+				break
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
-var _ = diff.Key("")
+// sanitize makes a cache key safe as a directory name. A short content hash is
+// appended because the character replacement is lossy: module:a/b and
+// module:a_b would otherwise share a scratch directory and a session ID.
+func sanitize(key string) string {
+	base := strings.NewReplacer("/", "_", ":", "_", "\\", "_", ".", "_").Replace(key)
+	sum := sha256.Sum256([]byte(key))
+	return base + "-" + hex.EncodeToString(sum[:4])
+}

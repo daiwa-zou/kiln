@@ -185,6 +185,15 @@ func (s *Scanner) buildModules(root string, files []FileRec, manifests []manifes
 		mod := s.buildModule(root, m, owned[m.dir], taken)
 		parts := s.subPartition(mod, owned[m.dir], taken)
 
+		// A sub-partitioned parent is re-hashed over only the files its
+		// children do not claim. Change attribution routes to the deepest
+		// module, so a parent hash that also covered child files would change
+		// without the parent ever being routed -- leaving its page
+		// permanently stale while looking gated.
+		if len(parts) > 0 {
+			mod.Hash = hashFiles(excludeOwnedByParts(owned[m.dir], parts))
+		}
+
 		out = append(out, mod)
 		out = append(out, parts...)
 	}
@@ -330,6 +339,24 @@ func (s *Scanner) subPartition(parent Module, files []FileRec, taken map[string]
 		}
 		sort.Strings(part.Languages)
 		out = append(out, part)
+	}
+	return out
+}
+
+// excludeOwnedByParts returns the files no sub-partition claims: the parent's
+// own regeneration input.
+func excludeOwnedByParts(files []FileRec, parts []Module) []FileRec {
+	claimed := map[string]bool{}
+	for _, p := range parts {
+		for _, f := range p.Files {
+			claimed[f] = true
+		}
+	}
+	out := make([]FileRec, 0, len(files))
+	for _, f := range files {
+		if !claimed[f.Path] {
+			out = append(out, f)
+		}
 	}
 	return out
 }

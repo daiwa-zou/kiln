@@ -37,6 +37,10 @@ func (c *Connector) Trigger() connector.TriggerMode { return connector.TriggerMa
 // dst is ignored: the material is already on disk and copying a repository to
 // scan it would waste time and space for nothing.
 func (c *Connector) Sync(ctx context.Context, cfg connector.Config, _ string) (*connector.SourceSet, error) {
+	// SECURITY: "path" may name any directory the process can read. That is
+	// fine while only the CLI supplies it; the moment connector configs become
+	// API- or database-driven, this is a local-file-inclusion primitive and
+	// needs an allowlist of permitted roots before that ships.
 	path, err := cfg.RequireString("path")
 	if err != nil {
 		return nil, err

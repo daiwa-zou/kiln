@@ -8,24 +8,61 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
+	"github.com/daiwa-zou/kiln/internal/wiki"
 )
+
+// Store is the read surface the API depends on. An interface so handlers can
+// be tested against a fake; *store.WikiStore is the production implementation.
+type Store interface {
+	ListWorkspaces(ctx context.Context, userID string, admin bool) ([]store.WorkspaceRow, error)
+	ResolveWorkspace(ctx context.Context, ref, userID string, admin bool) (store.WorkspaceRow, error)
+	LoadPageSummaries(ctx context.Context, workspaceID string, limit, offset int) ([]store.PageInfo, error)
+	LoadPage(ctx context.Context, workspaceID, ref string) (wiki.Page, error)
+	Search(ctx context.Context, workspaceID, query string, limit, offset int) ([]store.SearchHit, error)
+	Gaps(ctx context.Context, workspaceID string, limit, offset int) ([]store.Gap, error)
+	LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error)
+}
 
 // Server holds the API dependencies.
 type Server struct {
-	Store *store.JobStore
-	DB    *store.DB
-	Log   *slog.Logger
+	Store Store
+	// DB backs the readiness probe only; every content query goes through
+	// Store so handlers stay testable without Postgres.
+	DB  *store.DB
+	Log *slog.Logger
+	// Auth, when non-nil, guards every /api/v1 route except /version. Nil
+	// means authentication was disabled by configuration; visibility then
+	// behaves as admin, which is only defensible on a localhost deployment.
+	Auth *auth.Middleware
+	// CORSOrigins are origins allowed to call the API from a browser, for a
+	// separately hosted frontend. Empty means same-origin only.
+	CORSOrigins []string
 }
+
+// Pagination bounds. Defaults serve the UI; ceilings stop a caller from
+// turning a listing into a full-table dump.
+const (
+	defaultPageLimit = 500
+	maxPageLimit     = 1000
+	defaultGapLimit  = 200
+	defaultHitLimit  = 50
+	maxHitLimit      = 200
+)
 
 // Router builds the HTTP handler.
 func (s *Server) Router() http.Handler {
@@ -33,6 +70,9 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+	if len(s.CORSOrigins) > 0 {
+		r.Use(corsMiddleware(s.CORSOrigins))
+	}
 
 	// Liveness answers even when the database is down: a failing readiness
 	// check should not make an orchestrator kill a process that is merely
@@ -43,23 +83,69 @@ func (s *Server) Router() http.Handler {
 	r.Get("/readyz", s.handleReady)
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Version stays outside auth so the UI can render a sensible sign-in
+		// state; it discloses nothing about content.
 		r.Get("/version", s.handleVersion)
-		r.Get("/workspaces", s.handleWorkspaces)
 
-		r.Route("/workspaces/{workspace}", func(r chi.Router) {
-			r.Get("/", s.handleWorkspace)
-			r.Get("/pages", s.handlePages)
-			r.Get("/pages/*", s.handlePage)
-			r.Get("/index", s.handleArtifact("index"))
-			r.Get("/overview", s.handleArtifact("overview"))
-			r.Get("/log", s.handleArtifact("log"))
-			r.Get("/search", s.handleSearch)
-			r.Get("/gaps", s.handleGaps)
+		r.Group(func(r chi.Router) {
+			if s.Auth != nil {
+				r.Use(s.Auth.Wrap)
+			}
+			r.Get("/workspaces", s.handleWorkspaces)
+
+			r.Route("/workspaces/{workspace}", func(r chi.Router) {
+				r.Get("/", s.handleWorkspace)
+				r.Get("/pages", s.handlePages)
+				r.Get("/pages/*", s.handlePage)
+				r.Get("/index", s.handleArtifact("index"))
+				r.Get("/overview", s.handleArtifact("overview"))
+				r.Get("/log", s.handleArtifact("log"))
+				r.Get("/search", s.handleSearch)
+				r.Get("/gaps", s.handleGaps)
+			})
 		})
 	})
 
 	mountUI(r)
 	return r
+}
+
+// corsMiddleware allows the configured origins to call the API from a
+// browser. The allowlist is exact-match: reflecting arbitrary origins would
+// undo the point of having one.
+func corsMiddleware(origins []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if origin != "" && slices.Contains(origins, origin) {
+				h := w.Header()
+				h.Set("Access-Control-Allow-Origin", origin)
+				h.Add("Vary", "Origin")
+				h.Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match")
+				h.Set("Access-Control-Max-Age", "600")
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// scope returns the caller's visibility: an admin sees every org, a user sees
+// the orgs they belong to, and a deployment with auth disabled behaves as
+// admin. Fails closed when auth is enabled but no identity is present.
+func (s *Server) scope(r *http.Request) (userID string, admin bool) {
+	if s.Auth == nil {
+		return "", true
+	}
+	id, ok := auth.FromContext(r.Context())
+	if !ok {
+		return "", false
+	}
+	return id.UserID, id.Admin
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
@@ -72,7 +158,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	if err := s.DB.Ping(r.Context()); err != nil {
+	if s.DB == nil || s.DB.Ping(r.Context()) != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status": "unready", "reason": "database unreachable",
 		})
@@ -90,49 +176,33 @@ type WorkspaceSummary struct {
 	Revision  int64  `json:"revision"`
 }
 
+func summaryOf(ws store.WorkspaceRow) WorkspaceSummary {
+	return WorkspaceSummary{
+		ID: ws.ID, Slug: ws.Slug, Name: ws.Name,
+		PageCount: ws.PageCount, Revision: ws.Revision,
+	}
+}
+
 func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Pool.Query(r.Context(), `
-		SELECT ws.id, ws.slug, ws.name,
-		       coalesce(wk.page_count, 0), coalesce(wk.revision, 0)
-		FROM workspaces ws
-		LEFT JOIN wikis wk ON wk.workspace_id = ws.id
-		ORDER BY ws.slug`)
+	uid, admin := s.scope(r)
+	rows, err := s.Store.ListWorkspaces(r.Context(), uid, admin)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	defer rows.Close()
-
-	out := []WorkspaceSummary{}
-	for rows.Next() {
-		var ws WorkspaceSummary
-		if err := rows.Scan(&ws.ID, &ws.Slug, &ws.Name, &ws.PageCount, &ws.Revision); err != nil {
-			s.fail(w, err)
-			return
-		}
-		out = append(out, ws)
+	out := make([]WorkspaceSummary, 0, len(rows))
+	for _, ws := range rows {
+		out = append(out, summaryOf(ws))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.resolve(w, r)
+	ws, ok := s.resolve(w, r)
 	if !ok {
 		return
 	}
-
-	var ws WorkspaceSummary
-	err := s.DB.Pool.QueryRow(r.Context(), `
-		SELECT ws.id, ws.slug, ws.name,
-		       coalesce(wk.page_count, 0), coalesce(wk.revision, 0)
-		FROM workspaces ws
-		LEFT JOIN wikis wk ON wk.workspace_id = ws.id
-		WHERE ws.id = $1`, id).Scan(&ws.ID, &ws.Slug, &ws.Name, &ws.PageCount, &ws.Revision)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, ws)
+	writeJSON(w, http.StatusOK, summaryOf(ws))
 }
 
 // PageSummary is a page without its body, for listings.
@@ -146,12 +216,13 @@ type PageSummary struct {
 }
 
 func (s *Server) handlePages(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.resolve(w, r)
-	if !ok {
+	ws, ok := s.resolve(w, r)
+	if !ok || notModified(w, r, ws) {
 		return
 	}
+	limit, offset := pagination(r, defaultPageLimit, maxPageLimit)
 
-	pages, err := s.Store.LoadPages(r.Context(), id)
+	pages, err := s.Store.LoadPageSummaries(r.Context(), ws.ID, limit, offset)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -160,50 +231,46 @@ func (s *Server) handlePages(w http.ResponseWriter, r *http.Request) {
 	out := make([]PageSummary, 0, len(pages))
 	for _, p := range pages {
 		out = append(out, PageSummary{
-			Path: p.Path, Slug: p.Slug, Type: string(p.Meta.Type),
-			Title: p.Meta.Title, Tags: p.Meta.Tags, Updated: p.Meta.Updated,
+			Path: p.Path, Slug: p.Slug, Type: p.Type,
+			Title: p.Title, Tags: p.Tags, Updated: p.Updated,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.resolve(w, r)
-	if !ok {
+	ws, ok := s.resolve(w, r)
+	if !ok || notModified(w, r, ws) {
 		return
 	}
 	wanted := strings.TrimPrefix(chi.URLParam(r, "*"), "/")
 
-	pages, err := s.Store.LoadPages(r.Context(), id)
-	if err != nil {
+	p, err := s.Store.LoadPage(r.Context(), ws.ID, wanted)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "page not found"})
+		return
+	case err != nil:
 		s.fail(w, err)
 		return
 	}
 
-	for _, p := range pages {
-		// Addressable by path or by slug: a wikilink carries a slug, the tree
-		// carries a path, and both should resolve.
-		if p.Path == wanted || p.Slug == wanted {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"path": p.Path, "slug": p.Slug, "type": string(p.Meta.Type),
-				"title": p.Meta.Title, "tags": p.Meta.Tags,
-				"related": p.Meta.Related, "sources": p.Meta.Sources,
-				"updated": p.Meta.Updated, "builtAtRef": p.Meta.BuiltAtRef,
-				"body": p.Body,
-			})
-			return
-		}
-	}
-	writeJSON(w, http.StatusNotFound, map[string]string{"error": "page not found"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path": p.Path, "slug": p.Slug, "type": string(p.Meta.Type),
+		"title": p.Meta.Title, "tags": p.Meta.Tags,
+		"related": p.Meta.Related, "sources": p.Meta.Sources,
+		"updated": p.Meta.Updated, "builtAtRef": p.Meta.BuiltAtRef,
+		"body": p.Body,
+	})
 }
 
 func (s *Server) handleArtifact(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, ok := s.resolve(w, r)
-		if !ok {
+		ws, ok := s.resolve(w, r)
+		if !ok || notModified(w, r, ws) {
 			return
 		}
-		body, err := s.Store.LoadArtifact(r.Context(), id, kind)
+		body, err := s.Store.LoadArtifact(r.Context(), ws.ID, kind)
 		if err != nil {
 			s.fail(w, err)
 			return
@@ -222,7 +289,7 @@ type SearchHit struct {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.resolve(w, r)
+	ws, ok := s.resolve(w, r)
 	if !ok {
 		return
 	}
@@ -231,87 +298,83 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []SearchHit{})
 		return
 	}
+	limit, offset := pagination(r, defaultHitLimit, maxHitLimit)
 
-	rows, err := s.DB.Pool.Query(r.Context(), `
-		SELECT p.path, p.slug, p.type, p.title,
-		       ts_rank(p.search, plainto_tsquery('english', $2)) AS rank
-		FROM pages p
-		JOIN wikis w ON w.id = p.wiki_id
-		WHERE w.workspace_id = $1
-		  AND p.deleted_at IS NULL
-		  AND p.search @@ plainto_tsquery('english', $2)
-		ORDER BY rank DESC
-		LIMIT 50`, id, query)
+	hits, err := s.Store.Search(r.Context(), ws.ID, query, limit, offset)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	defer rows.Close()
-
-	out := []SearchHit{}
-	for rows.Next() {
-		var h SearchHit
-		if err := rows.Scan(&h.Path, &h.Slug, &h.Type, &h.Title, &h.Rank); err != nil {
-			s.fail(w, err)
-			return
-		}
-		out = append(out, h)
+	out := make([]SearchHit, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, SearchHit{Path: h.Path, Slug: h.Slug, Type: h.Type, Title: h.Title, Rank: h.Rank})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 // handleGaps lists pages the wiki has declared it wants and does not have.
-//
-// Unresolved wikilinks are the cheapest and most precise gap signal available,
-// and they are already materialized, so this is one query rather than a feature.
 func (s *Server) handleGaps(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.resolve(w, r)
-	if !ok {
+	ws, ok := s.resolve(w, r)
+	if !ok || notModified(w, r, ws) {
 		return
 	}
+	limit, offset := pagination(r, defaultGapLimit, maxPageLimit)
 
-	rows, err := s.DB.Pool.Query(r.Context(), `
-		SELECT l.to_slug, count(*) AS wanted_by
-		FROM page_links l
-		JOIN pages p ON p.id = l.from_page_id
-		JOIN wikis w ON w.id = p.wiki_id
-		WHERE w.workspace_id = $1 AND NOT l.resolved AND p.deleted_at IS NULL
-		GROUP BY l.to_slug
-		ORDER BY wanted_by DESC, l.to_slug`, id)
+	gaps, err := s.Store.Gaps(r.Context(), ws.ID, limit, offset)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	defer rows.Close()
-
-	out := []map[string]any{}
-	for rows.Next() {
-		var slug string
-		var count int
-		if err := rows.Scan(&slug, &count); err != nil {
-			s.fail(w, err)
-			return
-		}
-		out = append(out, map[string]any{"slug": slug, "wantedBy": count})
+	out := make([]map[string]any, 0, len(gaps))
+	for _, g := range gaps {
+		out = append(out, map[string]any{"slug": g.Slug, "wantedBy": g.WantedBy})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-// resolve turns the {workspace} path segment into an ID, accepting either a
-// UUID or a slug so URLs stay readable.
-func (s *Server) resolve(w http.ResponseWriter, r *http.Request) (string, bool) {
+// resolve turns the {workspace} path segment into a workspace, bounded to
+// what the caller can see. Absence and no-access answer identically, so a
+// slug cannot be probed for existence across org boundaries.
+func (s *Server) resolve(w http.ResponseWriter, r *http.Request) (store.WorkspaceRow, bool) {
 	ref := chi.URLParam(r, "workspace")
+	uid, admin := s.scope(r)
 
-	var id string
-	err := s.DB.Pool.QueryRow(r.Context(), `
-		SELECT id FROM workspaces
-		WHERE slug = $1 OR id::text = $1
-		LIMIT 1`, ref).Scan(&id)
-	if err != nil {
+	ws, err := s.Store.ResolveWorkspace(r.Context(), ref, uid, admin)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
-		return "", false
+		return store.WorkspaceRow{}, false
+	case err != nil:
+		// A dead database is an outage, not a missing workspace.
+		s.fail(w, err)
+		return store.WorkspaceRow{}, false
 	}
-	return id, true
+	return ws, true
+}
+
+// notModified serves conditional requests off the wiki revision, which exists
+// precisely to bust caches: content only changes when an import bumps it.
+// Returns true when a 304 was written and the handler should stop.
+func notModified(w http.ResponseWriter, r *http.Request, ws store.WorkspaceRow) bool {
+	tag := fmt.Sprintf(`W/"%s-%d"`, ws.ID, ws.Revision)
+	w.Header().Set("ETag", tag)
+	if r.Header.Get("If-None-Match") == tag {
+		w.WriteHeader(http.StatusNotModified)
+		return true
+	}
+	return false
+}
+
+// pagination reads limit/offset with a default and a ceiling.
+func pagination(r *http.Request, def, ceil int) (limit, offset int) {
+	limit = def
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 {
+		limit = min(v, ceil)
+	}
+	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v > 0 {
+		offset = v
+	}
+	return limit, offset
 }
 
 func (s *Server) fail(w http.ResponseWriter, err error) {
@@ -335,6 +398,12 @@ func (s *Server) Serve(ctx context.Context, addr string) error {
 		Addr:              addr,
 		Handler:           s.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Full-cycle timeouts so a slow-loris client or a stalled write cannot
+		// pin a connection forever. The handler-level chi Timeout (30s) fires
+		// first for well-behaved requests; these are the transport backstop.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	errc := make(chan error, 1)

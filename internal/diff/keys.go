@@ -6,10 +6,7 @@
 // cost control in kiln, not a nice-to-have.
 package diff
 
-import (
-	"fmt"
-	"strings"
-)
+import "strings"
 
 // Key namespaces cache entries so each maps to exactly one producer. Without
 // namespacing, a document named "overview" and the architecture synthesis would
@@ -63,12 +60,3 @@ func (k Key) Valid() bool {
 }
 
 func (k Key) String() string { return string(k) }
-
-// ParseKey validates and returns a key.
-func ParseKey(s string) (Key, error) {
-	k := Key(s)
-	if !k.Valid() {
-		return "", fmt.Errorf("diff: malformed cache key %q", s)
-	}
-	return k, nil
-}

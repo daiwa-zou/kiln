@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/daiwa-zou/kiln/internal/agent"
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/mapper"
 	"github.com/daiwa-zou/kiln/internal/wiki"
@@ -11,42 +12,10 @@ import (
 
 // AnalysisSchema constrains the analyze step's output so the plan can be
 // validated before any money is spent on generation, and so parsing needs no
-// heuristics.
-const AnalysisSchema = `{
-  "type": "object",
-  "required": ["pages", "findings"],
-  "properties": {
-    "pages": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["path", "type", "title", "summary"],
-        "properties": {
-          "path": {"type": "string", "pattern": "^(entities|concepts|sources|queries|comparisons|synthesis)/[a-z0-9]+(-[a-z0-9]+)*\\.md$"},
-          "type": {"enum": ["entity", "concept", "source", "query", "comparison", "synthesis"]},
-          "title": {"type": "string"},
-          "summary": {"type": "string"},
-          "tags": {"type": "array", "items": {"type": "string"}},
-          "related": {"type": "array", "items": {"type": "string"}},
-          "evidence": {"type": "array", "items": {"type": "string"}}
-        }
-      }
-    },
-    "findings": {"type": "array", "items": {"type": "string"}},
-    "reviews": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["kind", "title", "detail"],
-        "properties": {
-          "kind": {"enum": ["contradiction", "uncertain", "gap"]},
-          "title": {"type": "string"},
-          "detail": {"type": "string"}
-        }
-      }
-    }
-  }
-}`
+// heuristics. Single-sourced from the agent package: the CLI and API runners
+// must enforce the same contract, and two hand-maintained copies had already
+// drifted once.
+var AnalysisSchema = agent.AnalysisSchemaText()
 
 // untrustedFraming is prepended to every system prompt.
 //
@@ -137,16 +106,25 @@ func analyzePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, atte
 	return b.String()
 }
 
-func generatePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, attempt int, prior []wiki.Violation) string {
+func generatePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, plan string, attempt int, prior []wiki.Violation) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Write the wiki pages you planned for unit %s.\n", key)
 	b.WriteString("\nUse paths relative to the directory granted to you, for example ")
 	b.WriteString("`entities/module-name.md` or `concepts/some-idea.md`.\n")
 
-	// Repeated rather than relied on from the analyze turn: the two calls share
-	// a session, but a page written from a plan alone drifts from the source it
-	// is supposed to describe.
+	// The plan is passed explicitly rather than relied on from session state:
+	// the CLI runner resumes the analyze session, but the default API runner
+	// is stateless, and without this the plan would never reach generation.
+	if strings.TrimSpace(plan) != "" {
+		b.WriteString("\n## The plan from your analysis\n\nWrite exactly the pages this plan lists:\n\n```json\n")
+		b.WriteString(strings.TrimSpace(plan))
+		b.WriteString("\n```\n")
+	}
+
+	// Source content is repeated rather than relied on from the analyze turn:
+	// a page written from a plan alone drifts from the source it is supposed
+	// to describe.
 	b.WriteString(renderUnitContext(root, unit))
 
 	appendCorrections(&b, s, unit.Slug)

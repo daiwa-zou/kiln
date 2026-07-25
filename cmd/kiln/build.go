@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -114,7 +115,7 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		return err
 	}
 
-	js := store.NewJobStore(db.Pool)
+	js := store.NewWikiStore(db.Pool)
 	workspaceID, err := js.EnsureWorkspace(ctx, f.org, slug, filepath.Base(absPath))
 	if err != nil {
 		return err
@@ -167,6 +168,9 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		}
 		wm = merged
 		maps.Copy(router.DocPaths, docRouter)
+		// Section units have no path of their own; register them under their
+		// parent so routing a document also routes its chapters.
+		router.DocSections = sectionsByParent(docMap)
 	}
 
 	runner, err := agent.New(cfg)
@@ -187,6 +191,7 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		FallbackModel: cfg.Agent.FallbackModel,
 		Timeout:       cfg.Agent.Timeout,
 		MaxRetries:    1,
+		WarnTurns:     cfg.Agent.WarnTurns,
 	}
 
 	req := jobs.BuildRequest{
@@ -200,9 +205,11 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		// Every unit is a candidate; the pipeline's hash gate is what actually
 		// decides. A local path has no commit range to diff against, and the
 		// gate is both cheaper and more precise than a filesystem comparison --
-		// it compares each unit's content hash to what the last run recorded, so
-		// a repeat build still costs nothing.
+		// it compares each unit's content hash (and the map hash, for the
+		// architecture synthesis) to what the last run recorded, so a repeat
+		// build still costs nothing.
 		Changes: diff.ChangeSet{FullRebuild: true},
+		Force:   f.full,
 		DryRun:  f.dryRun,
 	}
 	// The API runner returns pages as data, so a scratch directory is only
@@ -271,6 +278,10 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (_ *mapper.Workspa
 		fmt.Fprintf(out, "  skipped %s: %s\n", s.Path, s.Reason)
 	}
 
+	// Keyed by the docs-directory-relative path. These never collide with the
+	// repo's own change paths today because the CLI routes docs only under
+	// FullRebuild; when incremental doc changes land, the change source must
+	// produce paths relative to the same docs root.
 	routes := map[string]diff.Key{}
 	for _, d := range payload.Docs {
 		routes[d.Origin] = diff.DocKey(d.Origin)
@@ -299,7 +310,44 @@ func routerFor(rm *repomap.RepoMap) diff.Router {
 		docs[d.Path] = diff.DocKey(d.Path)
 	}
 
-	return diff.Router{ModuleDirs: dirs, DocPaths: docs}
+	return diff.Router{ModuleDirs: dirs, DocPaths: docs, Cosmetic: cosmeticPath}
+}
+
+// cosmeticPath marks files that never justify an LLM call on their own:
+// images, archives, lockfiles, editor and CI chrome. Manifest and
+// architectural files are exempted by the router itself.
+func cosmeticPath(p string) bool {
+	switch strings.ToLower(filepath.Ext(p)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+		".woff", ".woff2", ".ttf", ".eot",
+		".zip", ".gz", ".tar", ".tgz",
+		".lock", ".sum":
+		return true
+	}
+	base := filepath.Base(p)
+	switch base {
+	case ".gitignore", ".gitattributes", ".editorconfig", ".prettierrc",
+		"package-lock.json", "yarn.lock", "pnpm-lock.yaml":
+		return true
+	}
+	return false
+}
+
+// sectionsByParent indexes section units under their parent document key, for
+// the router.
+func sectionsByParent(wm *mapper.WorkspaceMap) map[diff.Key][]diff.Key {
+	out := map[diff.Key][]diff.Key{}
+	for _, u := range wm.Units {
+		if u.Kind != "doc-section" {
+			continue
+		}
+		parent, _ := u.Meta["parent"].(string)
+		if parent == "" {
+			continue
+		}
+		out[diff.Key(parent)] = append(out[diff.Key(parent)], diff.Key(u.Key))
+	}
+	return out
 }
 
 func report(out io.Writer, res *jobs.BuildResult, dryRun bool, elapsed time.Duration) error {
