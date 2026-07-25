@@ -41,6 +41,7 @@ run over unchanged sources costs nothing.`,
 		newVersionCmd(),
 		newAdminCmd(&g),
 		newBuildCmd(&g),
+		newServeCmd(&g),
 	)
 
 	return cmd

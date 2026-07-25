@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kiln</title>
+<style>
+  /* Fired clay: warm neutrals rather than the cold slate default, because the
+     primary surface here is long-form reading. Serif for prose signals
+     reference work; sans for chrome; mono for paths and shas, which appear
+     constantly and are load-bearing rather than decorative. */
+  :root {
+    --bg: #faf7f2;        --surface: #f2ece2;   --border: #e0d6c7;
+    --ink: #2b2622;       --ink-dim: #6f6459;   --ink-faint: #9a8d7f;
+    --ember: #b4530a;     --ember-soft: #e8c9a8;
+    --ash: #8a8f96;       --oxide: #a3341f;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --serif: Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1715;      --surface: #241f1b;   --border: #3a322b;
+      --ink: #ece5db;     --ink-dim: #b0a294;   --ink-faint: #7d7166;
+      --ember: #e0872f;   --ember-soft: #4a3320;
+      --ash: #6b7178;     --oxide: #d4694f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.5;
+  }
+  a { color: var(--ember); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: var(--mono); font-size: 0.9em; }
+
+  .shell { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
+  @media (max-width: 760px) { .shell { grid-template-columns: 1fr; } aside { display: none; } }
+
+  aside {
+    background: var(--surface); border-right: 1px solid var(--border);
+    padding: 18px 16px; overflow-y: auto; max-height: 100vh;
+  }
+  .brand { font-weight: 600; letter-spacing: -0.01em; font-size: 17px; margin-bottom: 2px; }
+  .brand small { color: var(--ink-faint); font-weight: 400; font-size: 12px; }
+
+  select, input {
+    width: 100%; padding: 7px 9px; margin: 10px 0;
+    background: var(--bg); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-family: var(--sans); font-size: 14px;
+  }
+  input:focus, select:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
+
+  .nav { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+  .nav button {
+    padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--bg); color: var(--ink-dim);
+    font-family: var(--sans); font-size: 12.5px; cursor: pointer;
+  }
+  .nav button:hover { border-color: var(--ember); color: var(--ember); }
+  .nav button[aria-current="true"] {
+    background: var(--ember); border-color: var(--ember); color: #fff;
+  }
+
+  .group-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--ink-faint); margin: 16px 0 5px;
+  }
+  .tree a {
+    display: block; padding: 3px 7px; border-radius: 5px;
+    color: var(--ink-dim); font-size: 13.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tree a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
+  .tree a[aria-current="true"] { background: var(--ember-soft); color: var(--ink); }
+
+  main { padding: 34px 40px 80px; max-width: 74ch; }
+  @media (max-width: 760px) { main { padding: 22px 18px 60px; } }
+
+  .page-head { border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 22px; }
+  h1 { font-family: var(--serif); font-size: 30px; line-height: 1.2; margin: 0 0 8px; font-weight: 600; }
+  .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12.5px; color: var(--ink-dim); }
+  .chip {
+    padding: 2px 8px; border-radius: 999px;
+    background: var(--surface); border: 1px solid var(--border);
+  }
+
+  /* Freshness as temperature: a page built from current sources reads warm and
+     cools toward ash as it falls behind. Staleness is the reader's central
+     question, so it is legible at a glance rather than by comparing dates. */
+  .chip.fresh { border-color: var(--ember); color: var(--ember); }
+  .chip.stale { border-color: var(--ash); color: var(--ash); }
+
+  .prose { font-family: var(--serif); font-size: 17px; line-height: 1.65; }
+  .prose h1, .prose h2, .prose h3 { font-family: var(--serif); line-height: 1.25; margin: 1.6em 0 0.5em; }
+  .prose h1 { font-size: 25px; } .prose h2 { font-size: 21px; } .prose h3 { font-size: 18px; }
+  .prose p, .prose li { margin: 0.7em 0; }
+  .prose ul, .prose ol { padding-left: 1.4em; }
+  .prose code {
+    background: var(--surface); padding: 1px 5px; border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  .prose pre {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto;
+  }
+  .prose pre code { background: none; border: none; padding: 0; }
+  .prose blockquote {
+    margin: 1em 0; padding-left: 14px;
+    border-left: 3px solid var(--ember-soft); color: var(--ink-dim);
+  }
+  .wikilink { border-bottom: 1px solid var(--ember-soft); }
+  .wikilink.dead {
+    color: var(--ink-faint); border-bottom: 1px dashed var(--ink-faint); cursor: help;
+  }
+
+  .hint { color: var(--ink-dim); font-size: 14px; }
+  .empty { padding: 40px 0; color: var(--ink-dim); }
+  .empty code { background: var(--surface); padding: 2px 6px; border-radius: 4px; }
+
+  .row {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 9px 0; border-bottom: 1px solid var(--border);
+  }
+  .row .count { color: var(--ink-faint); font-size: 13px; white-space: nowrap; }
+  .banner {
+    background: var(--surface); border: 1px solid var(--oxide); color: var(--oxide);
+    padding: 9px 12px; border-radius: 7px; margin-bottom: 18px; font-size: 13.5px;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside>
+    <div class="brand">kiln <small id="version"></small></div>
+    <select id="workspace" aria-label="Workspace"></select>
+    <input id="search" type="search" placeholder="Search pages…" aria-label="Search">
+    <div class="nav">
+      <button data-view="overview">Overview</button>
+      <button data-view="index">Index</button>
+      <button data-view="gaps">Gaps</button>
+      <button data-view="log">Log</button>
+    </div>
+    <div class="tree" id="tree"></div>
+  </aside>
+  <main id="main"><div class="empty">Loading…</div></main>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = { workspace: null, pages: [], slugs: new Set(), view: "overview" };
+
+const api = async (path) => {
+  const res = await fetch(`/api/v1${path}`);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+};
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// A very small markdown subset: enough to read a generated page without
+// shipping a parser. Everything is escaped first, so page content is data.
+function renderMarkdown(src) {
+  const lines = esc(src).split("\n");
+  let html = "", inCode = false, listType = null;
+
+  const closeList = () => { if (listType) { html += `</${listType}>`; listType = null; } };
+  const openList = (t) => { if (listType !== t) { closeList(); html += `<${t}>`; listType = t; } };
+
+  for (const raw of lines) {
+    if (raw.trimStart().startsWith("```")) {
+      closeList();
+      html += inCode ? "</code></pre>" : "<pre><code>";
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) { html += raw + "\n"; continue; }
+
+    const heading = raw.match(/^(#{1,4})\s+(.*)$/);
+    if (heading) {
+      closeList();
+      const level = Math.min(heading[1].length + 1, 4);
+      html += `<h${level}>${inline(heading[2])}</h${level}>`;
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(raw)) {
+      openList("ul");
+      html += `<li>${inline(raw.replace(/^\s*[-*]\s+/, ""))}</li>`;
+      continue;
+    }
+    if (/^\s*\d+\.\s+/.test(raw)) {
+      openList("ol");
+      html += `<li>${inline(raw.replace(/^\s*\d+\.\s+/, ""))}</li>`;
+      continue;
+    }
+    if (raw.trimStart().startsWith("&gt;")) {
+      closeList();
+      html += `<blockquote>${inline(raw.replace(/^\s*&gt;\s?/, ""))}</blockquote>`;
+      continue;
+    }
+    if (raw.trim() === "") { closeList(); continue; }
+    closeList();
+    html += `<p>${inline(raw)}</p>`;
+  }
+  closeList();
+  if (inCode) html += "</code></pre>";
+  return html;
+}
+
+function inline(text) {
+  return text
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, alias) => {
+      const slug = target.split("/").pop().replace(/\.md$/, "");
+      const label = alias || slug;
+      // A link to a page that does not exist is drawn as a gap rather than
+      // hidden: it is the wiki saying what it wants and does not have.
+      return state.slugs.has(slug)
+        ? `<a class="wikilink" href="#/page/${encodeURIComponent(slug)}">${label}</a>`
+        : `<span class="wikilink dead" title="No page for &quot;${slug}&quot; yet">${label}</span>`;
+    });
+}
+
+function renderTree(active) {
+  const order = ["synthesis", "entity", "concept", "source", "comparison", "query"];
+  const labels = {
+    synthesis: "Synthesis", entity: "Entities", concept: "Concepts",
+    source: "Sources", comparison: "Comparisons", query: "Queries",
+  };
+  const byType = {};
+  for (const p of state.pages) (byType[p.type] ||= []).push(p);
+
+  let html = "";
+  for (const type of order) {
+    const group = byType[type];
+    if (!group) continue;
+    group.sort((a, b) => (a.title || a.slug).localeCompare(b.title || b.slug));
+    html += `<div class="group-label">${labels[type]}</div>`;
+    for (const p of group) {
+      const current = p.slug === active ? ' aria-current="true"' : "";
+      html += `<a href="#/page/${encodeURIComponent(p.slug)}"${current}>${esc(p.title || p.slug)}</a>`;
+    }
+  }
+  $("tree").innerHTML = html || `<div class="hint">No pages yet.</div>`;
+}
+
+function setNav(view) {
+  for (const b of document.querySelectorAll(".nav button")) {
+    b.setAttribute("aria-current", String(b.dataset.view === view));
+  }
+}
+
+const freshnessChip = (ref) => ref
+  ? `<span class="chip fresh">as of <span class="mono">${esc(ref)}</span></span>`
+  : `<span class="chip stale">source revision unknown</span>`;
+
+async function showPage(slug) {
+  setNav(null);
+  renderTree(slug);
+  try {
+    const p = await api(`/workspaces/${state.workspace}/pages/${encodeURIComponent(slug)}`);
+    $("main").innerHTML = `
+      <div class="page-head">
+        <h1>${esc(p.title || p.slug)}</h1>
+        <div class="meta">
+          <span class="chip">${esc(p.type)}</span>
+          ${freshnessChip(p.builtAtRef)}
+          ${p.updated ? `<span>updated ${esc(p.updated)}</span>` : ""}
+          ${(p.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join("")}
+        </div>
+      </div>
+      <div class="prose">${renderMarkdown(p.body)}</div>
+      ${(p.sources || []).length ? `<div class="page-head" style="margin-top:32px;border-bottom:none">
+        <div class="group-label">Derived from</div>
+        <div class="meta">${p.sources.map((s) => `<span class="chip mono">${esc(s)}</span>`).join("")}</div>
+      </div>` : ""}`;
+  } catch (err) {
+    $("main").innerHTML = `<div class="banner">Could not load that page: ${esc(err.message)}</div>`;
+  }
+}
+
+async function showArtifact(kind) {
+  setNav(kind);
+  renderTree(null);
+  const { body } = await api(`/workspaces/${state.workspace}/${kind}`);
+  if (!body.trim()) {
+    $("main").innerHTML = `<div class="empty">
+      No ${kind} yet. Run <code>kiln build &lt;path&gt;</code> to generate one.</div>`;
+    return;
+  }
+  $("main").innerHTML = `<div class="prose">${renderMarkdown(body)}</div>`;
+}
+
+async function showGaps() {
+  setNav("gaps");
+  renderTree(null);
+  const gaps = await api(`/workspaces/${state.workspace}/gaps`);
+  if (!gaps.length) {
+    $("main").innerHTML = `<h1>Gaps</h1><div class="empty">
+      Every wikilink resolves. Nothing is missing.</div>`;
+    return;
+  }
+  $("main").innerHTML = `<h1>Gaps</h1>
+    <p class="hint">Pages the wiki links to but does not have — the most precise
+    signal of what is missing, since the wiki asked for these itself.</p>
+    ${gaps.map((g) => `<div class="row">
+      <span class="mono">${esc(g.slug)}</span>
+      <span class="count">wanted by ${g.wantedBy} page${g.wantedBy === 1 ? "" : "s"}</span>
+    </div>`).join("")}`;
+}
+
+async function showSearch(query) {
+  setNav(null);
+  const hits = await api(`/workspaces/${state.workspace}/search?q=${encodeURIComponent(query)}`);
+  $("main").innerHTML = `<h1>Search</h1>
+    <p class="hint">${hits.length} result${hits.length === 1 ? "" : "s"} for
+      <strong>${esc(query)}</strong></p>
+    ${hits.map((h) => `<div class="row">
+      <a href="#/page/${encodeURIComponent(h.slug)}">${esc(h.title || h.slug)}</a>
+      <span class="count">${esc(h.type)}</span>
+    </div>`).join("") || `<div class="empty">Nothing matched.</div>`}`;
+}
+
+async function loadWorkspace(slug) {
+  state.workspace = slug;
+  state.pages = await api(`/workspaces/${slug}/pages`);
+  state.slugs = new Set(state.pages.map((p) => p.slug));
+  route();
+}
+
+function route() {
+  const hash = location.hash.replace(/^#\//, "");
+  if (hash.startsWith("page/")) return showPage(decodeURIComponent(hash.slice(5)));
+  if (["index", "overview", "log"].includes(hash)) return showArtifact(hash);
+  if (hash === "gaps") return showGaps();
+  return showArtifact("overview");
+}
+
+async function boot() {
+  try {
+    const { version } = await api("/version");
+    $("version").textContent = version;
+
+    const workspaces = await api("/workspaces");
+    if (!workspaces.length) {
+      $("main").innerHTML = `<div class="empty">
+        No workspaces yet. Run <code>kiln build &lt;path&gt;</code> to create one.</div>`;
+      return;
+    }
+    $("workspace").innerHTML = workspaces
+      .map((w) => `<option value="${esc(w.slug)}">${esc(w.name)} (${w.pageCount})</option>`)
+      .join("");
+
+    $("workspace").addEventListener("change", (e) => loadWorkspace(e.target.value));
+    window.addEventListener("hashchange", route);
+    for (const b of document.querySelectorAll(".nav button")) {
+      b.addEventListener("click", () => { location.hash = `#/${b.dataset.view}`; });
+    }
+    $("search").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.target.value.trim()) showSearch(e.target.value.trim());
+    });
+
+    await loadWorkspace(workspaces[0].slug);
+  } catch (err) {
+    $("main").innerHTML = `<div class="banner">Could not reach the API: ${esc(err.message)}</div>`;
+  }
+}
+
+boot();
+</script>
+</body>
+</html>
