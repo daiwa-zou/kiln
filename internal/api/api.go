@@ -83,6 +83,8 @@ type Server struct {
 	// Admin backs the connector and credential CRUD. Nil leaves those routes
 	// unmounted.
 	Admin AdminStore
+	// Members backs org membership management. Nil leaves it unmounted.
+	Members MemberStore
 	// Keyring seals credentials at write time. Nil (no master key configured)
 	// keeps connector CRUD working but answers credential writes with 503.
 	Keyring *Keyring
@@ -203,6 +205,17 @@ func (s *Server) Router() http.Handler {
 						r.Get("/credentials", s.handleCredentialsList)
 						r.Post("/credentials", s.handleCredentialCreate)
 						r.Delete("/credentials/{id}", s.handleCredentialDelete)
+					})
+				}
+
+				if s.Members != nil {
+					// Membership: the same owner/admin gate as connectors.
+					r.Group(func(r chi.Router) {
+						r.Use(writeLimiter(s.writeLimit))
+						r.Get("/members", s.handleMembersList)
+						r.Post("/members", s.handleMemberAdd)
+						r.Patch("/members/{userID}", s.handleMemberPatch)
+						r.Delete("/members/{userID}", s.handleMemberRemove)
 					})
 				}
 

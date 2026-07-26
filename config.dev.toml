@@ -11,7 +11,9 @@
 # Contains no secrets; safe to commit. worker.permitted_source_roots is
 # machine-specific, so the Makefile supplies it via environment instead.
 
-http_addr = ":8080"
+# Loopback on purpose: auth.mode = "none" makes every caller an admin, and
+# kiln serve refuses that combination on any reachable interface.
+http_addr = "127.0.0.1:8080"
 log_level = "debug"
 
 [database]

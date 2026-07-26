@@ -78,7 +78,14 @@ depth/size caps, timeouts.
 enqueue refused with a review_item; remote clone of a public repo builds end-to-end; a
 DB-configured `path` outside permitted roots is rejected.
 
-## M3 — Multi-Tenant SaaS Shell
+## M3 — Multi-Tenant SaaS Shell ✅ shipped
+
+*Shipped 2026-07-26. GitHub App sign-in with server-side sessions and CSRF,
+webhook ingress with HMAC + cooldown, the worker's poll scheduler, org-owner
+authority on admin surfaces with member management, and the auth-none
+loopback refusal. The OAuth round trip is proven against a faked GitHub in
+tests; a live browser round trip additionally needs a registered GitHub App
+(client id/secret + private key in config).*
 
 *Strangers can sign in, install the GitHub App, and their wikis stay fresh unattended.*
 

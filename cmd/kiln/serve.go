@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -47,6 +49,17 @@ processes separately so builds scale independently of the API.`,
 				cfg.HTTPAddr = addr
 			}
 
+			// With auth disabled every caller is an admin. On loopback that
+			// is a personal-machine convenience; on any reachable interface
+			// it hands the whole instance to the network. Refusing to start
+			// is the only honest behavior.
+			if cfg.Auth.Mode == config.AuthNone && !loopbackAddr(cfg.HTTPAddr) {
+				return fmt.Errorf(
+					"refusing to serve %s with auth.mode = \"none\": every caller would be an admin.\n"+
+						"Bind a loopback address (e.g. 127.0.0.1:8080) or enable token auth",
+					cfg.HTTPAddr)
+			}
+
 			log := observability.NewLogger(firstNonEmpty(g.logLevel, cfg.LogLevel))
 
 			db, err := store.Open(ctx, cfg)
@@ -67,6 +80,7 @@ processes separately so builds scale independently of the API.`,
 				Writes:       ws,
 				Runs:         ws,
 				Admin:        ws,
+				Members:      ws,
 				BudgetWindow: cfg.Agent.BudgetWindow,
 				DB:           db,
 				Log:          log,
@@ -136,4 +150,19 @@ processes separately so builds scale independently of the API.`,
 	cmd.Flags().BoolVar(&withWorker, "with-worker", false, "also run a build worker in this process")
 
 	return cmd
+}
+
+// loopbackAddr reports whether a listen address can only be reached from
+// this machine. An empty host (":8080") binds every interface and is not
+// loopback.
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
