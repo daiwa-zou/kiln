@@ -15,7 +15,10 @@ import (
 )
 
 func newServeCmd(g *globalFlags) *cobra.Command {
-	var addr string
+	var (
+		addr       string
+		withWorker bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -24,7 +27,11 @@ func newServeCmd(g *globalFlags) *cobra.Command {
 
 The API requires a bearer token by default (mint one with
 "kiln admin token create"); set auth.mode = "none" to opt out on a
-single-user localhost deployment.`,
+single-user localhost deployment.
+
+--with-worker also runs a build worker in this process, for single-node
+deployments and local development; production deployments run "kiln worker"
+processes separately so builds scale independently of the API.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
@@ -68,6 +75,14 @@ single-user localhost deployment.`,
 
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "kiln %s listening on %s\n", observability.Version, cfg.HTTPAddr)
+			if withWorker {
+				w, err := newWorker(cfg, db, log)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(out, "  build worker running in-process (--with-worker)")
+				go func() { _ = w.Run(ctx) }()
+			}
 			fmt.Fprintln(out, "  press ctrl-c to stop")
 
 			return srv.Serve(ctx, cfg.HTTPAddr)
@@ -75,6 +90,7 @@ single-user localhost deployment.`,
 	}
 
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address (overrides config)")
+	cmd.Flags().BoolVar(&withWorker, "with-worker", false, "also run a build worker in this process")
 
 	return cmd
 }

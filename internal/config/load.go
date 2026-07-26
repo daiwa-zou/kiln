@@ -133,6 +133,7 @@ func bindEnv(v *viper.Viper) error {
 		"agent.timeout", "agent.analyze_budget_usd", "agent.page_budget_usd",
 		"agent.run_budget_usd", "agent.max_pages_per_run", "agent.warn_turns",
 		"auth.mode",
+		"worker.poll_interval", "worker.stale_after", "worker.permitted_source_roots",
 	}
 	for _, k := range keys {
 		if err := v.BindEnv(k); err != nil {

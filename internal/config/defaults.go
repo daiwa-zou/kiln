@@ -57,6 +57,10 @@ func applyDefaults(v setter, role Role) {
 	// authentication deliberately rather than ship open by omission.
 	v.SetDefault("auth.mode", string(AuthToken))
 
+	v.SetDefault("worker.poll_interval", 5*time.Second)
+	// Comfortably above agent.timeout, so only a genuinely dead worker's run is
+	// requeued, never one still inside a slow model call.
+	v.SetDefault("worker.stale_after", 45*time.Minute)
 }
 
 func defaultMaxConns(role Role) int32 {

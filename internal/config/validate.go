@@ -88,6 +88,15 @@ func (c *Config) Validate() error {
 		problems = append(problems, "agent: max_pages_per_run must be at least 1")
 	}
 
+	if c.Worker.PollInterval < 0 {
+		problems = append(problems, "worker: poll_interval cannot be negative")
+	}
+	if c.Worker.StaleAfter != 0 && c.Worker.StaleAfter <= c.Agent.Timeout {
+		problems = append(problems, fmt.Sprintf(
+			"worker: stale_after (%s) must exceed agent.timeout (%s), or an in-flight run would be requeued mid-build",
+			c.Worker.StaleAfter, c.Agent.Timeout))
+	}
+
 	switch c.Auth.Mode {
 	case AuthToken, AuthNone:
 	case "":
