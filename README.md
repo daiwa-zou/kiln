@@ -17,7 +17,8 @@ nothing changes, a run costs nothing.
 
 ## Status
 
-Early development. See the milestone plan for scope.
+Early development. See [ROADMAP.md](ROADMAP.md) for the milestone plan — M1 (the human loop and
+reader upgrades) has shipped; M2 (server-side builds) is next.
 
 ## How it works
 
