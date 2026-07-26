@@ -52,6 +52,10 @@ type GitHub struct {
 	APIBaseURL string `mapstructure:"api_base_url"`
 	// SessionTTL is how long a browser session lives.
 	SessionTTL time.Duration `mapstructure:"session_ttl"`
+	// WebhookCooldown is the quiet period after a finished run during which
+	// further pushes do not enqueue another, so a push storm costs one
+	// rebuild. Zero disables the cooldown.
+	WebhookCooldown time.Duration `mapstructure:"webhook_cooldown"`
 }
 
 // Worker holds settings for the build worker loop.
@@ -61,6 +65,9 @@ type Worker struct {
 	// StaleAfter is how long a claimed run may hold 'running' before it is
 	// assumed orphaned by a dead worker and returned to the queue.
 	StaleAfter time.Duration `mapstructure:"stale_after"`
+	// SourcePollInterval is how often trigger_mode='poll' connectors are due
+	// for a refresh. Zero disables the poll scheduler.
+	SourcePollInterval time.Duration `mapstructure:"source_poll_interval"`
 	// PermittedSourceRoots are the only directories a database-configured
 	// connector may read from. Empty means every local path is denied: a
 	// connector config is API-writable data, and an unchecked path would be a

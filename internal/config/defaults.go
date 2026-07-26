@@ -66,8 +66,13 @@ func applyDefaults(v setter, role Role) {
 	// A month-long browser session; sessions are server-side rows, so a
 	// stolen cookie is revocable regardless of this.
 	v.SetDefault("github.session_ttl", 30*24*time.Hour)
+	// One rebuild per minute per bench at most, however hard someone pushes.
+	v.SetDefault("github.webhook_cooldown", time.Minute)
 
 	v.SetDefault("worker.poll_interval", 5*time.Second)
+	// Poll-triggered sources refresh every 10 minutes; the hash gate makes an
+	// unchanged sweep free, so the cost of polling is one sync, not one build.
+	v.SetDefault("worker.source_poll_interval", 10*time.Minute)
 	// Comfortably above agent.timeout, so only a genuinely dead worker's run is
 	// requeued, never one still inside a slow model call.
 	v.SetDefault("worker.stale_after", 45*time.Minute)

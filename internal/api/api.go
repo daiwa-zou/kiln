@@ -94,6 +94,16 @@ type Server struct {
 	SessionPool *pgxpool.Pool
 	SessionTTL  time.Duration
 
+	// Hooks and WebhookSecret enable /hooks/github; the route mounts only
+	// when both are present. WebhookCooldown is the quiet period after a
+	// finished run during which pushes do not start another.
+	Hooks           HookStore
+	WebhookSecret   []byte
+	WebhookCooldown time.Duration
+
+	// hookLimit buckets webhook deliveries per remote host; created by Router().
+	hookLimit *limiter
+
 	// writeLimit buckets mutating requests per caller; created by Router().
 	writeLimit *limiter
 }
@@ -135,6 +145,15 @@ func (s *Server) Router() http.Handler {
 		r.Get("/auth/github/login", s.handleGitHubLogin)
 		r.Get("/auth/github/callback", s.handleGitHubCallback)
 		r.Post("/auth/logout", s.handleLogout)
+	}
+
+	// Webhook ingress: GitHub cannot carry a kiln token, so this sits outside
+	// auth.Wrap behind its own HMAC check, size cap, and rate limit.
+	if s.Hooks != nil && len(s.WebhookSecret) > 0 {
+		if s.hookLimit == nil {
+			s.hookLimit = newLimiter()
+		}
+		r.With(writeLimiter(s.hookLimit)).Post("/hooks/github", s.handleGitHubWebhook)
 	}
 
 	r.Route("/api/v1", func(r chi.Router) {

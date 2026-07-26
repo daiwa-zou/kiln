@@ -96,6 +96,12 @@ processes separately so builds scale independently of the API.`,
 				srv.SessionTTL = cfg.GitHub.SessionTTL
 				fmt.Fprintln(cmd.OutOrStdout(), "  GitHub sign-in enabled")
 			}
+			if cfg.Secrets.GitHubWebhookSecret != "" {
+				srv.Hooks = ws
+				srv.WebhookSecret = []byte(cfg.Secrets.GitHubWebhookSecret)
+				srv.WebhookCooldown = cfg.GitHub.WebhookCooldown
+				fmt.Fprintln(cmd.OutOrStdout(), "  GitHub webhook ingress enabled at /hooks/github")
+			}
 
 			if cfg.Auth.Mode == config.AuthNone {
 				log.Warn("API authentication is disabled (auth.mode = none); every bench is readable by anyone who can reach this port")

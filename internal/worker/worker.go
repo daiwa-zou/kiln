@@ -32,6 +32,8 @@ type Store interface {
 	ConnectorByID(ctx context.Context, id string) (*store.ConnectorRow, error)
 	MarkConnectorSync(ctx context.Context, id, syncErr string) error
 	LoadSealedCredential(ctx context.Context, id string) (*store.SealedCredential, error)
+	PollDueConnectors(ctx context.Context, olderThan time.Duration) ([]store.ConnectorRow, error)
+	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error)
 }
 
 // Worker is one claim-and-build loop.
@@ -48,6 +50,15 @@ type Worker struct {
 	// presumed orphaned and requeued. Zero values take the config defaults.
 	Poll       time.Duration
 	StaleAfter time.Duration
+
+	// SourcePollInterval is how often trigger_mode='poll' connectors are due
+	// for a refresh, for origins with no useful webhook. Zero disables the
+	// scheduler.
+	SourcePollInterval time.Duration
+
+	// lastSourcePoll throttles the scheduler to roughly one sweep per
+	// interval regardless of how fast the claim loop spins.
+	lastSourcePoll time.Time
 
 	// PermittedSourceRoots is the local-path allowlist for database-configured
 	// connectors. Empty denies every local path: connector configs are
@@ -78,6 +89,7 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 		ID:                   fmt.Sprintf("%s-%d", host, os.Getpid()),
 		Poll:                 cfg.Worker.PollInterval,
 		StaleAfter:           cfg.Worker.StaleAfter,
+		SourcePollInterval:   cfg.Worker.SourcePollInterval,
 		PermittedSourceRoots: cfg.Worker.PermittedSourceRoots,
 		MasterKey:            cfg.Secrets.MasterKey,
 		GitHub: &github.Client{
@@ -104,6 +116,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 
 		w.requeueStale(ctx, log)
+		w.pollSources(ctx, log)
 
 		run, err := w.Store.ClaimNextRun(ctx, w.ID)
 		if err != nil {
@@ -344,6 +357,31 @@ func (w *Worker) failRun(ctx context.Context, runID string, cause error, log *sl
 	// gone, or the workspace stays blocked until the stale deadline.
 	if err := w.Store.FailRun(context.WithoutCancel(ctx), runID, cause.Error()); err != nil {
 		log.Error("recording run failure failed", "error", err)
+	}
+}
+
+// pollSources enqueues runs for poll-triggered connectors that are due. The
+// sweep runs at most once per minute: due-ness itself is measured against
+// each connector's last sync, so sweeping faster buys nothing.
+func (w *Worker) pollSources(ctx context.Context, log *slog.Logger) {
+	if w.SourcePollInterval <= 0 || time.Since(w.lastSourcePoll) < time.Minute {
+		return
+	}
+	w.lastSourcePoll = time.Now()
+
+	due, err := w.Store.PollDueConnectors(ctx, w.SourcePollInterval)
+	if err != nil {
+		log.Error("poll scheduler query failed", "error", err)
+		return
+	}
+	for _, c := range due {
+		// The active-run index makes this idempotent: a connector already
+		// building debounces onto its waiting run.
+		if _, created, err := w.Store.EnqueueRun(ctx, c.WorkspaceID, "poll", c.ID); err != nil {
+			log.Error("poll enqueue failed", "connector", c.Name, "error", err)
+		} else if created {
+			log.Info("poll enqueued run", "connector", c.Name, "workspace", c.WorkspaceID)
+		}
 	}
 }
 
