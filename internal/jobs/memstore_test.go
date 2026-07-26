@@ -28,6 +28,11 @@ type memStore struct {
 	imports []ImportRequest
 	runs    []RunSummary
 
+	// approvedDeletions and deletionReviews mirror the review-queue half of the
+	// human loop: the pipeline consumes the former and files the latter.
+	approvedDeletions []diff.Key
+	deletionReviews   []DeletionCandidate
+
 	// failImport makes Import return an error, to prove the run is still
 	// ledgered as failed when the commit does not land.
 	failImport error
@@ -127,6 +132,29 @@ func (m *memStore) RecordRun(_ context.Context, run RunSummary) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.runs = append(m.runs, run)
+	return nil
+}
+
+func (m *memStore) LoadApprovedDeletions(context.Context, string) ([]diff.Key, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.approvedDeletions, nil
+}
+
+func (m *memStore) EnsureDeletionReviews(_ context.Context, _ string, cands []DeletionCandidate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Dedup by key, matching the real store's one-open-question-per-source rule.
+	seen := map[diff.Key]bool{}
+	for _, existing := range m.deletionReviews {
+		seen[existing.Key] = true
+	}
+	for _, c := range cands {
+		if !seen[c.Key] {
+			m.deletionReviews = append(m.deletionReviews, c)
+			seen[c.Key] = true
+		}
+	}
 	return nil
 }
 

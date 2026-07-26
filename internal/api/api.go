@@ -38,9 +38,28 @@ type Store interface {
 	LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error)
 }
 
+// WriteStore is the human-loop surface: steering, corrections, the review
+// queue, backlinks, and the role lookup that gates mutation. Separate from
+// Store so the read-only handlers keep their narrow dependency.
+type WriteStore interface {
+	UpsertSteeringDoc(ctx context.Context, workspaceID, kind, body, updatedBy string) error
+	LoadSteeringDocs(ctx context.Context, workspaceID string) (map[string]string, error)
+	CreateCorrection(ctx context.Context, workspaceID, pageRef, body, createdBy string) (string, error)
+	ListCorrections(ctx context.Context, workspaceID, pageRef string) ([]store.CorrectionRow, error)
+	SetCorrectionActive(ctx context.Context, workspaceID, correctionID string, active bool) error
+	ListReviews(ctx context.Context, workspaceID, status string, limit, offset int) ([]store.ReviewRow, error)
+	ResolveReview(ctx context.Context, workspaceID, reviewID, action, resolvedBy string) error
+	Backlinks(ctx context.Context, workspaceID, slug string) ([]store.PageInfo, error)
+	WorkspaceRole(ctx context.Context, workspaceID, userID string) (string, error)
+}
+
 // Server holds the API dependencies.
 type Server struct {
 	Store Store
+	// Writes backs the human-loop routes. Nil disables them (405/501 would
+	// lie; the routes are simply not mounted), which keeps read-only embeds
+	// of this server working unchanged.
+	Writes WriteStore
 	// DB backs the readiness probe only; every content query goes through
 	// Store so handlers stay testable without Postgres.
 	DB  *store.DB
@@ -52,6 +71,9 @@ type Server struct {
 	// CORSOrigins are origins allowed to call the API from a browser, for a
 	// separately hosted frontend. Empty means same-origin only.
 	CORSOrigins []string
+
+	// writeLimit buckets mutating requests per caller; created by Router().
+	writeLimit *limiter
 }
 
 // Pagination bounds. Defaults serve the UI; ceilings stop a caller from
@@ -66,6 +88,9 @@ const (
 
 // Router builds the HTTP handler.
 func (s *Server) Router() http.Handler {
+	if s.writeLimit == nil {
+		s.writeLimit = newLimiter()
+	}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
@@ -102,6 +127,28 @@ func (s *Server) Router() http.Handler {
 				r.Get("/log", s.handleArtifact("log"))
 				r.Get("/search", s.handleSearch)
 				r.Get("/gaps", s.handleGaps)
+
+				if s.Writes == nil {
+					return
+				}
+				// The human loop: reads sit with the other reads; mutations
+				// share a rate limiter so a script cannot flood the queue.
+				r.Get("/backlinks/{slug}", s.handleBacklinks)
+				r.Get("/steering", s.handleSteeringGet)
+				r.Get("/reviews", s.handleReviews)
+				r.Get("/corrections/*", s.handleCorrectionsList)
+
+				r.Group(func(r chi.Router) {
+					r.Use(writeLimiter(s.writeLimit))
+					r.Put("/steering/{kind}", s.handleSteeringPut)
+					r.Post("/corrections/*", s.handleCorrectionCreate)
+					// Singular on purpose: /corrections/* is the per-page
+					// wildcard (a page ref may contain slashes), and sharing
+					// that subtree with an {id} param would leave method
+					// dispatch to router tie-breaking rules.
+					r.Patch("/correction/{id}", s.handleCorrectionPatch)
+					r.Post("/reviews/{id}/resolve", s.handleReviewResolve)
+				})
 			})
 		})
 	})
@@ -121,7 +168,7 @@ func corsMiddleware(origins []string) func(http.Handler) http.Handler {
 				h := w.Header()
 				h.Set("Access-Control-Allow-Origin", origin)
 				h.Add("Vary", "Origin")
-				h.Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+				h.Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST, PUT, PATCH")
 				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match")
 				h.Set("Access-Control-Max-Age", "600")
 			}
@@ -281,11 +328,12 @@ func (s *Server) handleArtifact(kind string) http.HandlerFunc {
 
 // SearchHit is one full-text match.
 type SearchHit struct {
-	Path  string  `json:"path"`
-	Slug  string  `json:"slug"`
-	Type  string  `json:"type"`
-	Title string  `json:"title"`
-	Rank  float64 `json:"rank"`
+	Path    string  `json:"path"`
+	Slug    string  `json:"slug"`
+	Type    string  `json:"type"`
+	Title   string  `json:"title"`
+	Rank    float64 `json:"rank"`
+	Snippet string  `json:"snippet,omitempty"`
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -307,7 +355,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]SearchHit, 0, len(hits))
 	for _, h := range hits {
-		out = append(out, SearchHit{Path: h.Path, Slug: h.Slug, Type: h.Type, Title: h.Title, Rank: h.Rank})
+		out = append(out, SearchHit{
+			Path: h.Path, Slug: h.Slug, Type: h.Type,
+			Title: h.Title, Rank: h.Rank, Snippet: h.Snippet,
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

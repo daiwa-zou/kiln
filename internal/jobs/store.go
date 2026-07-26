@@ -37,8 +37,28 @@ type Store interface {
 	// Import commits one run's output atomically.
 	Import(ctx context.Context, in ImportRequest) error
 
-	// RecordRun persists the run summary.
+	// RecordRun persists the run summary, including any review flags the agent
+	// raised -- questions it wants a human to judge rather than guess at.
 	RecordRun(ctx context.Context, run RunSummary) error
+
+	// LoadApprovedDeletions returns source keys whose removal a human approved
+	// through the review queue. Deletion is never automatic: a suspended token
+	// and a genuine deletion look identical at the sync layer, so the cascade
+	// only ever acts on keys returned here or passed explicitly by the caller.
+	LoadApprovedDeletions(ctx context.Context, workspaceID string) ([]diff.Key, error)
+
+	// EnsureDeletionReviews files one open review item per disappeared source,
+	// deduplicated so a source that stays missing raises exactly one question.
+	EnsureDeletionReviews(ctx context.Context, workspaceID string, cands []DeletionCandidate) error
+}
+
+// DeletionCandidate is a source that vanished from the map and needs a human
+// to decide between deletion and retention.
+type DeletionCandidate struct {
+	Key diff.Key
+	// Detail is the human-facing consequence summary: how many pages an
+	// approval would remove, and which.
+	Detail string
 }
 
 // Steering is the human-authored context injected into prompts.
@@ -89,6 +109,18 @@ type RunSummary struct {
 	Deleted     int
 	Err         string
 	Items       []ItemSummary
+	// Reviews are flags the agent raised for human judgment. They were emitted
+	// on every run since the schema first asked for them; recording them is
+	// what turns the review queue from a table into a feature.
+	Reviews []ReviewNote
+}
+
+// ReviewNote is one agent-raised flag, tagged with the unit that raised it.
+type ReviewNote struct {
+	Kind   string
+	Title  string
+	Detail string
+	Unit   diff.Key
 }
 
 // ItemSummary is one work item's outcome.

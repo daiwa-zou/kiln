@@ -36,7 +36,6 @@
   code, .mono { font-family: var(--mono); font-size: 0.9em; }
 
   .shell { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
-  @media (max-width: 760px) { .shell { grid-template-columns: 1fr; } aside { display: none; } }
 
   aside {
     background: var(--surface); border-right: 1px solid var(--border);
@@ -45,13 +44,31 @@
   .brand { font-weight: 600; letter-spacing: -0.01em; font-size: 17px; margin-bottom: 2px; }
   .brand small { color: var(--ink-faint); font-weight: 400; font-size: 12px; }
 
-  select, input {
+  /* Small screens get the same sidebar as a drawer rather than losing it:
+     before this, under 760px there was no way to navigate at all. */
+  .menu-btn {
+    display: none; position: fixed; top: 10px; right: 10px; z-index: 30;
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface); color: var(--ink); font-size: 14px; cursor: pointer;
+  }
+  @media (max-width: 760px) {
+    .shell { grid-template-columns: 1fr; }
+    aside { display: none; }
+    .menu-btn { display: block; }
+    body.nav-open aside {
+      display: block; position: fixed; inset: 0 64px 0 0; z-index: 20;
+      box-shadow: 4px 0 24px rgba(0,0,0,0.25);
+    }
+  }
+
+  select, input, textarea {
     width: 100%; padding: 7px 9px; margin: 10px 0;
     background: var(--bg); color: var(--ink);
     border: 1px solid var(--border); border-radius: 6px;
     font-family: var(--sans); font-size: 14px;
   }
-  input:focus, select:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
+  textarea { font-family: var(--mono); font-size: 13px; line-height: 1.5; resize: vertical; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
 
   .nav { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
   .nav button {
@@ -75,6 +92,8 @@
   }
   .tree a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
   .tree a[aria-current="true"] { background: var(--ember-soft); color: var(--ink); }
+  .signout { margin-top: 18px; font-size: 12px; color: var(--ink-faint); cursor: pointer; }
+  .signout:hover { color: var(--oxide); }
 
   main { padding: 34px 40px 80px; max-width: 74ch; }
   @media (max-width: 760px) { main { padding: 22px 18px 60px; } }
@@ -111,6 +130,14 @@
     margin: 1em 0; padding-left: 14px;
     border-left: 3px solid var(--ember-soft); color: var(--ink-dim);
   }
+  .prose table {
+    border-collapse: collapse; margin: 1em 0; font-size: 15px;
+    display: block; overflow-x: auto;
+  }
+  .prose th, .prose td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; }
+  .prose th { background: var(--surface); font-weight: 600; }
+  .prose img { max-width: 100%; border-radius: 8px; }
+  .prose hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
   .wikilink { border-bottom: 1px solid var(--ember-soft); }
   .wikilink.dead {
     color: var(--ink-faint); border-bottom: 1px dashed var(--ink-faint); cursor: help;
@@ -125,13 +152,42 @@
     padding: 9px 0; border-bottom: 1px solid var(--border);
   }
   .row .count { color: var(--ink-faint); font-size: 13px; white-space: nowrap; }
+  .hit { padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .hit .snippet { font-size: 13.5px; color: var(--ink-dim); margin-top: 3px; }
+  mark { background: var(--ember-soft); color: var(--ink); border-radius: 3px; padding: 0 2px; }
   .banner {
     background: var(--surface); border: 1px solid var(--oxide); color: var(--oxide);
     padding: 9px 12px; border-radius: 7px; margin-bottom: 18px; font-size: 13.5px;
   }
+  .notice {
+    background: var(--surface); border: 1px solid var(--border); color: var(--ink-dim);
+    padding: 9px 12px; border-radius: 7px; margin-bottom: 18px; font-size: 13.5px;
+  }
+
+  .btn {
+    padding: 6px 14px; border: 1px solid var(--ember); border-radius: 6px;
+    background: var(--ember); color: #fff; font-family: var(--sans);
+    font-size: 13px; cursor: pointer;
+  }
+  .btn.quiet { background: var(--bg); color: var(--ember); }
+  .btn.quiet:hover { background: var(--ember-soft); }
+  .btn + .btn { margin-left: 6px; }
+
+  .review { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
+  .review .detail { font-size: 13.5px; color: var(--ink-dim); margin: 6px 0 10px; white-space: pre-wrap; }
+  .review .meta { margin-bottom: 6px; }
+
+  .correction { border-left: 3px solid var(--ember-soft); padding: 4px 0 4px 12px; margin: 8px 0; }
+  .correction.inactive { border-left-color: var(--border); color: var(--ink-faint); }
+  .correction .body { white-space: pre-wrap; font-size: 14px; }
+  .correction .tools { font-size: 12px; margin-top: 2px; }
+  .correction .tools a { color: var(--ink-faint); cursor: pointer; }
+  details.panel { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 10px; }
+  details.panel summary { cursor: pointer; color: var(--ink-dim); font-size: 13.5px; }
 </style>
 </head>
 <body>
+<button class="menu-btn" id="menu" aria-label="Menu">☰</button>
 <div class="shell">
   <aside>
     <div class="brand">kiln <small id="version"></small></div>
@@ -141,9 +197,12 @@
       <button data-view="overview">Overview</button>
       <button data-view="index">Index</button>
       <button data-view="gaps">Gaps</button>
+      <button data-view="reviews">Reviews</button>
       <button data-view="log">Log</button>
+      <button data-view="steering">Steering</button>
     </div>
     <div class="tree" id="tree"></div>
+    <div class="signout" id="signout" hidden>Sign out of this kiln</div>
   </aside>
   <main id="main"><div class="empty">Loading…</div></main>
 </div>
@@ -154,21 +213,49 @@ const $ = (id) => document.getElementById(id);
 const state = { workspace: null, pages: [], slugs: new Set(), view: "overview" };
 
 const TOKEN_KEY = "kiln.token";
+const WORKSPACE_KEY = "kiln.workspace";
 
-const api = async (path) => {
+// Conditional-request cache: the server ETags most reads off the wiki
+// revision, which only moves on import, so a 304 saves the whole body.
+const etagCache = new Map();
+
+const api = async (path, opts = {}) => {
+  const method = opts.method || "GET";
   const headers = {};
   const token = localStorage.getItem(TOKEN_KEY);
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`/api/v1${path}`, { headers });
+  let body;
+  if (opts.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(opts.body);
+  }
+  const cached = method === "GET" ? etagCache.get(path) : null;
+  if (cached) headers["If-None-Match"] = cached.etag;
+
+  const res = await fetch(`/api/v1${path}`, { method, headers, body });
+  if (res.status === 304 && cached) return cached.data;
   if (res.status === 401) {
     showTokenForm(Boolean(token));
     const err = new Error("401 unauthorized");
     err.handled = true; // the form is already on screen; don't overwrite it
     throw err;
   }
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  if (!res.ok) {
+    // The server answers errors as {"error": ...}; surface that message
+    // rather than a bare status line when it is present.
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const j = await res.json();
+      if (j.error) msg = j.error;
+    } catch { /* not JSON; keep the status line */ }
+    throw new Error(msg);
+  }
+
+  const data = await res.json();
+  const etag = res.headers.get("ETag");
+  if (method === "GET" && etag) etagCache.set(path, { etag, data });
+  return data;
 };
 
 // The API requires a bearer token (kiln admin token create). The token lives
@@ -181,8 +268,7 @@ function showTokenForm(hadToken) {
       <code>kiln admin token create --login you</code> and paste it here.
       It is stored only in this browser.</p>
     <input id="token-input" type="password" placeholder="kiln_…" aria-label="Access token">
-    <button id="token-save" class="nav-button" style="padding:7px 16px;border:1px solid var(--ember);
-      border-radius:6px;background:var(--ember);color:#fff;cursor:pointer">Save token</button>`;
+    <button id="token-save" class="btn">Save token</button>`;
   const save = () => {
     const v = $("token-input").value.trim();
     if (!v) return;
@@ -196,16 +282,27 @@ function showTokenForm(hadToken) {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// safeURL admits only destinations that cannot execute script: http(s) and
+// internal hash routes. Anything else renders as text, which fails safe.
+const safeURL = (u) => /^(https?:\/\/|#\/)/.test(u) ? u : null;
+
 // A very small markdown subset: enough to read a generated page without
 // shipping a parser. Everything is escaped first, so page content is data.
 function renderMarkdown(src) {
+  // Artifacts arrive with their frontmatter fence intact; metadata is chrome
+  // here, not prose, and the --- fences would otherwise render as rules.
+  src = src.replace(/^﻿?\s*---\n[\s\S]*?\n---\n/, "");
   const lines = esc(src).split("\n");
   let html = "", inCode = false, listType = null;
 
   const closeList = () => { if (listType) { html += `</${listType}>`; listType = null; } };
   const openList = (t) => { if (listType !== t) { closeList(); html += `<${t}>`; listType = t; } };
+  const isTableRow = (s) => /^\s*\|.*\|\s*$/.test(s);
+  const isTableRule = (s) => /^\s*\|[\s:|-]+\|\s*$/.test(s);
+  const splitRow = (s) => s.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
 
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     if (raw.trimStart().startsWith("```")) {
       closeList();
       html += inCode ? "</code></pre>" : "<pre><code>";
@@ -214,6 +311,22 @@ function renderMarkdown(src) {
     }
     if (inCode) { html += raw + "\n"; continue; }
 
+    // A pipe row followed by a |---| rule opens a table; rows are consumed
+    // until the first non-row line.
+    if (isTableRow(raw) && isTableRule(lines[i + 1] ?? "")) {
+      closeList();
+      html += "<table><thead><tr>" +
+        splitRow(raw).map((c) => `<th>${inline(c)}</th>`).join("") +
+        "</tr></thead><tbody>";
+      i += 1;
+      while (isTableRow(lines[i + 1] ?? "")) {
+        i += 1;
+        html += "<tr>" + splitRow(lines[i]).map((c) => `<td>${inline(c)}</td>`).join("") + "</tr>";
+      }
+      html += "</tbody></table>";
+      continue;
+    }
+
     const heading = raw.match(/^(#{1,4})\s+(.*)$/);
     if (heading) {
       closeList();
@@ -221,6 +334,7 @@ function renderMarkdown(src) {
       html += `<h${level}>${inline(heading[2])}</h${level}>`;
       continue;
     }
+    if (/^\s*(---+|\*\*\*+)\s*$/.test(raw)) { closeList(); html += "<hr>"; continue; }
     if (/^\s*[-*]\s+/.test(raw)) {
       openList("ul");
       html += `<li>${inline(raw.replace(/^\s*[-*]\s+/, ""))}</li>`;
@@ -248,7 +362,20 @@ function renderMarkdown(src) {
 function inline(text) {
   return text
     .replace(/`([^`]+)`/g, "<code>$1</code>")
+    // Images before links, since the syntaxes nest.
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, url) => {
+      const u = safeURL(url);
+      return u ? `<img src="${u}" alt="${alt}" loading="lazy">` : m;
+    })
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
+      const u = safeURL(url);
+      if (!u) return m;
+      const ext = u.startsWith("#/") ? "" : ` target="_blank" rel="noopener"`;
+      return `<a href="${u}"${ext}>${label}</a>`;
+    })
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, "$1<em>$2</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, alias) => {
       const slug = target.split("/").pop().replace(/\.md$/, "");
       const label = alias || slug;
@@ -289,6 +416,8 @@ function setNav(view) {
   }
 }
 
+const banner = (err) => `<div class="banner">${esc(err.message)}</div>`;
+
 const freshnessChip = (ref) => ref
   ? `<span class="chip fresh">as of <span class="mono">${esc(ref)}</span></span>`
   : `<span class="chip stale">source revision unknown</span>`;
@@ -298,6 +427,14 @@ async function showPage(slug) {
   renderTree(slug);
   try {
     const p = await api(`/workspaces/${state.workspace}/pages/${encodeURIComponent(slug)}`);
+
+    // Backlinks and corrections are separate fetches so a failure in either
+    // degrades to a page without that panel, not a broken page.
+    const [backlinks, corrections] = await Promise.all([
+      api(`/workspaces/${state.workspace}/backlinks/${encodeURIComponent(p.slug)}`).catch(() => []),
+      api(`/workspaces/${state.workspace}/corrections/${encodeURIComponent(p.slug)}`).catch(() => null),
+    ]);
+
     $("main").innerHTML = `
       <div class="page-head">
         <h1>${esc(p.title || p.slug)}</h1>
@@ -309,74 +446,260 @@ async function showPage(slug) {
         </div>
       </div>
       <div class="prose">${renderMarkdown(p.body)}</div>
-      ${(p.sources || []).length ? `<div class="page-head" style="margin-top:32px;border-bottom:none">
+      ${backlinks.length ? `<div class="page-head" style="margin-top:32px;border-bottom:none">
+        <div class="group-label">Linked from</div>
+        <div class="meta">${backlinks.map((b) =>
+          `<a class="chip" href="#/page/${encodeURIComponent(b.slug)}">${esc(b.title || b.slug)}</a>`).join("")}</div>
+      </div>` : ""}
+      ${(p.sources || []).length ? `<div class="page-head" style="margin-top:16px;border-bottom:none">
         <div class="group-label">Derived from</div>
         <div class="meta">${p.sources.map((s) => `<span class="chip mono">${esc(s)}</span>`).join("")}</div>
-      </div>` : ""}`;
+      </div>` : ""}
+      ${correctionsPanel(p.slug, corrections)}`;
+
+    wireCorrections(p.slug);
   } catch (err) {
     if (err.handled) return;
     $("main").innerHTML = `<div class="banner">Could not load that page: ${esc(err.message)}</div>`;
   }
 }
 
+// correctionsPanel renders pinned corrections and the form to add one. Pages
+// are never hand-edited -- regeneration would clobber the edit -- so this is
+// the sanctioned way to teach the wiki something it got wrong.
+function correctionsPanel(slug, corrections) {
+  if (corrections === null) return ""; // endpoint unavailable (older server)
+  const items = corrections.map((c) => `
+    <div class="correction ${c.active ? "" : "inactive"}">
+      <div class="body">${esc(c.body)}</div>
+      <div class="tools">${esc(c.created)} ·
+        <a data-correction="${esc(c.id)}" data-active="${!c.active}">
+          ${c.active ? "deactivate" : "reactivate"}</a></div>
+    </div>`).join("");
+  return `
+    <details class="panel" ${corrections.some((c) => c.active) ? "open" : ""}>
+      <summary>Corrections (${corrections.filter((c) => c.active).length} active)</summary>
+      <p class="hint">A correction is pinned beside the page and re-injected into
+        every future rebuild. Use it when the wiki states something wrong; the
+        next regeneration will honor it.</p>
+      ${items}
+      <textarea id="correction-body" rows="3" placeholder="What should the wiki know about this page?"></textarea>
+      <button class="btn" id="correction-pin">Pin correction</button>
+      <span class="hint" id="correction-note"></span>
+    </details>`;
+}
+
+function wireCorrections(slug) {
+  const pin = $("correction-pin");
+  if (pin) pin.addEventListener("click", async () => {
+    const body = $("correction-body").value.trim();
+    if (!body) return;
+    try {
+      await api(`/workspaces/${state.workspace}/corrections/${encodeURIComponent(slug)}`,
+        { method: "POST", body: { body } });
+      showPage(slug);
+    } catch (err) {
+      if (!err.handled) $("correction-note").textContent = err.message;
+    }
+  });
+  for (const a of document.querySelectorAll("[data-correction]")) {
+    a.addEventListener("click", async () => {
+      try {
+        await api(`/workspaces/${state.workspace}/correction/${a.dataset.correction}`,
+          { method: "PATCH", body: { active: a.dataset.active === "true" } });
+        showPage(slug);
+      } catch (err) {
+        if (!err.handled) $("correction-note").textContent = err.message;
+      }
+    });
+  }
+}
+
 async function showArtifact(kind) {
   setNav(kind);
   renderTree(null);
-  const { body } = await api(`/workspaces/${state.workspace}/${kind}`);
-  if (!body.trim()) {
-    $("main").innerHTML = `<div class="empty">
-      No ${kind} yet. Run <code>kiln build &lt;path&gt;</code> to generate one.</div>`;
-    return;
+  try {
+    const { body } = await api(`/workspaces/${state.workspace}/${kind}`);
+    if (!body.trim()) {
+      $("main").innerHTML = `<div class="empty">
+        No ${kind} yet. Run <code>kiln build &lt;path&gt;</code> to generate one.</div>`;
+      return;
+    }
+    $("main").innerHTML = `<div class="prose">${renderMarkdown(body)}</div>`;
+  } catch (err) {
+    if (!err.handled) $("main").innerHTML = banner(err);
   }
-  $("main").innerHTML = `<div class="prose">${renderMarkdown(body)}</div>`;
 }
 
 async function showGaps() {
   setNav("gaps");
   renderTree(null);
-  const gaps = await api(`/workspaces/${state.workspace}/gaps`);
-  if (!gaps.length) {
-    $("main").innerHTML = `<h1>Gaps</h1><div class="empty">
-      Every wikilink resolves. Nothing is missing.</div>`;
-    return;
+  try {
+    const gaps = await api(`/workspaces/${state.workspace}/gaps`);
+    if (!gaps.length) {
+      $("main").innerHTML = `<h1>Gaps</h1><div class="empty">
+        Every wikilink resolves. Nothing is missing.</div>`;
+      return;
+    }
+    $("main").innerHTML = `<h1>Gaps</h1>
+      <p class="hint">Pages the wiki links to but does not have — the most precise
+      signal of what is missing, since the wiki asked for these itself.</p>
+      ${gaps.map((g) => `<div class="row">
+        <span class="mono">${esc(g.slug)}</span>
+        <span class="count">wanted by ${g.wantedBy} page${g.wantedBy === 1 ? "" : "s"}</span>
+      </div>`).join("")}`;
+  } catch (err) {
+    if (!err.handled) $("main").innerHTML = banner(err);
   }
-  $("main").innerHTML = `<h1>Gaps</h1>
-    <p class="hint">Pages the wiki links to but does not have — the most precise
-    signal of what is missing, since the wiki asked for these itself.</p>
-    ${gaps.map((g) => `<div class="row">
-      <span class="mono">${esc(g.slug)}</span>
-      <span class="count">wanted by ${g.wantedBy} page${g.wantedBy === 1 ? "" : "s"}</span>
-    </div>`).join("")}`;
+}
+
+// showReviews renders the wiki's questions for its humans: contradictions and
+// uncertainties the agent flagged, and deletions awaiting approval.
+async function showReviews(all) {
+  setNav("reviews");
+  renderTree(null);
+  try {
+    const status = all ? "" : "open";
+    const reviews = await api(`/workspaces/${state.workspace}/reviews?status=${status}`);
+    const toggle = all
+      ? `<a href="#/reviews">show open only</a>`
+      : `<a href="#/reviews/all">show resolved too</a>`;
+
+    if (!reviews.length) {
+      $("main").innerHTML = `<h1>Reviews</h1>
+        <p class="hint">${toggle}</p>
+        <div class="empty">No ${all ? "" : "open "}reviews. When a build is uncertain
+        about something — or a source disappears — the question lands here.</div>`;
+      return;
+    }
+    $("main").innerHTML = `<h1>Reviews</h1>
+      <p class="hint">Questions the wiki cannot answer alone. Resolving one records
+        your judgment; approving a deletion authorizes the next build to act on it.
+        ${toggle}</p>
+      ${reviews.map((r) => `
+        <div class="review">
+          <div class="meta">
+            <span class="chip">${esc(r.kind)}</span>
+            ${r.pageSlug ? `<a class="chip" href="#/page/${encodeURIComponent(r.pageSlug)}">${esc(r.pageSlug)}</a>` : ""}
+            <span>${esc(r.created)}</span>
+            ${r.status !== "open" ? `<span class="chip">${esc(r.status)}${r.resolved ? " " + esc(r.resolved) : ""}</span>` : ""}
+          </div>
+          <strong>${esc(r.title)}</strong>
+          <div class="detail">${esc(r.detail)}</div>
+          ${r.status === "open" ? (r.actions && r.actions.length ? r.actions : ["dismiss"]).map((a) =>
+            `<button class="btn ${a === "approve" ? "" : "quiet"}" data-review="${esc(r.id)}" data-action="${esc(a)}">${esc(a)}</button>`
+          ).join("") : ""}
+        </div>`).join("")}`;
+
+    for (const b of document.querySelectorAll("[data-review]")) {
+      b.addEventListener("click", async () => {
+        try {
+          await api(`/workspaces/${state.workspace}/reviews/${b.dataset.review}/resolve`,
+            { method: "POST", body: { action: b.dataset.action } });
+          showReviews(all);
+        } catch (err) {
+          if (!err.handled) $("main").insertAdjacentHTML("afterbegin", banner(err));
+        }
+      });
+    }
+  } catch (err) {
+    if (!err.handled) $("main").innerHTML = banner(err);
+  }
+}
+
+// showSteering edits the purpose and schema documents: the main lever for
+// changing a wiki's character, injected into every prompt from the next run.
+async function showSteering() {
+  setNav("steering");
+  renderTree(null);
+  try {
+    const docs = await api(`/workspaces/${state.workspace}/steering`);
+    const label = { purpose: "Purpose — what this wiki is for and who reads it",
+                    schema: "Schema — page conventions the builds should follow" };
+    $("main").innerHTML = `<h1>Steering</h1>
+      <p class="hint">These documents are injected into every generation prompt.
+      Edit them to change what future builds emphasize; existing pages update as
+      their sources next change (or with a forced rebuild).</p>
+      ${["purpose", "schema"].map((k) => `
+        <div class="group-label">${esc(label[k])}</div>
+        <textarea id="steering-${k}" rows="8">${esc(docs[k] || "")}</textarea>
+        <button class="btn" data-steer="${k}">Save ${k}</button>
+        <span class="hint" id="steering-note-${k}"></span>`).join("")}`;
+
+    for (const b of document.querySelectorAll("[data-steer]")) {
+      b.addEventListener("click", async () => {
+        const kind = b.dataset.steer;
+        const note = $(`steering-note-${kind}`);
+        try {
+          await api(`/workspaces/${state.workspace}/steering/${kind}`,
+            { method: "PUT", body: { body: $(`steering-${kind}`).value } });
+          note.textContent = "saved — applies from the next build";
+        } catch (err) {
+          if (!err.handled) note.textContent = err.message;
+        }
+      });
+    }
+  } catch (err) {
+    if (!err.handled) $("main").innerHTML = banner(err);
+  }
 }
 
 async function showSearch(query) {
   setNav(null);
-  const hits = await api(`/workspaces/${state.workspace}/search?q=${encodeURIComponent(query)}`);
-  $("main").innerHTML = `<h1>Search</h1>
-    <p class="hint">${hits.length} result${hits.length === 1 ? "" : "s"} for
-      <strong>${esc(query)}</strong></p>
-    ${hits.map((h) => `<div class="row">
-      <a href="#/page/${encodeURIComponent(h.slug)}">${esc(h.title || h.slug)}</a>
-      <span class="count">${esc(h.type)}</span>
-    </div>`).join("") || `<div class="empty">Nothing matched.</div>`}`;
+  try {
+    const hits = await api(`/workspaces/${state.workspace}/search?q=${encodeURIComponent(query)}`);
+    // Snippets arrive with [[[match]]] markers; content is escaped first, so
+    // swapping the markers for <mark> afterwards cannot introduce markup.
+    const snippet = (s) => esc(s).replace(/\[\[\[/g, "<mark>").replace(/\]\]\]/g, "</mark>");
+    $("main").innerHTML = `<h1>Search</h1>
+      <p class="hint">${hits.length} result${hits.length === 1 ? "" : "s"} for
+        <strong>${esc(query)}</strong></p>
+      ${hits.map((h) => `<div class="hit">
+        <a href="#/page/${encodeURIComponent(h.slug)}">${esc(h.title || h.slug)}</a>
+        <span class="count"> · ${esc(h.type)}</span>
+        ${h.snippet ? `<div class="snippet">${snippet(h.snippet)}</div>` : ""}
+      </div>`).join("") || `<div class="empty">Nothing matched.</div>`}`;
+  } catch (err) {
+    if (!err.handled) $("main").innerHTML = banner(err);
+  }
+}
+
+// loadAllPages pages through the summaries endpoint until it runs dry. The
+// server caps a single response; stopping at one page silently truncated the
+// sidebar and -- worse -- made links to pages beyond the cap render as dead.
+async function loadAllPages(slug) {
+  const limit = 1000;
+  const all = [];
+  for (let offset = 0; ; offset += limit) {
+    const batch = await api(`/workspaces/${slug}/pages?limit=${limit}&offset=${offset}`);
+    all.push(...batch);
+    if (batch.length < limit) return all;
+  }
 }
 
 async function loadWorkspace(slug) {
   state.workspace = slug;
-  state.pages = await api(`/workspaces/${slug}/pages`);
+  localStorage.setItem(WORKSPACE_KEY, slug);
+  $("workspace").value = slug;
+  state.pages = await loadAllPages(slug);
   state.slugs = new Set(state.pages.map((p) => p.slug));
   route();
 }
 
 function route() {
+  document.body.classList.remove("nav-open");
   const hash = location.hash.replace(/^#\//, "");
   if (hash.startsWith("page/")) return showPage(decodeURIComponent(hash.slice(5)));
   if (["index", "overview", "log"].includes(hash)) return showArtifact(hash);
   if (hash === "gaps") return showGaps();
+  if (hash === "reviews") return showReviews(false);
+  if (hash === "reviews/all") return showReviews(true);
+  if (hash === "steering") return showSteering();
   return showArtifact("overview");
 }
 
 async function boot() {
+  $("menu").addEventListener("click", () => document.body.classList.toggle("nav-open"));
   try {
     const { version } = await api("/version");
     $("version").textContent = version;
@@ -397,10 +720,25 @@ async function boot() {
       b.addEventListener("click", () => { location.hash = `#/${b.dataset.view}`; });
     }
     $("search").addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && e.target.value.trim()) showSearch(e.target.value.trim());
+      if (e.key === "Enter" && e.target.value.trim()) {
+        document.body.classList.remove("nav-open");
+        showSearch(e.target.value.trim());
+      }
     });
+    if (localStorage.getItem(TOKEN_KEY)) {
+      const so = $("signout");
+      so.hidden = false;
+      so.addEventListener("click", () => {
+        localStorage.removeItem(TOKEN_KEY);
+        location.reload();
+      });
+    }
 
-    await loadWorkspace(workspaces[0].slug);
+    // The workspace choice survives a reload; a remembered slug that no
+    // longer exists falls back to the first.
+    const stored = localStorage.getItem(WORKSPACE_KEY);
+    const initial = workspaces.some((w) => w.slug === stored) ? stored : workspaces[0].slug;
+    await loadWorkspace(initial);
   } catch (err) {
     if (err.handled) return;
     $("main").innerHTML = `<div class="banner">Could not reach the API: ${esc(err.message)}</div>`;

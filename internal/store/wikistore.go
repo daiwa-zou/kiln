@@ -471,6 +471,25 @@ func (s *WikiStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 		}
 	}
 
+	// Agent-raised review flags land with the run that raised them.
+	// Deduplicated against open items so a model that keeps flagging the same
+	// contradiction across runs asks the question once, not once per run.
+	for _, rv := range run.Reviews {
+		detail := rv.Detail
+		if rv.Unit != "" {
+			detail = fmt.Sprintf("%s\n\n(raised while generating %s)", detail, rv.Unit)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO review_items (workspace_id, run_id, kind, title, detail)
+			SELECT $1, $2, $3, $4, $5
+			WHERE NOT EXISTS (
+			    SELECT 1 FROM review_items
+			    WHERE workspace_id = $1 AND kind = $3 AND title = $4 AND status = 'open')`,
+			run.WorkspaceID, runID, rv.Kind, rv.Title, detail); err != nil {
+			return fmt.Errorf("store: insert review item: %w", err)
+		}
+	}
+
 	// Spend is ledgered separately so budget windows can be queried without
 	// scanning run history.
 	if run.CostUSD > 0 {

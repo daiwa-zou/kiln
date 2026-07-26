@@ -52,8 +52,10 @@ single-user localhost deployment.`,
 				return err
 			}
 
+			ws := store.NewWikiStore(db.Pool)
 			srv := &api.Server{
-				Store:       store.NewWikiStore(db.Pool),
+				Store:       ws,
+				Writes:      ws,
 				DB:          db,
 				Log:         log,
 				CORSOrigins: cfg.CORSOrigins,
