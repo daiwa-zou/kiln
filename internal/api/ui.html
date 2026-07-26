@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<link rel="icon" href="data:,">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5.5' fill='%23b4530a'/%3E%3Cpath fill='%23faf7f2' fill-rule='evenodd' d='M5,20V11.5Q5,4,12,4Q19,4,19,11.5V20ZM9,20V14.5Q9,11,12,11Q15,11,15,14.5V20Z'/%3E%3C/svg%3E">
 <title>kiln</title>
 <style>
   /* Fired clay: warm neutrals rather than the cold slate default, because the
@@ -62,8 +62,15 @@
     padding: 18px 16px; overflow-y: auto;
     position: sticky; top: 0; height: 100vh; height: 100dvh;
   }
-  .brand { font-weight: 600; letter-spacing: -0.01em; font-size: 17px; margin-bottom: 2px; }
+  .brand {
+    display: flex; align-items: center; gap: 7px;
+    font-weight: 600; letter-spacing: -0.01em; font-size: 17px; margin-bottom: 2px;
+  }
   .brand small { color: var(--ink-dim); font-weight: 400; font-size: 12px; }
+  /* The mark's firing mouth is an evenodd hole, not a background-colored fill,
+     so the same symbol sits on --surface (sidebar) and --bg (sign-in) alike. */
+  .logo { width: 20px; height: 20px; fill: var(--ember); flex: none; }
+  .logo-signin { width: 48px; height: 48px; display: block; margin-bottom: 14px; }
 
   /* Small screens get the same sidebar as a drawer rather than losing it:
      before this, under 760px there was no way to navigate at all. */
@@ -101,22 +108,55 @@
   textarea { font-family: var(--mono); font-size: 13px; line-height: 1.5; resize: vertical; }
   input:focus, select:focus, textarea:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
 
-  .nav { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+  /* The bench picker is a details/summary accordion rather than a select:
+     a select's open popup overlays whatever sits below it (and is OS-drawn,
+     so it ignores the clay palette), while an open details participates in
+     layout and pushes the sidebar content down instead of covering it. */
+  .bench { margin: 10px 0; }
+  .bench summary {
+    display: block; list-style: none; cursor: pointer; position: relative;
+    padding: 7px 30px 7px 9px; background: var(--bg); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 6px; font-size: 14px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .bench summary::-webkit-details-marker { display: none; }
+  .bench summary::after {
+    content: ""; position: absolute; right: 13px; top: 50%;
+    width: 7px; height: 7px; margin-top: -6px;
+    border-right: 1.5px solid var(--ink-dim); border-bottom: 1.5px solid var(--ink-dim);
+    transform: rotate(45deg); transition: transform var(--dur) var(--ease);
+  }
+  .bench[open] summary { border-radius: 6px 6px 0 0; }
+  .bench[open] summary::after { margin-top: -2px; transform: rotate(-135deg); }
+  .bench-list {
+    padding: 4px; background: var(--bg);
+    border: 1px solid var(--border); border-top: 0; border-radius: 0 0 6px 6px;
+  }
+  .bench-list button {
+    display: block; width: 100%; position: relative; text-align: left;
+    padding: 6px 9px 6px 26px; background: none; border: 0; border-radius: 5px;
+    color: var(--ink); font-family: var(--sans); font-size: 14px; cursor: pointer;
+  }
+  .bench-list button:hover { background: var(--ember-soft); }
+  .bench-list button[aria-current="true"]::before {
+    content: "\2713"; position: absolute; left: 9px; color: var(--ember);
+  }
+
+  .nav { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
   .nav a {
-    padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
-    background: var(--bg); color: var(--ink-dim);
-    font-family: var(--sans); font-size: 12.5px;
-    transition: background-color var(--dur), border-color var(--dur), color var(--dur);
+    display: flex; align-items: center;
+    padding: 6px 10px; border-radius: 6px;
+    color: var(--ink-dim); font-family: var(--sans); font-size: 13px;
+    transition: background-color var(--dur), color var(--dur);
   }
   .badge {
-    display: inline-block; min-width: 16px; padding: 0 4px; margin-left: 2px;
+    display: inline-block; min-width: 16px; padding: 0 4px; margin-left: auto;
     border-radius: 999px; background: var(--ember); color: var(--on-ember);
     font-size: 11px; text-align: center;
   }
-  .nav a:hover { border-color: var(--ember); color: var(--ember); text-decoration: none; }
-  .nav a[aria-current="page"] {
-    background: var(--ember); border-color: var(--ember); color: var(--on-ember);
-  }
+  .nav a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
+  .nav a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
+  .nav a[aria-current="page"] .badge { background: var(--on-ember); color: var(--ember); }
 
   .group-label {
     font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
@@ -376,6 +416,13 @@
 </style>
 </head>
 <body>
+<svg width="0" height="0" aria-hidden="true">
+  <symbol id="logo-mark" viewBox="0 0 24 24">
+    <path fill-rule="evenodd" d="M3 22 L3 12 Q3 2 12 2 Q21 2 21 12 L21 22 Z
+      M8 22 L8 15 Q8 10 12 10 Q16 10 16 15 L16 22 Z
+      M9.8 18.5 a2.2 2.2 0 1 0 4.4 0 a2.2 2.2 0 1 0 -4.4 0 Z"/>
+  </symbol>
+</svg>
 <a class="skip" href="#main">Skip to content</a>
 <button class="menu-btn" id="menu" aria-label="Navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
 <div id="palette" class="palette" hidden>
@@ -388,8 +435,11 @@
 </div>
 <div class="shell">
   <aside id="sidebar" aria-label="Sidebar">
-    <div class="brand">kiln <small id="version"></small></div>
-    <select id="workspace" aria-label="Workspace"></select>
+    <div class="brand"><svg class="logo" aria-hidden="true"><use href="#logo-mark"/></svg>kiln <small id="version"></small></div>
+    <details class="bench" id="bench">
+      <summary id="bench-name" aria-label="Bench"></summary>
+      <div class="bench-list" id="bench-list"></div>
+    </details>
     <div role="search">
       <input id="search" type="search" placeholder="Full-text search…" aria-label="Full-text search"
              enterkeyhint="search" autocomplete="off">
@@ -417,7 +467,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = { workspace: null, pages: [], slugs: new Set(), view: "overview" };
+const state = { workspace: null, benches: [], pages: [], slugs: new Set(), view: "overview" };
 
 const TOKEN_KEY = "kiln.token";
 const WORKSPACE_KEY = "kiln.workspace";
@@ -642,6 +692,7 @@ function showTokenForm(hadToken) {
   tokenFormShown = true;
   $("main").innerHTML = `
     ${hadToken ? `<div class="banner" role="alert">That token was rejected. It may be revoked or expired.</div>` : ""}
+    <svg class="logo logo-signin" aria-hidden="true"><use href="#logo-mark"/></svg>
     <h1>Sign in</h1>
     <p class="hint">This kiln requires an access token. Mint one with
       <code>kiln admin token create --login you</code> and paste it here.
@@ -1460,7 +1511,11 @@ async function loadAllPages(slug) {
 async function loadWorkspace(slug) {
   state.workspace = slug;
   localStorage.setItem(WORKSPACE_KEY, slug);
-  $("workspace").value = slug;
+  const meta = state.benches.find((w) => w.slug === slug);
+  if (meta) $("bench-name").textContent = `${meta.name} (${meta.pageCount})`;
+  for (const b of $("bench-list").querySelectorAll("button"))
+    b.setAttribute("aria-current", String(b.dataset.slug === slug));
+  $("bench").open = false;
   state.pages = await loadAllPages(slug);
   state.slugs = new Set(state.pages.map((p) => p.slug));
   route();
@@ -1490,7 +1545,7 @@ function route() {
 function setDrawer(open) {
   document.body.classList.toggle("nav-open", open);
   $("menu").setAttribute("aria-expanded", String(open));
-  if (open) $("sidebar").querySelector("select, input, a")?.focus();
+  if (open) $("sidebar").querySelector("summary, input, a")?.focus();
   else $("menu").focus();
 }
 
@@ -1667,18 +1722,22 @@ async function boot() {
     const workspaces = await api("/workspaces");
     if (!workspaces.length) {
       $("main").innerHTML = `<div class="empty">
-        No workspaces yet. Run <code>kiln build &lt;path&gt;</code> to create one.</div>`;
+        No benches yet. Run <code>kiln build &lt;path&gt;</code> to create one.</div>`;
       return;
     }
-    $("workspace").innerHTML = workspaces
-      .map((w) => `<option value="${esc(w.slug)}">${esc(w.name)} (${esc(w.pageCount)})</option>`)
+    state.benches = workspaces;
+    $("bench-list").innerHTML = workspaces
+      .map((w) => `<button type="button" data-slug="${esc(w.slug)}">${esc(w.name)} (${esc(w.pageCount)})</button>`)
       .join("");
 
-    $("workspace").addEventListener("change", (e) => {
+    $("bench-list").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-slug]");
+      if (!b) return;
+      if (b.dataset.slug === state.workspace) { $("bench").open = false; return; }
       // A new workspace starts at its overview: carrying the previous page's
       // hash across would greet it with "page not found".
       location.hash = "#/overview";
-      loadWorkspace(e.target.value);
+      loadWorkspace(b.dataset.slug);
     });
     window.addEventListener("hashchange", route);
     $("search").addEventListener("keydown", (e) => {
