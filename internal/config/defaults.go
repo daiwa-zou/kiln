@@ -52,11 +52,18 @@ func applyDefaults(v setter, role Role) {
 	v.SetDefault("agent.run_budget_usd", 6.00)
 	v.SetDefault("agent.max_pages_per_run", 12)
 	v.SetDefault("agent.warn_turns", 40)
+	// A month-shaped window: workspace budget_usd reads naturally as a
+	// monthly cap. Enforced only for workspaces that set a budget.
+	v.SetDefault("agent.budget_window", 30*24*time.Hour)
 
 	// Token auth by default: a shared deployment should have to opt out of
 	// authentication deliberately rather than ship open by omission.
 	v.SetDefault("auth.mode", string(AuthToken))
 
+	v.SetDefault("worker.poll_interval", 5*time.Second)
+	// Comfortably above agent.timeout, so only a genuinely dead worker's run is
+	// requeued, never one still inside a slow model call.
+	v.SetDefault("worker.stale_after", 45*time.Minute)
 }
 
 func defaultMaxConns(role Role) int32 {

@@ -48,22 +48,22 @@ func TestSyncExtractsDocuments(t *testing.T) {
 	if len(keys) != 2 {
 		t.Fatalf("got %d items, want 2: %v", len(keys), itemKeys(set))
 	}
-	if _, ok := keys["doc:notes.md"]; !ok {
+	if _, ok := keys["doc:upload:notes.md"]; !ok {
 		t.Errorf("notes.md missing: %v", itemKeys(set))
 	}
-	if _, ok := keys["doc:reports/q3.txt"]; !ok {
+	if _, ok := keys["doc:upload:reports/q3.txt"]; !ok {
 		t.Errorf("nested document missing: %v", itemKeys(set))
 	}
 
 	// Unsupported types, dotfiles, and vendored directories are not material.
-	for _, unwanted := range []string{"doc:ignored.zip", "doc:.hidden.md", "doc:node_modules/x.md"} {
+	for _, unwanted := range []string{"doc:upload:ignored.zip", "doc:upload:.hidden.md", "doc:upload:node_modules/x.md"} {
 		if _, ok := keys[unwanted]; ok {
 			t.Errorf("%s should not have been ingested", unwanted)
 		}
 	}
 
 	// A heading beats the filename as a title.
-	if got := keys["doc:notes.md"].Title; got != "Meeting Notes" {
+	if got := keys["doc:upload:notes.md"].Title; got != "Meeting Notes" {
 		t.Errorf("Title = %q, want the first heading", got)
 	}
 }
@@ -111,7 +111,7 @@ func TestSyncSkipsEmptyExtractions(t *testing.T) {
 		t.Fatalf("Sync: %v", err)
 	}
 	// A page about nothing still costs a model call.
-	if len(set.Items) != 1 || set.Items[0].Key != "doc:real.md" {
+	if len(set.Items) != 1 || set.Items[0].Key != "doc:upload:real.md" {
 		t.Errorf("items = %v, want only the document with content", itemKeys(set))
 	}
 }

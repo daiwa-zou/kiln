@@ -25,6 +25,10 @@ type WikiStore struct {
 // NewWikiStore wraps a pool.
 func NewWikiStore(pool *pgxpool.Pool) *WikiStore { return &WikiStore{pool: pool} }
 
+// Pool exposes the underlying pool, for callers (and tests) that need SQL the
+// store does not wrap.
+func (s *WikiStore) Pool() *pgxpool.Pool { return s.pool }
+
 var _ jobs.Store = (*WikiStore)(nil)
 
 // LoadSources returns the live source records for a workspace. These are the
@@ -192,7 +196,7 @@ func (s *WikiStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 		return err
 	}
 	for _, src := range in.UpsertSources {
-		if err := upsertSource(ctx, tx, in.WorkspaceID, src); err != nil {
+		if err := upsertSource(ctx, tx, in.WorkspaceID, in.ConnectorID, src); err != nil {
 			return err
 		}
 	}
@@ -397,7 +401,7 @@ func softDeletePages(ctx context.Context, tx pgx.Tx, wikiID string, paths []stri
 	return nil
 }
 
-func upsertSource(ctx context.Context, tx pgx.Tx, workspaceID string, src diff.SourceRecord) error {
+func upsertSource(ctx context.Context, tx pgx.Tx, workspaceID, connectorID string, src diff.SourceRecord) error {
 	files, err := json.Marshal(orEmpty(src.FilesWritten))
 	if err != nil {
 		return fmt.Errorf("store: encode files_written: %w", err)
@@ -407,16 +411,20 @@ func upsertSource(ctx context.Context, tx pgx.Tx, workspaceID string, src diff.S
 		return fmt.Errorf("store: encode blob_keys: %w", err)
 	}
 
+	// connector_id is only ever set, never cleared: a CLI rebuild of a
+	// connector-fed workspace must not detach its sources from the connector.
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO sources (workspace_id, key, kind, input_hash, files_written, blob_keys)
-		VALUES ($1,$2,$3,$4,$5,$6)
+		INSERT INTO sources (workspace_id, connector_id, key, kind, input_hash, files_written, blob_keys)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		ON CONFLICT (workspace_id, key) DO UPDATE SET
+			connector_id = coalesce(EXCLUDED.connector_id, sources.connector_id),
 			input_hash = EXCLUDED.input_hash,
 			files_written = EXCLUDED.files_written,
 			blob_keys = EXCLUDED.blob_keys,
 			deleted_at = NULL,
 			updated_at = now()`,
-		workspaceID, string(src.Key), src.Key.Prefix(), src.InputHash, files, blobs,
+		workspaceID, nullable(connectorID), string(src.Key), src.Key.Prefix(),
+		src.InputHash, files, blobs,
 	); err != nil {
 		return fmt.Errorf("store: upsert source %s: %w", src.Key, err)
 	}
@@ -447,25 +455,44 @@ func (s *WikiStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
+	// A queued run already has its row: the worker passes the database id as
+	// RunID, and the summary finishes that row in place. A CLI run id
+	// ("run-<hex>") is not a UUID, so it takes the insert path below.
 	var runID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO runs (workspace_id, trigger, ref, status, cost_usd, tokens,
-		                  pages_created, pages_updated, pages_deleted, error,
-		                  started_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), now())
-		RETURNING id`,
-		run.WorkspaceID, run.Trigger, nullable(run.Ref), run.Status, run.CostUSD, run.Tokens,
-		run.Created, run.Updated, run.Deleted, nullable(run.Err),
-	).Scan(&runID); err != nil {
-		return fmt.Errorf("store: insert run: %w", err)
+	if isUUID(run.RunID) {
+		err := tx.QueryRow(ctx, `
+			UPDATE runs SET status = $2, ref = COALESCE($3, ref), cost_usd = $4,
+			                tokens = $5, pages_created = $6, pages_updated = $7,
+			                pages_deleted = $8, error = $9, finished_at = now()
+			WHERE id = $1
+			RETURNING id`,
+			run.RunID, run.Status, nullable(run.Ref), run.CostUSD, run.Tokens,
+			run.Created, run.Updated, run.Deleted, nullable(run.Err),
+		).Scan(&runID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("store: finish run %s: %w", run.RunID, err)
+		}
+	}
+	if runID == "" {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO runs (workspace_id, trigger, ref, status, cost_usd, tokens,
+			                  pages_created, pages_updated, pages_deleted, error,
+			                  started_at, finished_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), now())
+			RETURNING id`,
+			run.WorkspaceID, run.Trigger, nullable(run.Ref), run.Status, run.CostUSD, run.Tokens,
+			run.Created, run.Updated, run.Deleted, nullable(run.Err),
+		).Scan(&runID); err != nil {
+			return fmt.Errorf("store: insert run: %w", err)
+		}
 	}
 
 	for _, item := range run.Items {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, turns, error, finished_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7, now())`,
+			INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, est_cost_usd, turns, error, finished_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())`,
 			runID, item.Key.Prefix(), string(item.Key), item.Status,
-			item.CostUSD, item.Turns, nullable(item.Err),
+			item.CostUSD, nullableFloat(item.EstCostUSD), item.Turns, nullable(item.Err),
 		); err != nil {
 			return fmt.Errorf("store: insert run item %s: %w", item.Key, err)
 		}
@@ -544,6 +571,28 @@ func (s *WikiStore) EnsureWorkspace(ctx context.Context, orgSlug, wsSlug, name s
 	return wsID, nil
 }
 
+// isUUID reports whether s is a canonical 8-4-4-4-12 UUID, which is how
+// RecordRun tells a queued run's database id from a CLI-minted run id.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // nullable maps an empty string to SQL NULL, so absent values are absent rather
 // than empty strings.
 func nullable(s string) any {
@@ -551,6 +600,15 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nullableFloat maps zero to SQL NULL: an estimate of zero means "none was
+// made", and NULL keeps it out of averages.
+func nullableFloat(f float64) any {
+	if f == 0 {
+		return nil
+	}
+	return f
 }
 
 func orEmpty(s []string) []string {

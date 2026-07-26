@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/daiwa-zou/kiln/internal/connector"
+	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/extract"
 	"github.com/daiwa-zou/kiln/internal/mapper/docmap"
 )
@@ -110,7 +111,10 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 			}
 		}
 
-		key := "doc:" + rel
+		// The key namespaces the docs-directory-relative path through
+		// diff.UploadOrigin, so an uploaded README.md can never collide with
+		// the repo's own README.md in the source cache or the router.
+		key := string(diff.DocKey(diff.UploadOrigin(rel)))
 		set.Items = append(set.Items, connector.Item{
 			Key:    key,
 			Kind:   "doc",

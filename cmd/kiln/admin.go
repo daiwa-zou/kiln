@@ -9,6 +9,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/config"
+	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
 
@@ -208,8 +209,22 @@ the master key, and the claude binary.`,
 			}
 			fmt.Fprintf(out, "schema      OK  (version %d)\n", version)
 
+			// The master key gates credentials: absent is fine (a local-path
+			// deployment needs none), but a present key that cannot build a
+			// keyring means every credential write and clone would fail.
+			switch cfg.Secrets.MasterKey {
+			case "":
+				fmt.Fprintln(out, "master key  absent (credentials unavailable; set KILN_MASTER_KEY to enable)")
+			default:
+				if _, err := crypto.NewKeyring(cfg.Secrets.MasterKey); err != nil {
+					fmt.Fprintf(out, "master key  FAIL (%v)\n", err)
+					return err
+				}
+				fmt.Fprintln(out, "master key  OK")
+			}
+
 			// Remaining checks land as their subsystems do: storage round-trip,
-			// master-key decryption, GitHub App JWT, Anthropic key, claude binary.
+			// GitHub App JWT, Anthropic key, claude binary.
 			return nil
 		},
 	}

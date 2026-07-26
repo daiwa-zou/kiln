@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -50,7 +51,11 @@ func testServer(t *testing.T) (*httptest.Server, *store.WikiStore, string) {
 		t.Fatalf("EnsureWorkspace: %v", err)
 	}
 
-	srv := httptest.NewServer((&Server{Store: js, Writes: js, DB: &store.DB{Pool: pool}}).Router())
+	srv := httptest.NewServer((&Server{
+		Store: js, Writes: js, Runs: js, Admin: js,
+		BudgetWindow: 30 * 24 * time.Hour,
+		DB:           &store.DB{Pool: pool},
+	}).Router())
 	t.Cleanup(srv.Close)
 	return srv, js, wsID
 }

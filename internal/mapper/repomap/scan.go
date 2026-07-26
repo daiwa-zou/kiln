@@ -119,9 +119,10 @@ type manifest struct {
 	kind string
 	path string
 
-	goMod *GoModule
-	cargo *CargoManifest
-	node  *NodeManifest
+	goMod  *GoModule
+	cargo  *CargoManifest
+	node   *NodeManifest
+	python *PythonManifest
 }
 
 func (s *Scanner) readManifests(root string, files []FileRec) []manifest {
@@ -153,7 +154,13 @@ func (s *Scanner) readManifests(root string, files []FileRec) []manifest {
 				out = append(out, manifest{dir: dir, kind: "node", path: f.Path, node: m})
 			}
 		case "pyproject.toml":
-			out = append(out, manifest{dir: dir, kind: "python", path: f.Path})
+			// A malformed pyproject still marks a python module; it just maps
+			// without a name or dependencies, like before it was parsed.
+			m, err := ParsePyproject(body)
+			if err != nil {
+				m = nil
+			}
+			out = append(out, manifest{dir: dir, kind: "python", path: f.Path, python: m})
 		}
 	}
 
@@ -244,6 +251,9 @@ func (s *Scanner) buildModule(root string, m manifest, files []FileRec, taken ma
 	case m.node != nil:
 		mod.Name = m.node.Name
 		mod.ExternalDeps = m.node.Deps
+	case m.python != nil:
+		mod.Name = m.python.Name
+		mod.ExternalDeps = m.python.Deps
 	}
 	if mod.Name == "" {
 		if m.dir == "." {
@@ -454,6 +464,13 @@ func (s *Scanner) findEntryPoints(root string, files []FileRec, manifests []mani
 					Kind: "npm-bin", Name: b,
 				})
 			}
+		case m.python != nil:
+			for _, script := range m.python.Scripts {
+				out = append(out, EntryPoint{
+					Path: m.path, Module: moduleFor(m.dir),
+					Kind: "python-script", Name: script,
+				})
+			}
 		}
 	}
 
@@ -538,6 +555,10 @@ func (s *Scanner) collectBuildTargets(root string, files []FileRec) []BuildTarge
 			out = append(out, ParseMakefile(f.Path, body)...)
 		case "Procfile":
 			out = append(out, ParseProcfile(f.Path, body)...)
+		case "Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml":
+			out = append(out, ParseTaskfile(f.Path, body)...)
+		case "Tiltfile":
+			out = append(out, ParseTiltfile(f.Path, body)...)
 		}
 	}
 	return out

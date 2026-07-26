@@ -72,6 +72,18 @@ type Server struct {
 	// CORSOrigins are origins allowed to call the API from a browser, for a
 	// separately hosted frontend. Empty means same-origin only.
 	CORSOrigins []string
+	// Runs backs the run queue routes. Nil leaves them unmounted, matching
+	// how Writes disables the human loop.
+	Runs RunStore
+	// BudgetWindow is the rolling window workspace budgets apply to; zero
+	// disables budget enforcement at enqueue.
+	BudgetWindow time.Duration
+	// Admin backs the connector and credential CRUD. Nil leaves those routes
+	// unmounted.
+	Admin AdminStore
+	// Keyring seals credentials at write time. Nil (no master key configured)
+	// keeps connector CRUD working but answers credential writes with 503.
+	Keyring *Keyring
 
 	// writeLimit buckets mutating requests per caller; created by Router().
 	writeLimit *limiter
@@ -128,6 +140,32 @@ func (s *Server) Router() http.Handler {
 				r.Get("/log", s.handleArtifact("log"))
 				r.Get("/search", s.handleSearch)
 				r.Get("/gaps", s.handleGaps)
+
+				if s.Runs != nil && s.Writes != nil {
+					// The run queue: listing is a read; enqueueing shares the
+					// write limiter and role gate, because a rebuild spends
+					// real money.
+					r.Get("/runs", s.handleRunsList)
+					r.Group(func(r chi.Router) {
+						r.Use(writeLimiter(s.writeLimit))
+						r.Post("/runs", s.handleRunCreate)
+					})
+				}
+
+				if s.Admin != nil {
+					// Connector and credential CRUD: admin-only inside the
+					// handlers, rate-limited with the other mutations.
+					r.Group(func(r chi.Router) {
+						r.Use(writeLimiter(s.writeLimit))
+						r.Get("/connectors", s.handleConnectorsList)
+						r.Post("/connectors", s.handleConnectorCreate)
+						r.Patch("/connectors/{id}", s.handleConnectorPatch)
+						r.Delete("/connectors/{id}", s.handleConnectorDelete)
+						r.Get("/credentials", s.handleCredentialsList)
+						r.Post("/credentials", s.handleCredentialCreate)
+						r.Delete("/credentials/{id}", s.handleCredentialDelete)
+					})
+				}
 
 				if s.Writes == nil {
 					return

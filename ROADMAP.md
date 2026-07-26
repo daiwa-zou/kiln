@@ -36,7 +36,12 @@ rewrite until something on this list forces it.
   scheme-checked URLs, `ts_headline` search snippets, review queue + steering + correction forms,
   mobile drawer nav, `If-None-Match` conditional requests, workspace persistence, sign-out.
 
-## M2 — Server-Side Builds (next)
+## M2 — Server-Side Builds ✅ shipped
+
+*Shipped 2026-07-26. Queue on the runs table, run-trigger API + dashboard,
+DB-driven connectors with the LFI allowlist and sealed credentials, https
+shallow clone, pyproject/Taskfile/Tiltfile parsers, and the upload-doc key
+namespace (`doc:upload:<rel>`) that closed the path-collision caveat.*
 
 *`kiln build` stops being CLI-only; the server can refresh its own wikis.*
 

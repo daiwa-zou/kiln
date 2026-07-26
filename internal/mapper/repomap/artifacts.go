@@ -52,6 +52,59 @@ func ParseMakefile(path string, body []byte) []BuildTarget {
 	return out
 }
 
+// taskfileTask matches a task name: a two-space-indented key line under the
+// top-level tasks: section. Values and deeper nesting are skipped by the
+// caller's section tracking, not the regex.
+var taskfileTask = regexp.MustCompile(`^  ([A-Za-z0-9_][A-Za-z0-9_:.-]*)\s*:\s*(?:$|\S)`)
+
+// ParseTaskfile extracts task names from a go-task Taskfile. Line-based like
+// ParseCompose: a YAML parser would pull in a dependency to read one map's
+// keys, and task bodies (cmds, env) are deliberately not captured -- env
+// values in a Taskfile are as credential-prone as in a compose file.
+func ParseTaskfile(path string, body []byte) []BuildTarget {
+	var out []BuildTarget
+	inTasks := false
+	seen := map[string]bool{}
+
+	for _, line := range strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// A non-indented key starts a new top-level section.
+		if !strings.HasPrefix(line, " ") {
+			inTasks = strings.HasPrefix(line, "tasks:")
+			continue
+		}
+		if !inTasks {
+			continue
+		}
+		if m := taskfileTask.FindStringSubmatch(line); m != nil && !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, BuildTarget{File: path, Name: m[1]})
+		}
+	}
+	return out
+}
+
+var tiltResource = regexp.MustCompile(
+	`(?m)^\s*(?:k8s_resource|local_resource|docker_build|dc_resource)\s*\(\s*['"]([^'"]+)['"]`)
+
+// ParseTiltfile extracts resource names from a Tiltfile by regex. A Tiltfile
+// is Starlark; executing it is out of the question, and the resource names
+// are what a wiki reader wants: what this repo runs under Tilt.
+func ParseTiltfile(path string, body []byte) []BuildTarget {
+	var out []BuildTarget
+	seen := map[string]bool{}
+	for _, m := range tiltResource.FindAllStringSubmatch(string(body), -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, BuildTarget{File: path, Name: m[1]})
+		}
+	}
+	return out
+}
+
 // ParseProcfile extracts process names.
 func ParseProcfile(path string, body []byte) []BuildTarget {
 	var out []BuildTarget

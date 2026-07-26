@@ -69,7 +69,7 @@ migrate: build
 	./bin/$(BINARY) admin migrate
 
 dev: build
-	./bin/$(BINARY) serve
+	./bin/$(BINARY) serve --with-worker
 
 clean:
 	rm -rf bin dist

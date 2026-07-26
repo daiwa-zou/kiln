@@ -31,7 +31,23 @@ type Config struct {
 	Storage  Storage  `mapstructure:"storage"`
 	Agent    Agent    `mapstructure:"agent"`
 	Auth     Auth     `mapstructure:"auth"`
+	Worker   Worker   `mapstructure:"worker"`
 	Secrets  Secrets  `mapstructure:"-"`
+}
+
+// Worker holds settings for the build worker loop.
+type Worker struct {
+	// PollInterval is how often an idle worker checks the queue.
+	PollInterval time.Duration `mapstructure:"poll_interval"`
+	// StaleAfter is how long a claimed run may hold 'running' before it is
+	// assumed orphaned by a dead worker and returned to the queue.
+	StaleAfter time.Duration `mapstructure:"stale_after"`
+	// PermittedSourceRoots are the only directories a database-configured
+	// connector may read from. Empty means every local path is denied: a
+	// connector config is API-writable data, and an unchecked path would be a
+	// local-file-inclusion primitive. The CLI, whose paths come from the
+	// operator's own command line, is not subject to this list.
+	PermittedSourceRoots []string `mapstructure:"permitted_source_roots"`
 }
 
 // AuthMode selects how the HTTP API authenticates callers.
@@ -136,6 +152,9 @@ type Agent struct {
 	PageBudgetUSD    float64 `mapstructure:"page_budget_usd"`
 	RunBudgetUSD     float64 `mapstructure:"run_budget_usd"`
 	MaxPagesPerRun   int     `mapstructure:"max_pages_per_run"`
+	// BudgetWindow is the rolling window a workspace's budget_usd cap applies
+	// to, enforced when runs are enqueued. Zero disables window enforcement.
+	BudgetWindow time.Duration `mapstructure:"budget_window"`
 	// WarnTurns triggers a log warning; the installed claude CLI has no
 	// --max-turns, so wall-clock capping is done with Timeout instead.
 	WarnTurns int `mapstructure:"warn_turns"`

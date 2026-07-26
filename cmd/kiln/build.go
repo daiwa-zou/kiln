@@ -1,28 +1,17 @@
 package main
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/daiwa-zou/kiln/internal/agent"
 	"github.com/daiwa-zou/kiln/internal/config"
-	"github.com/daiwa-zou/kiln/internal/connector"
-	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
-	"github.com/daiwa-zou/kiln/internal/connector/upload"
-	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/jobs"
-	"github.com/daiwa-zou/kiln/internal/mapper"
-	"github.com/daiwa-zou/kiln/internal/mapper/docmap"
 	"github.com/daiwa-zou/kiln/internal/mapper/repomap"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
@@ -123,233 +112,27 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		return err
 	}
 
-	// Sync goes through the connector registry rather than calling the scanner
-	// directly, so the abstraction is exercised by the path that uses it rather
-	// than assumed to work.
-	conn, err := connector.Get("git")
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), absPath)
-
-	set, err := conn.Sync(ctx, connector.Config{"path": absPath, "slug": slug}, "")
-	if err != nil {
-		return err
-	}
-
-	// Routing and prompt grounding need the module graph, which a flat item
-	// list cannot express. The git connector carried it on the same sync.
-	rm := gitconn.MapOf(set)
-	if rm == nil {
-		return fmt.Errorf("git connector returned no repository map")
-	}
-	wm := rm.ToWorkspaceMap()
-	fmt.Fprintf(out, "  %d modules, %d units, %d edges\n", len(rm.Modules), len(wm.Units), len(wm.Edges))
-	if rm.Git != nil && rm.Git.HeadSHA != "" {
-		fmt.Fprintf(out, "  at %s on %s\n", short(rm.Git.HeadSHA), rm.Git.Branch)
-	} else {
-		fmt.Fprintln(out, "  not a git repository; change detection uses content hashes")
-	}
-
-	router := routerFor(rm)
-
-	// A second connector's material merges into the same map, so code and
-	// documents produce one wiki whose pages can link across the boundary
-	// rather than two wikis that cannot see each other.
-	if f.docs != "" {
-		docMap, docRouter, staging, err := syncDocs(ctx, out, f.docs)
-		if staging != "" {
-			defer os.RemoveAll(staging)
-		}
-		if err != nil {
-			return err
-		}
-		merged, err := mapper.Merge(absPath, wm, docMap)
-		if err != nil {
-			return err
-		}
-		wm = merged
-		maps.Copy(router.DocPaths, docRouter)
-		// Section units have no path of their own; register them under their
-		// parent so routing a document also routes its chapters.
-		router.DocSections = sectionsByParent(docMap)
-	}
-
 	runner, err := agent.New(cfg)
 	if err != nil {
 		return err
 	}
-
-	pipeline := &jobs.Pipeline{
-		Store: js, Runner: runner, Log: log,
-		Budget: jobs.Budget{
-			AnalyzeUSD: cfg.Agent.AnalyzeBudgetUSD,
-			PageUSD:    cfg.Agent.PageBudgetUSD,
-			RunUSD:     cfg.Agent.RunBudgetUSD,
-			MaxPages:   cfg.Agent.MaxPagesPerRun,
-		},
-		Model:         cfg.Agent.Model,
-		AnalyzeModel:  cfg.Agent.AnalyzeModel,
-		FallbackModel: cfg.Agent.FallbackModel,
-		Timeout:       cfg.Agent.Timeout,
-		MaxRetries:    1,
-		WarnTurns:     cfg.Agent.WarnTurns,
-	}
-
-	req := jobs.BuildRequest{
-		RunID:       newRunID(),
-		WorkspaceID: workspaceID,
-		Trigger:     "manual",
-		Ref:         gitRef(rm),
-		SourceDir:   absPath,
-		Map:         wm,
-		Router:      router,
-		// Every unit is a candidate; the pipeline's hash gate is what actually
-		// decides. A local path has no commit range to diff against, and the
-		// gate is both cheaper and more precise than a filesystem comparison --
-		// it compares each unit's content hash (and the map hash, for the
-		// architecture synthesis) to what the last run recorded, so a repeat
-		// build still costs nothing.
-		Changes: diff.ChangeSet{FullRebuild: true},
-		Force:   f.full,
-		DryRun:  f.dryRun,
-	}
-	// The API runner returns pages as data, so a scratch directory is only
-	// created for the CLI runner that writes files.
-	if agent.WritesFiles(runner) {
-		scratch, err := os.MkdirTemp("", "kiln-scratch-")
-		if err != nil {
-			return err
-		}
-		defer os.RemoveAll(scratch)
-		req.ScratchDir = scratch
-	}
+	pipeline := jobs.NewPipeline(cfg, js, runner, log)
 
 	started := time.Now()
-	res, err := pipeline.Build(ctx, req)
+	res, err := pipeline.Execute(ctx, jobs.ExecuteRequest{
+		RunID:       jobs.NewRunID(),
+		WorkspaceID: workspaceID,
+		Trigger:     "manual",
+		Source:      jobs.SourceSpec{Path: absPath, DocsDir: f.docs, Slug: slug},
+		Force:       f.full,
+		DryRun:      f.dryRun,
+		Progress:    out,
+	})
 	if err != nil {
 		return err
 	}
 
 	return report(out, res, f.dryRun, time.Since(started))
-}
-
-// syncDocs ingests a documents directory through the upload connector and maps
-// it with docmap, returning the map and the doc paths to add to routing.
-//
-// The returned staging directory holds the extracted text the unit inputs point
-// at. It must outlive the build -- prompts are assembled from it -- so the
-// caller owns removing it rather than a defer here.
-func syncDocs(ctx context.Context, out io.Writer, dir string) (_ *mapper.WorkspaceMap, _ map[string]diff.Key, staging string, err error) {
-	absDocs, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, nil, "", err
-	}
-
-	conn, err := connector.Get("upload")
-	if err != nil {
-		return nil, nil, "", err
-	}
-	fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), absDocs)
-
-	staging, err = os.MkdirTemp("", "kiln-docs-")
-	if err != nil {
-		return nil, nil, "", err
-	}
-
-	set, err := conn.Sync(ctx, connector.Config{"path": absDocs}, staging)
-	if err != nil {
-		return nil, nil, staging, err
-	}
-
-	payload := upload.PayloadOf(set)
-	if payload == nil {
-		return nil, nil, staging, fmt.Errorf("upload connector returned no documents payload")
-	}
-
-	dm := &docmap.Mapper{}
-	wm, err := dm.MapDocs(ctx, staging, payload.Docs)
-	if err != nil {
-		return nil, nil, staging, err
-	}
-
-	fmt.Fprintf(out, "  %d document(s), %d units\n", len(payload.Docs), len(wm.Units))
-	// Skips are reported rather than swallowed: a folder that silently ingested
-	// half its files would look like a working build.
-	for _, s := range payload.Skipped {
-		fmt.Fprintf(out, "  skipped %s: %s\n", s.Path, s.Reason)
-	}
-
-	// Keyed by the docs-directory-relative path. These never collide with the
-	// repo's own change paths today because the CLI routes docs only under
-	// FullRebuild; when incremental doc changes land, the change source must
-	// produce paths relative to the same docs root.
-	routes := map[string]diff.Key{}
-	for _, d := range payload.Docs {
-		routes[d.Origin] = diff.DocKey(d.Origin)
-	}
-	return wm, routes, staging, nil
-}
-
-// routerFor maps module directories to their cache keys so a changed path is
-// attributed to the module that owns it.
-//
-// Sub-partitions are registered alongside their parents. They are the reason a
-// 15k-LOC repository becomes readable pages rather than one useless page, so
-// leaving them out would mean a full rebuild covered only the top-level module.
-// Attribution takes the longest matching prefix, so a change under
-// internal/auth lands on that service rather than on the repository root.
-func routerFor(rm *repomap.RepoMap) diff.Router {
-	dirs := map[string]diff.Key{}
-	for _, m := range rm.Modules {
-		if !m.Empty {
-			dirs[m.Dir] = diff.ModuleKey(m.Slug)
-		}
-	}
-
-	docs := map[string]diff.Key{}
-	for _, d := range rm.Docs {
-		docs[d.Path] = diff.DocKey(d.Path)
-	}
-
-	return diff.Router{ModuleDirs: dirs, DocPaths: docs, Cosmetic: cosmeticPath}
-}
-
-// cosmeticPath marks files that never justify an LLM call on their own:
-// images, archives, lockfiles, editor and CI chrome. Manifest and
-// architectural files are exempted by the router itself.
-func cosmeticPath(p string) bool {
-	switch strings.ToLower(filepath.Ext(p)) {
-	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
-		".woff", ".woff2", ".ttf", ".eot",
-		".zip", ".gz", ".tar", ".tgz",
-		".lock", ".sum":
-		return true
-	}
-	base := filepath.Base(p)
-	switch base {
-	case ".gitignore", ".gitattributes", ".editorconfig", ".prettierrc",
-		"package-lock.json", "yarn.lock", "pnpm-lock.yaml":
-		return true
-	}
-	return false
-}
-
-// sectionsByParent indexes section units under their parent document key, for
-// the router.
-func sectionsByParent(wm *mapper.WorkspaceMap) map[diff.Key][]diff.Key {
-	out := map[diff.Key][]diff.Key{}
-	for _, u := range wm.Units {
-		if u.Kind != "doc-section" {
-			continue
-		}
-		parent, _ := u.Meta["parent"].(string)
-		if parent == "" {
-			continue
-		}
-		out[diff.Key(parent)] = append(out[diff.Key(parent)], diff.Key(u.Key))
-	}
-	return out
 }
 
 func report(out io.Writer, res *jobs.BuildResult, dryRun bool, elapsed time.Duration) error {
@@ -391,28 +174,6 @@ func report(out io.Writer, res *jobs.BuildResult, dryRun bool, elapsed time.Dura
 		}
 	}
 	return nil
-}
-
-func newRunID() string {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("run-%d", time.Now().UnixNano())
-	}
-	return "run-" + hex.EncodeToString(b[:])
-}
-
-func gitRef(rm *repomap.RepoMap) string {
-	if rm.Git == nil {
-		return ""
-	}
-	return short(rm.Git.HeadSHA)
-}
-
-func short(sha string) string {
-	if len(sha) > 7 {
-		return sha[:7]
-	}
-	return sha
 }
 
 func firstNonEmpty(vals ...string) string {
