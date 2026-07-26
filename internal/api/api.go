@@ -7,6 +7,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -406,8 +407,16 @@ func (s *Server) resolve(w http.ResponseWriter, r *http.Request) (store.Workspac
 // notModified serves conditional requests off the wiki revision, which exists
 // precisely to bust caches: content only changes when an import bumps it.
 // Returns true when a 304 was written and the handler should stop.
+//
+// The query string is folded into the tag: `?offset=0` and `?offset=1000` are
+// different representations of the same revision, and a shared cache that
+// reused one tag for the other would serve the wrong page of results.
 func notModified(w http.ResponseWriter, r *http.Request, ws store.WorkspaceRow) bool {
 	tag := fmt.Sprintf(`W/"%s-%d"`, ws.ID, ws.Revision)
+	if q := r.URL.RawQuery; q != "" {
+		sum := sha256.Sum256([]byte(q))
+		tag = fmt.Sprintf(`W/"%s-%d-%x"`, ws.ID, ws.Revision, sum[:6])
+	}
 	w.Header().Set("ETag", tag)
 	if r.Header.Get("If-None-Match") == tag {
 		w.WriteHeader(http.StatusNotModified)
