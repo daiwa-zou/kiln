@@ -29,6 +29,13 @@ func New(cfg *config.Config) (Runner, error) {
 		r.Env = MinimalChildEnv(cfg.Secrets.AnthropicAPIKey)
 		return r, nil
 
+	case config.RunnerFake:
+		return NewFakeRunner(FakeOptions{
+			CostPerCall: cfg.Agent.FakeCostUSD,
+			FailUnits:   cfg.Agent.FakeFailUnits,
+			Latency:     cfg.Agent.FakeLatency,
+		}), nil
+
 	default:
 		return nil, fmt.Errorf("agent: unknown runner %q", cfg.Agent.Runner)
 	}

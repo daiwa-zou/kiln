@@ -68,8 +68,12 @@ func (c *Config) Validate() error {
 		if c.Agent.Binary == "" {
 			problems = append(problems, "agent: binary is required for the cli runner")
 		}
+	case RunnerFake:
+		if c.Agent.FakeCostUSD < 0 {
+			problems = append(problems, "agent: fake_cost_usd cannot be negative")
+		}
 	default:
-		problems = append(problems, fmt.Sprintf("agent: unknown runner %q (want api or cli)", c.Agent.Runner))
+		problems = append(problems, fmt.Sprintf("agent: unknown runner %q (want api, cli, or fake)", c.Agent.Runner))
 	}
 
 	switch c.Agent.Effort {

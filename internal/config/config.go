@@ -130,6 +130,11 @@ const (
 	// scratch directory. Kept for local development against an existing CLI
 	// session, and for anyone who would rather not manage an API key.
 	RunnerCLI AgentRunner = "cli"
+	// RunnerFake generates deterministic placeholder pages with zero API
+	// spend, for local development and end-to-end testing. Every pipeline
+	// stage except the prose itself is real: sync, mapping, validation,
+	// import, the queue, and the budget ledger all run exactly as production.
+	RunnerFake AgentRunner = "fake"
 )
 
 // Agent holds settings for reaching Claude.
@@ -158,6 +163,17 @@ type Agent struct {
 	// WarnTurns triggers a log warning; the installed claude CLI has no
 	// --max-turns, so wall-clock capping is done with Timeout instead.
 	WarnTurns int `mapstructure:"warn_turns"`
+
+	// FakeCostUSD is the fake runner's synthetic per-call cost. Non-zero by
+	// default so the spend ledger, cost estimates, and budget windows behave
+	// realistically in development.
+	FakeCostUSD float64 `mapstructure:"fake_cost_usd"`
+	// FakeFailUnits makes the fake runner fail any unit whose key contains
+	// one of these substrings, for exercising partial-run and retry paths.
+	FakeFailUnits []string `mapstructure:"fake_fail_units"`
+	// FakeLatency delays each fake call, for watching queue and UI
+	// transitions happen at human speed.
+	FakeLatency time.Duration `mapstructure:"fake_latency"`
 }
 
 // Secrets holds values that must never be logged or serialized. They are kept

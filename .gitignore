@@ -28,3 +28,6 @@ web/.turbo/
 .idea/
 *.swp
 .claude/
+
+# Local dev state: fs blob storage for config.dev.toml
+.dev/

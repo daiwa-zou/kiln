@@ -133,6 +133,7 @@ func bindEnv(v *viper.Viper) error {
 		"agent.timeout", "agent.analyze_budget_usd", "agent.page_budget_usd",
 		"agent.run_budget_usd", "agent.max_pages_per_run", "agent.warn_turns",
 		"agent.budget_window",
+		"agent.fake_cost_usd", "agent.fake_fail_units", "agent.fake_latency",
 		"auth.mode",
 		"worker.poll_interval", "worker.stale_after", "worker.permitted_source_roots",
 	}

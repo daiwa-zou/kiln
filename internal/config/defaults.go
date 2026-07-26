@@ -55,6 +55,9 @@ func applyDefaults(v setter, role Role) {
 	// A month-shaped window: workspace budget_usd reads naturally as a
 	// monthly cap. Enforced only for workspaces that set a budget.
 	v.SetDefault("agent.budget_window", 30*24*time.Hour)
+	// The fake runner charges a synthetic cent per call so cost plumbing
+	// (ledger, trailing estimates, budget windows) is exercised in dev.
+	v.SetDefault("agent.fake_cost_usd", 0.01)
 
 	// Token auth by default: a shared deployment should have to opt out of
 	// authentication deliberately rather than ship open by omission.
