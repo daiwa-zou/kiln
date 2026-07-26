@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/daiwa-zou/kiln/internal/auth"
+	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
 	"github.com/daiwa-zou/kiln/internal/wiki"
@@ -59,8 +60,13 @@ func authedServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, string, *mutab
 	}
 
 	src := &mutableSource{}
+	keyring, err := crypto.NewKeyring(strings.Repeat("ab", 32)) // 64 hex chars
+	if err != nil {
+		t.Fatalf("test keyring: %v", err)
+	}
 	srv := httptest.NewServer((&Server{
-		Store: js, Writes: js, DB: &store.DB{Pool: pool},
+		Store: js, Writes: js, Runs: js, Admin: js, Keyring: keyring,
+		DB:   &store.DB{Pool: pool},
 		Auth: &auth.Middleware{Source: src},
 	}).Router())
 	t.Cleanup(srv.Close)

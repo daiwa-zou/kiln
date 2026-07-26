@@ -1,0 +1,141 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/daiwa-zou/kiln/internal/auth"
+)
+
+func TestConnectorCRUDIsAdminOnly(t *testing.T) {
+	srv, pool, wsID, src := authedServer(t)
+	member := addMember(t, pool, wsID, "mira", "member")
+
+	body := map[string]any{
+		"kind": "git", "name": "code",
+		"config": map[string]any{"path": "/srv/repos/demo"},
+	}
+
+	// An editor role that can write steering must still not shape connectors:
+	// a connector config decides what the worker reads.
+	src.id = auth.Identity{UserID: member, Scopes: []string{"read", "write"}}
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/connectors", "kiln_valid", body, nil); code != http.StatusForbidden {
+		t.Fatalf("member connector create = %d, want 403", code)
+	}
+	if code := send(t, srv, http.MethodGet, "/api/v1/workspaces/demo/connectors", "kiln_valid", nil, nil); code != http.StatusForbidden {
+		t.Fatalf("member connector list = %d, want 403", code)
+	}
+
+	// Admin: full CRUD round trip.
+	src.id = auth.Identity{UserID: member, Admin: true, Scopes: []string{"read", "write"}}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/connectors", "kiln_valid", body, &created); code != http.StatusCreated {
+		t.Fatalf("admin connector create = %d, want 201", code)
+	}
+
+	var list []map[string]any
+	if code := send(t, srv, http.MethodGet, "/api/v1/workspaces/demo/connectors", "kiln_valid", nil, &list); code != http.StatusOK {
+		t.Fatalf("admin connector list = %d", code)
+	}
+	if len(list) != 1 || list[0]["kind"] != "git" || list[0]["enabled"] != true {
+		t.Errorf("connector list: %+v", list)
+	}
+
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/connectors/"+created.ID, "kiln_valid",
+		map[string]any{"enabled": false}, nil); code != http.StatusOK {
+		t.Fatalf("connector patch = %d", code)
+	}
+	if code := send(t, srv, http.MethodDelete, "/api/v1/workspaces/demo/connectors/"+created.ID, "kiln_valid", nil, nil); code != http.StatusOK {
+		t.Fatalf("connector delete = %d", code)
+	}
+	if code := send(t, srv, http.MethodDelete, "/api/v1/workspaces/demo/connectors/"+created.ID, "kiln_valid", nil, nil); code != http.StatusNotFound {
+		t.Fatalf("double delete = %d, want 404", code)
+	}
+}
+
+func TestConnectorConfigPolicyAtWriteTime(t *testing.T) {
+	srv, pool, wsID, src := authedServer(t)
+	admin := addMember(t, pool, wsID, "ada", "member")
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+
+	cases := map[string]map[string]any{
+		"http url": {"kind": "git", "name": "c", "config": map[string]any{"url": "http://example.com/x.git"}},
+		"url with creds": {"kind": "git", "name": "c",
+			"config": map[string]any{"url": "https://user:pat@example.com/x.git"}},
+		"loopback url": {"kind": "git", "name": "c",
+			"config": map[string]any{"url": "https://127.0.0.1/x.git"}},
+		"git without source":  {"kind": "git", "name": "c", "config": map[string]any{}},
+		"upload without path": {"kind": "upload", "name": "d", "config": map[string]any{}},
+		"unknown kind":        {"kind": "carrier-pigeon", "name": "p", "config": map[string]any{"path": "/x"}},
+	}
+	for name, body := range cases {
+		if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/connectors", "kiln_valid", body, nil); code != http.StatusBadRequest {
+			t.Errorf("%s: create = %d, want 400", name, code)
+		}
+	}
+}
+
+func TestCredentialsAreWriteOnly(t *testing.T) {
+	srv, pool, wsID, src := authedServer(t)
+	admin := addMember(t, pool, wsID, "ada", "member")
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+
+	secret := "ghp_super_secret_token_value"
+	var created struct {
+		ID string `json:"id"`
+	}
+	code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/credentials", "kiln_valid",
+		map[string]string{"kind": "git_pat", "secret": secret}, &created)
+	if code != http.StatusCreated || created.ID == "" {
+		t.Fatalf("credential create = %d (%+v)", code, created)
+	}
+
+	// The listing carries metadata only; the secret is never readable back.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/workspaces/demo/credentials", nil)
+	req.Header.Set("Authorization", "Bearer kiln_valid")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	buf := make([]byte, 1<<12)
+	n, _ := res.Body.Read(buf)
+	if strings.Contains(string(buf[:n]), secret) {
+		t.Fatal("credential listing leaked the secret")
+	}
+
+	// The database holds only ciphertext.
+	var stored []byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT ciphertext FROM credentials WHERE id = $1`, created.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stored), secret) {
+		t.Fatal("credential stored in plaintext")
+	}
+
+	// Unknown kinds are rejected; deletion works once.
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/credentials", "kiln_valid",
+		map[string]string{"kind": "aws_key", "secret": "x"}, nil); code != http.StatusBadRequest {
+		t.Errorf("unknown credential kind = %d, want 400", code)
+	}
+	if code := send(t, srv, http.MethodDelete, "/api/v1/workspaces/demo/credentials/"+created.ID, "kiln_valid", nil, nil); code != http.StatusOK {
+		t.Errorf("credential delete = %d", code)
+	}
+	if code := send(t, srv, http.MethodDelete, "/api/v1/workspaces/demo/credentials/"+created.ID, "kiln_valid", nil, nil); code != http.StatusNotFound {
+		t.Errorf("credential double delete = %d, want 404", code)
+	}
+}
+
+func TestCredentialCreateWithoutKeyringIs503(t *testing.T) {
+	srv, _, _ := testServer(t) // testServer wires no keyring and no auth (admin-by-default)
+	code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/credentials", "",
+		map[string]string{"kind": "git_pat", "secret": "x"}, nil)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("credential create without master key = %d, want 503", code)
+	}
+}

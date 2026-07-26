@@ -10,6 +10,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/api"
 	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/config"
+	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -64,10 +65,20 @@ processes separately so builds scale independently of the API.`,
 				Store:        ws,
 				Writes:       ws,
 				Runs:         ws,
+				Admin:        ws,
 				BudgetWindow: cfg.Agent.BudgetWindow,
 				DB:           db,
 				Log:          log,
 				CORSOrigins:  cfg.CORSOrigins,
+			}
+			// Without a master key the credential routes answer 503 with the
+			// fix; connector CRUD keeps working for local-path setups.
+			if cfg.Secrets.MasterKey != "" {
+				keyring, err := crypto.NewKeyring(cfg.Secrets.MasterKey)
+				if err != nil {
+					return err
+				}
+				srv.Keyring = keyring
 			}
 			if cfg.Auth.Mode == config.AuthNone {
 				log.Warn("API authentication is disabled (auth.mode = none); every bench is readable by anyone who can reach this port")

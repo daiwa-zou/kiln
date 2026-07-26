@@ -52,6 +52,9 @@ type BuildRequest struct {
 	WorkspaceID string
 	Trigger     string
 	Ref         string
+	// ConnectorID attributes this run's source records to a connector, when
+	// the run came through one. Empty for CLI builds.
+	ConnectorID string
 
 	// SourceDir is the materialized tree the agent reads. It is never written
 	// to; validation re-checks it afterwards to prove that held.
@@ -345,6 +348,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	if err := p.Store.Import(importCtx, ImportRequest{
 		WorkspaceID:     req.WorkspaceID,
 		RunID:           req.RunID,
+		ConnectorID:     req.ConnectorID,
 		UpsertPages:     written,
 		SoftDeletePages: cascade.DeletePages,
 		UpsertSources:   newSources,

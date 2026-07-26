@@ -78,6 +78,12 @@ type Server struct {
 	// BudgetWindow is the rolling window workspace budgets apply to; zero
 	// disables budget enforcement at enqueue.
 	BudgetWindow time.Duration
+	// Admin backs the connector and credential CRUD. Nil leaves those routes
+	// unmounted.
+	Admin AdminStore
+	// Keyring seals credentials at write time. Nil (no master key configured)
+	// keeps connector CRUD working but answers credential writes with 503.
+	Keyring *Keyring
 
 	// writeLimit buckets mutating requests per caller; created by Router().
 	writeLimit *limiter
@@ -143,6 +149,21 @@ func (s *Server) Router() http.Handler {
 					r.Group(func(r chi.Router) {
 						r.Use(writeLimiter(s.writeLimit))
 						r.Post("/runs", s.handleRunCreate)
+					})
+				}
+
+				if s.Admin != nil {
+					// Connector and credential CRUD: admin-only inside the
+					// handlers, rate-limited with the other mutations.
+					r.Group(func(r chi.Router) {
+						r.Use(writeLimiter(s.writeLimit))
+						r.Get("/connectors", s.handleConnectorsList)
+						r.Post("/connectors", s.handleConnectorCreate)
+						r.Patch("/connectors/{id}", s.handleConnectorPatch)
+						r.Delete("/connectors/{id}", s.handleConnectorDelete)
+						r.Get("/credentials", s.handleCredentialsList)
+						r.Post("/credentials", s.handleCredentialCreate)
+						r.Delete("/credentials/{id}", s.handleCredentialDelete)
 					})
 				}
 

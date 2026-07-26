@@ -81,6 +81,12 @@ type Steering struct {
 type ImportRequest struct {
 	WorkspaceID string
 	RunID       string
+	// ConnectorID, when set, is recorded on every upserted source so the
+	// schema's connector-scoped cascade has real rows to act on. One id for
+	// the whole run is a simplification: documents merged in through a second
+	// connector share the primary's attribution until per-source attribution
+	// is worth the plumbing.
+	ConnectorID string
 
 	// UpsertPages are validated pages to write.
 	UpsertPages []wiki.Page

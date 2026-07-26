@@ -32,6 +32,9 @@ func (f *fakeStore) ConnectorByID(_ context.Context, id string) (*store.Connecto
 	}
 	return &c, nil
 }
+func (f *fakeStore) LoadSealedCredential(_ context.Context, id string) (*store.SealedCredential, error) {
+	return nil, store.ErrNotFound
+}
 
 func run(ws string) *store.QueuedRun {
 	return &store.QueuedRun{ID: "r1", WorkspaceID: ws, WorkspaceSlug: "bench", Trigger: "manual"}
@@ -47,7 +50,7 @@ func TestSourceSpecResolvesGitAndUpload(t *testing.T) {
 		PermittedSourceRoots: []string{repo, docs},
 	}
 
-	spec, gitID, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, gitID, _, err := w.sourceSpec(context.Background(), run("ws1"))
 	if err != nil {
 		t.Fatalf("sourceSpec: %v", err)
 	}
@@ -122,7 +125,7 @@ func TestSourceSpecFailsClosed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &Worker{Store: tc.store, PermittedSourceRoots: tc.roots}
-			_, _, err := w.sourceSpec(context.Background(), run("ws1"))
+			_, _, _, err := w.sourceSpec(context.Background(), run("ws1"))
 			if err == nil {
 				t.Fatal("sourceSpec succeeded; want failure")
 			}
@@ -148,7 +151,7 @@ func TestSourceSpecPinnedConnector(t *testing.T) {
 
 	r := run("ws1")
 	r.ConnectorID = "pin"
-	spec, gitID, err := w.sourceSpec(context.Background(), r)
+	spec, gitID, _, err := w.sourceSpec(context.Background(), r)
 	if err != nil {
 		t.Fatalf("pinned sourceSpec: %v", err)
 	}

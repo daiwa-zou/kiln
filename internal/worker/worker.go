@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/daiwa-zou/kiln/internal/config"
+	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
+	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -28,6 +30,7 @@ type Store interface {
 	EnabledConnectors(ctx context.Context, workspaceID string) ([]store.ConnectorRow, error)
 	ConnectorByID(ctx context.Context, id string) (*store.ConnectorRow, error)
 	MarkConnectorSync(ctx context.Context, id, syncErr string) error
+	LoadSealedCredential(ctx context.Context, id string) (*store.SealedCredential, error)
 }
 
 // Worker is one claim-and-build loop.
@@ -50,6 +53,10 @@ type Worker struct {
 	// API-writable data, and an unchecked path is a local-file-inclusion
 	// primitive.
 	PermittedSourceRoots []string
+
+	// MasterKey opens sealed credentials, here and nowhere else: the worker
+	// at sync time is the single place plaintext secrets are reconstructed.
+	MasterKey string
 }
 
 // New assembles a worker from resolved configuration.
@@ -66,6 +73,7 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 		Poll:                 cfg.Worker.PollInterval,
 		StaleAfter:           cfg.Worker.StaleAfter,
 		PermittedSourceRoots: cfg.Worker.PermittedSourceRoots,
+		MasterKey:            cfg.Secrets.MasterKey,
 	}
 }
 
@@ -124,10 +132,20 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	log := w.logger().With("run", run.ID, "workspace", run.WorkspaceSlug)
 	log.Info("claimed run", "trigger", run.Trigger)
 
-	spec, connectorID, err := w.sourceSpec(ctx, run)
+	spec, connectorID, cleanup, err := w.sourceSpec(ctx, run)
+	if cleanup != nil {
+		defer cleanup()
+	}
 	if err != nil {
 		log.Error("run not executable", "error", err)
 		w.failRun(ctx, run.ID, err, log)
+		// A run pinned to one connector can attribute the failure to it;
+		// workspace-wide resolution failures have no single owner.
+		if run.ConnectorID != "" {
+			if merr := w.Store.MarkConnectorSync(ctx, run.ConnectorID, err.Error()); merr != nil {
+				log.Error("mark connector sync failed", "error", merr)
+			}
+		}
 		return
 	}
 
@@ -136,6 +154,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		WorkspaceID: run.WorkspaceID,
 		Trigger:     run.Trigger,
 		Source:      spec,
+		ConnectorID: connectorID,
 	})
 
 	syncErr := ""
@@ -158,63 +177,127 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 // sourceSpec resolves a run's connectors into build material. A run pinned to
 // a connector uses that one; otherwise every enabled connector on the
 // workspace feeds the build, merged into one map like the CLI's --docs flag.
-// The returned connector id is the git connector's, for sync bookkeeping.
-func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.SourceSpec, string, error) {
+// The returned connector id is the git connector's, for sync bookkeeping; the
+// cleanup (possibly nil) removes any staging a remote clone materialized.
+func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.SourceSpec, string, func(), error) {
+	fail := func(err error) (jobs.SourceSpec, string, func(), error) {
+		return jobs.SourceSpec{}, "", nil, err
+	}
+
 	var connectors []store.ConnectorRow
 	if run.ConnectorID != "" {
 		c, err := w.Store.ConnectorByID(ctx, run.ConnectorID)
 		if err != nil {
-			return jobs.SourceSpec{}, "", err
+			return fail(err)
 		}
 		connectors = []store.ConnectorRow{*c}
 	} else {
 		var err error
 		connectors, err = w.Store.EnabledConnectors(ctx, run.WorkspaceID)
 		if err != nil {
-			return jobs.SourceSpec{}, "", err
+			return fail(err)
 		}
 	}
 	if len(connectors) == 0 {
-		return jobs.SourceSpec{}, "", fmt.Errorf(
-			"workspace %s has no enabled connector; configure one before queueing runs", run.WorkspaceSlug)
+		return fail(fmt.Errorf(
+			"workspace %s has no enabled connector; configure one before queueing runs", run.WorkspaceSlug))
 	}
 
 	spec := jobs.SourceSpec{Slug: run.WorkspaceSlug}
 	gitConnectorID := ""
+	var cleanup func()
 	for _, c := range connectors {
-		path, _ := c.Config["path"].(string)
-		if path == "" {
-			return jobs.SourceSpec{}, "", fmt.Errorf("connector %s (%s) has no path configured", c.Name, c.Kind)
-		}
-		// SECURITY: this config arrived through the API or the database, not
-		// the operator's command line. The allowlist is what keeps it from
-		// being a read of arbitrary directories the process can see.
-		resolved, err := AllowedPath(path, w.PermittedSourceRoots)
-		if err != nil {
-			return jobs.SourceSpec{}, "", fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err)
+		var (
+			resolved string
+			err      error
+		)
+		if remoteURL, _ := c.Config["url"].(string); remoteURL != "" && c.Kind == "git" {
+			resolved, cleanup, err = w.cloneRemote(ctx, c, remoteURL)
+			if err != nil {
+				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err)
+			}
+		} else {
+			path, _ := c.Config["path"].(string)
+			if path == "" {
+				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s (%s) has no path configured", c.Name, c.Kind)
+			}
+			// SECURITY: this config arrived through the API or the database,
+			// not the operator's command line. The allowlist is what keeps it
+			// from being a read of arbitrary directories the process can see.
+			resolved, err = AllowedPath(path, w.PermittedSourceRoots)
+			if err != nil {
+				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err)
+			}
 		}
 
 		switch c.Kind {
 		case "git":
 			if spec.Path != "" {
-				return jobs.SourceSpec{}, "", fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug)
+				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug)
 			}
 			spec.Path = resolved
 			gitConnectorID = c.ID
 		case "upload":
 			if spec.DocsDir != "" {
-				return jobs.SourceSpec{}, "", fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug)
+				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug)
 			}
 			spec.DocsDir = resolved
 		default:
-			return jobs.SourceSpec{}, "", fmt.Errorf("connector %s has unsupported kind %q", c.Name, c.Kind)
+			return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s has unsupported kind %q", c.Name, c.Kind)
 		}
 	}
 	if spec.Path == "" {
-		return jobs.SourceSpec{}, "", fmt.Errorf(
+		return jobs.SourceSpec{}, "", cleanup, fmt.Errorf(
 			"workspace %s has no git connector; a build needs a repository to scan", run.WorkspaceSlug)
 	}
-	return spec, gitConnectorID, nil
+	return spec, gitConnectorID, cleanup, nil
+}
+
+// cloneRemote materializes a shallow clone of a connector's https remote,
+// decrypting its credential just-in-time. The plaintext token lives only in
+// this frame and the clone subprocess's environment.
+func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteURL string) (dir string, cleanup func(), err error) {
+	token := ""
+	if c.CredentialID != "" {
+		token, err = w.openCredential(ctx, c.CredentialID)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+
+	staging, err := os.MkdirTemp("", "kiln-clone-")
+	if err != nil {
+		return "", nil, fmt.Errorf("clone staging: %w", err)
+	}
+	cleanup = func() { os.RemoveAll(staging) }
+
+	if err := gitconn.CloneShallow(ctx, gitconn.CloneOptions{
+		URL: remoteURL, Token: token, Dir: staging,
+	}); err != nil {
+		return "", cleanup, err
+	}
+	return staging, cleanup, nil
+}
+
+// openCredential loads and opens a sealed credential. This is the only call
+// path in kiln that turns ciphertext back into a secret.
+func (w *Worker) openCredential(ctx context.Context, id string) (string, error) {
+	sealed, err := w.Store.LoadSealedCredential(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if sealed.Kind != "git_pat" {
+		return "", fmt.Errorf("credential %s has kind %q; git clones need git_pat", id, sealed.Kind)
+	}
+	keyring, err := crypto.NewKeyring(w.MasterKey)
+	if err != nil {
+		return "", fmt.Errorf("credential %s cannot be opened: %w", id, err)
+	}
+	secret, err := keyring.Open(sealed.Ciphertext, sealed.Nonce)
+	if err != nil {
+		return "", fmt.Errorf("credential %s: %w (was the master key rotated?)", id, err)
+	}
+	return string(secret), nil
 }
 
 func (w *Worker) failRun(ctx context.Context, runID string, cause error, log *slog.Logger) {

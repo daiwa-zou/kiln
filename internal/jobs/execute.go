@@ -37,6 +37,11 @@ type ExecuteRequest struct {
 	Trigger     string
 	Source      SourceSpec
 
+	// ConnectorID, when set, attributes this run's source records to the
+	// connector that produced them (the workspace's git connector for
+	// server-side builds; empty for CLI builds, which have no connector row).
+	ConnectorID string
+
 	// Force skips the content-hash gate so every routed unit regenerates.
 	Force bool
 	// DryRun plans and estimates without invoking the agent.
@@ -112,6 +117,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		RunID:       req.RunID,
 		WorkspaceID: req.WorkspaceID,
 		Trigger:     req.Trigger,
+		ConnectorID: req.ConnectorID,
 		Ref:         gitRef(rm),
 		SourceDir:   req.Source.Path,
 		Map:         wm,

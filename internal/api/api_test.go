@@ -52,8 +52,9 @@ func testServer(t *testing.T) (*httptest.Server, *store.WikiStore, string) {
 	}
 
 	srv := httptest.NewServer((&Server{
-		Store: js, Writes: js, Runs: js, BudgetWindow: 30 * 24 * time.Hour,
-		DB: &store.DB{Pool: pool},
+		Store: js, Writes: js, Runs: js, Admin: js,
+		BudgetWindow: 30 * 24 * time.Hour,
+		DB:           &store.DB{Pool: pool},
 	}).Router())
 	t.Cleanup(srv.Close)
 	return srv, js, wsID
