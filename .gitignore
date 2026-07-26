@@ -27,3 +27,4 @@ web/.turbo/
 .DS_Store
 .idea/
 *.swp
+.claude/
