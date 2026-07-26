@@ -79,6 +79,119 @@ func TestConnectorConfigPolicyAtWriteTime(t *testing.T) {
 	}
 }
 
+func TestConnectorPatchValidation(t *testing.T) {
+	srv, pool, wsID, src := authedServer(t)
+	admin := addMember(t, pool, wsID, "ada", "member")
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/connectors", "kiln_valid",
+		map[string]any{"kind": "git", "name": "code", "config": map[string]any{"path": "/srv/repos/demo"}},
+		&created); code != http.StatusCreated {
+		t.Fatalf("create = %d", code)
+	}
+
+	// A patched config passes the same policy as a created one.
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/connectors/"+created.ID, "kiln_valid",
+		map[string]any{"config": map[string]any{"url": "http://example.com/x.git"}}, nil); code != http.StatusBadRequest {
+		t.Errorf("patch to http url = %d, want 400", code)
+	}
+	// A valid config patch, plus name, credential clear, and trigger change.
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/connectors/"+created.ID, "kiln_valid",
+		map[string]any{
+			"config": map[string]any{"path": "/srv/repos/other"},
+			"name":   "renamed", "credentialId": "", "triggerMode": "poll",
+		}, nil); code != http.StatusOK {
+		t.Errorf("valid patch = %d, want 200", code)
+	}
+	var list []map[string]any
+	send(t, srv, http.MethodGet, "/api/v1/workspaces/demo/connectors", "kiln_valid", nil, &list)
+	if len(list) != 1 || list[0]["name"] != "renamed" || list[0]["triggerMode"] != "poll" {
+		t.Errorf("patched connector: %+v", list)
+	}
+
+	// Unknown trigger mode and unknown ids answer distinctly.
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/connectors/"+created.ID, "kiln_valid",
+		map[string]any{"triggerMode": "carrier-pigeon"}, nil); code != http.StatusBadRequest {
+		t.Errorf("bad trigger patch = %d, want 400", code)
+	}
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/connectors/00000000-0000-0000-0000-000000000000", "kiln_valid",
+		map[string]any{"config": map[string]any{"path": "/x"}}, nil); code != http.StatusNotFound {
+		t.Errorf("patch missing connector = %d, want 404", code)
+	}
+}
+
+func TestConnectorRejectsForeignCredential(t *testing.T) {
+	srv, pool, wsID, src := authedServer(t)
+	admin := addMember(t, pool, wsID, "ada", "member")
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+
+	// A credential in a different org: referencing it from this workspace's
+	// connectors must read as absent, never attach.
+	ctx := context.Background()
+	var otherOrg, foreignCred string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO orgs (name, slug) VALUES ('other','other') RETURNING id`).Scan(&otherOrg); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO credentials (org_id, kind, ciphertext, nonce)
+		VALUES ($1, 'git_pat', '\x00'::bytea, '\x00'::bytea) RETURNING id`, otherOrg).Scan(&foreignCred); err != nil {
+		t.Fatal(err)
+	}
+
+	body := map[string]any{
+		"kind": "git", "name": "code", "credentialId": foreignCred,
+		"config": map[string]any{"path": "/srv/repos/demo"},
+	}
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/connectors", "kiln_valid", body, nil); code != http.StatusNotFound {
+		t.Fatalf("create with foreign credential = %d, want 404", code)
+	}
+
+	// Same boundary on patch: create clean, then try to attach the secret.
+	var created struct {
+		ID string `json:"id"`
+	}
+	delete(body, "credentialId")
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/connectors", "kiln_valid", body, &created); code != http.StatusCreated {
+		t.Fatalf("create = %d", code)
+	}
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/connectors/"+created.ID, "kiln_valid",
+		map[string]any{"credentialId": foreignCred}, nil); code != http.StatusNotFound {
+		t.Errorf("patch with foreign credential = %d, want 404", code)
+	}
+
+	// A same-org credential attaches fine.
+	var cred struct {
+		ID string `json:"id"`
+	}
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/credentials", "kiln_valid",
+		map[string]string{"kind": "git_pat", "secret": "tok"}, &cred); code != http.StatusCreated {
+		t.Fatalf("credential create = %d", code)
+	}
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/connectors/"+created.ID, "kiln_valid",
+		map[string]any{"credentialId": cred.ID}, nil); code != http.StatusOK {
+		t.Errorf("patch with own credential = %d, want 200", code)
+	}
+}
+
+func TestCredentialCreateValidation(t *testing.T) {
+	srv, pool, wsID, src := authedServer(t)
+	admin := addMember(t, pool, wsID, "ada", "member")
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/credentials", "kiln_valid",
+		map[string]string{"kind": "git_pat", "secret": "   "}, nil); code != http.StatusBadRequest {
+		t.Errorf("blank secret = %d, want 400", code)
+	}
+	if code := send(t, srv, http.MethodDelete, "/api/v1/workspaces/demo/credentials/00000000-0000-0000-0000-000000000000",
+		"kiln_valid", nil, nil); code != http.StatusNotFound {
+		t.Errorf("delete missing credential = %d, want 404", code)
+	}
+}
+
 func TestCredentialsAreWriteOnly(t *testing.T) {
 	srv, pool, wsID, src := authedServer(t)
 	admin := addMember(t, pool, wsID, "ada", "member")

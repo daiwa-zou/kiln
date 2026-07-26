@@ -1,0 +1,271 @@
+package worker
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/daiwa-zou/kiln/internal/config"
+	"github.com/daiwa-zou/kiln/internal/crypto"
+	"github.com/daiwa-zou/kiln/internal/store"
+)
+
+// loopStore scripts the queue for loop tests: a fixed set of runs to hand
+// out, then empty. It records every state change the worker makes.
+type loopStore struct {
+	mu      sync.Mutex
+	queue   []*store.QueuedRun
+	claimed []string
+	failed  map[string]string
+	marked  map[string]string
+	requeue int
+	sealed  map[string]*store.SealedCredential
+	// pinned is what ConnectorByID returns when set, for scripting a run
+	// pinned to one connector.
+	pinned *store.ConnectorRow
+
+	claimErr   error
+	requeueErr error
+}
+
+func newLoopStore(runs ...*store.QueuedRun) *loopStore {
+	return &loopStore{
+		queue:  runs,
+		failed: map[string]string{},
+		marked: map[string]string{},
+		sealed: map[string]*store.SealedCredential{},
+	}
+}
+
+func (l *loopStore) ClaimNextRun(context.Context, string) (*store.QueuedRun, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.claimErr != nil {
+		return nil, l.claimErr
+	}
+	if len(l.queue) == 0 {
+		return nil, nil
+	}
+	run := l.queue[0]
+	l.queue = l.queue[1:]
+	l.claimed = append(l.claimed, run.ID)
+	return run, nil
+}
+
+func (l *loopStore) FailRun(_ context.Context, runID, msg string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.failed[runID] = msg
+	return nil
+}
+
+func (l *loopStore) RequeueStaleRuns(context.Context, time.Duration) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.requeueErr != nil {
+		return 0, l.requeueErr
+	}
+	l.requeue++
+	return 1, nil
+}
+
+func (l *loopStore) EnabledConnectors(context.Context, string) ([]store.ConnectorRow, error) {
+	return nil, nil // no connectors: every processed run fails resolution
+}
+
+func (l *loopStore) ConnectorByID(_ context.Context, id string) (*store.ConnectorRow, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.pinned != nil && l.pinned.ID == id {
+		return l.pinned, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (l *loopStore) MarkConnectorSync(_ context.Context, id, syncErr string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.marked[id] = syncErr
+	return nil
+}
+
+func (l *loopStore) LoadSealedCredential(_ context.Context, id string) (*store.SealedCredential, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if c, ok := l.sealed[id]; ok {
+		return c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func TestNewWiresConfigAndIdentity(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Worker.PollInterval = 7 * time.Second
+	cfg.Worker.StaleAfter = time.Hour
+	cfg.Worker.PermittedSourceRoots = []string{"/srv/repos"}
+	cfg.Secrets.MasterKey = "k"
+
+	w := New(cfg, nil, nil, nil)
+	if w.Poll != 7*time.Second || w.StaleAfter != time.Hour {
+		t.Errorf("intervals: %+v", w)
+	}
+	if len(w.PermittedSourceRoots) != 1 || w.MasterKey != "k" {
+		t.Errorf("allowlist/master key not wired: %+v", w)
+	}
+	if w.ID == "" || !strings.Contains(w.ID, "-") {
+		t.Errorf("worker id %q should be host-pid shaped", w.ID)
+	}
+	// Zero poll falls back to a sane default rather than a busy loop.
+	if (&Worker{}).poll() <= 0 {
+		t.Error("default poll interval must be positive")
+	}
+}
+
+func TestRunOnceDrainsQueueAndFailsUnresolvableRuns(t *testing.T) {
+	st := newLoopStore(
+		&store.QueuedRun{ID: "r1", WorkspaceID: "ws", WorkspaceSlug: "bench", Trigger: "manual"},
+		&store.QueuedRun{ID: "r2", WorkspaceID: "ws", WorkspaceSlug: "bench", Trigger: "webhook"},
+	)
+	w := &Worker{Store: st}
+
+	n, err := w.RunOnce(context.Background())
+	if err != nil || n != 2 {
+		t.Fatalf("RunOnce = %d, %v; want 2 processed", n, err)
+	}
+	// Both runs failed resolution (no connectors) and were finished in place,
+	// releasing their workspace, rather than left claimed.
+	for _, id := range []string{"r1", "r2"} {
+		if msg := st.failed[id]; !strings.Contains(msg, "no enabled connector") {
+			t.Errorf("run %s failure = %q, want the no-connector message", id, msg)
+		}
+	}
+}
+
+func TestRunOnceSurfacesClaimErrors(t *testing.T) {
+	st := newLoopStore()
+	st.claimErr = errors.New("db down")
+	w := &Worker{Store: st}
+	if _, err := w.RunOnce(context.Background()); err == nil {
+		t.Error("claim error swallowed")
+	}
+}
+
+func TestProcessAttributesFailureToPinnedConnector(t *testing.T) {
+	st := newLoopStore()
+	w := &Worker{Store: st}
+
+	run := &store.QueuedRun{
+		ID: "r1", WorkspaceID: "ws", WorkspaceSlug: "bench",
+		Trigger: "manual", ConnectorID: "pin-missing",
+	}
+	w.process(context.Background(), run)
+
+	if _, ok := st.failed["r1"]; !ok {
+		t.Fatal("run not failed")
+	}
+	if _, ok := st.marked["pin-missing"]; !ok {
+		t.Error("pinned connector did not receive the sync error")
+	}
+}
+
+func TestRunLoopStopsOnContextAndSurvivesStoreErrors(t *testing.T) {
+	st := newLoopStore(
+		&store.QueuedRun{ID: "r1", WorkspaceID: "ws", WorkspaceSlug: "bench", Trigger: "manual"},
+	)
+	st.requeueErr = errors.New("requeue broken") // must be logged, not fatal
+	w := &Worker{Store: st, Poll: time.Millisecond, StaleAfter: time.Hour}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	err := w.Run(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run returned %v, want the context error", err)
+	}
+	// The loop claimed and processed the one run before going idle.
+	if len(st.claimed) != 1 || st.failed["r1"] == "" {
+		t.Errorf("loop did not process the queued run: claimed=%v", st.claimed)
+	}
+}
+
+func TestRequeueStaleRunsThroughTheLoop(t *testing.T) {
+	st := newLoopStore()
+	w := &Worker{Store: st, Poll: time.Millisecond, StaleAfter: time.Minute}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_ = w.Run(ctx)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.requeue == 0 {
+		t.Error("stale requeue never ran")
+	}
+}
+
+func TestOpenCredentialRoundTripAndFailures(t *testing.T) {
+	masterKey := hex.EncodeToString([]byte(strings.Repeat("k", 32)))
+	keyring, err := crypto.NewKeyring(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, nonce, err := keyring.Seal([]byte("ghp_token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st := newLoopStore()
+	st.sealed["cred"] = &store.SealedCredential{ID: "cred", Kind: "git_pat", Ciphertext: ct, Nonce: nonce}
+	st.sealed["wrong-kind"] = &store.SealedCredential{ID: "wrong-kind", Kind: "ssh_key", Ciphertext: ct, Nonce: nonce}
+
+	w := &Worker{Store: st, MasterKey: masterKey}
+	got, err := w.openCredential(context.Background(), "cred")
+	if err != nil || got != "ghp_token" {
+		t.Fatalf("openCredential = %q, %v", got, err)
+	}
+
+	if _, err := w.openCredential(context.Background(), "wrong-kind"); err == nil ||
+		!strings.Contains(err.Error(), "git_pat") {
+		t.Errorf("wrong-kind credential accepted: %v", err)
+	}
+	if _, err := w.openCredential(context.Background(), "absent"); err == nil {
+		t.Error("missing credential opened")
+	}
+
+	// A worker without the master key must fail with guidance, not garbage.
+	bare := &Worker{Store: st}
+	if _, err := bare.openCredential(context.Background(), "cred"); err == nil ||
+		!strings.Contains(err.Error(), "KILN_MASTER_KEY") {
+		t.Errorf("keyless open error unhelpful: %v", err)
+	}
+
+	// A rotated master key fails authentication and says so.
+	rotated := &Worker{Store: st, MasterKey: hex.EncodeToString([]byte(strings.Repeat("x", 32)))}
+	if _, err := rotated.openCredential(context.Background(), "cred"); err == nil ||
+		!strings.Contains(err.Error(), "master key") {
+		t.Errorf("rotated-key open error unhelpful: %v", err)
+	}
+}
+
+func TestSourceSpecRejectsForbiddenRemoteURL(t *testing.T) {
+	// A url-configured git connector goes through the clone path, whose
+	// policy re-check must reject a loopback remote before any process runs.
+	st := newLoopStore()
+	st.pinned = &store.ConnectorRow{
+		ID: "c1", Kind: "git", Name: "code",
+		Config: map[string]any{"url": "https://127.0.0.1/repo.git"},
+	}
+	w := &Worker{Store: st}
+
+	run := &store.QueuedRun{ID: "r", WorkspaceID: "ws", WorkspaceSlug: "bench", ConnectorID: "c1"}
+	spec, _, cleanup, err := w.sourceSpec(context.Background(), run)
+	if cleanup != nil {
+		cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "public address") {
+		t.Errorf("loopback remote accepted: spec=%+v err=%v", spec, err)
+	}
+}

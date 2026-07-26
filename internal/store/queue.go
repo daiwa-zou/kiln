@@ -31,33 +31,37 @@ type QueuedRun struct {
 // false: the partial unique index makes double-submission and webhook storms
 // collapse into the one run already waiting.
 func (s *WikiStore) EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (runID string, created bool, err error) {
-	err = s.pool.QueryRow(ctx, `
-		INSERT INTO runs (workspace_id, connector_id, trigger, status)
-		VALUES ($1, $2, $3, 'queued')
-		ON CONFLICT (workspace_id) WHERE status IN ('queued','running') DO NOTHING
-		RETURNING id`,
-		workspaceID, nullable(connectorID), trigger).Scan(&runID)
-	if err == nil {
-		return runID, true, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return "", false, fmt.Errorf("store: enqueue run: %w", err)
-	}
+	// Bounded: each pass can lose one insert/finish race (the active run
+	// finishes between our conflicting insert and the read-back), and losing
+	// it repeatedly means something is wrong enough to surface.
+	for attempt := 0; attempt < 3; attempt++ {
+		err = s.pool.QueryRow(ctx, `
+			INSERT INTO runs (workspace_id, connector_id, trigger, status)
+			VALUES ($1, $2, $3, 'queued')
+			ON CONFLICT (workspace_id) WHERE status IN ('queued','running') DO NOTHING
+			RETURNING id`,
+			workspaceID, nullable(connectorID), trigger).Scan(&runID)
+		if err == nil {
+			return runID, true, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", false, fmt.Errorf("store: enqueue run: %w", err)
+		}
 
-	// Conflict path: surface the active run so the caller can report it.
-	err = s.pool.QueryRow(ctx, `
-		SELECT id FROM runs
-		WHERE workspace_id = $1 AND status IN ('queued','running')
-		ORDER BY created_at DESC LIMIT 1`, workspaceID).Scan(&runID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The active run finished between the insert and this read; retry once
-		// rather than bothering the caller with a race they cannot act on.
-		return s.EnqueueRun(ctx, workspaceID, trigger, connectorID)
+		// Conflict path: surface the active run so the caller can report it.
+		err = s.pool.QueryRow(ctx, `
+			SELECT id FROM runs
+			WHERE workspace_id = $1 AND status IN ('queued','running')
+			ORDER BY created_at DESC LIMIT 1`, workspaceID).Scan(&runID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue // the active run finished in between; try the insert again
+		}
+		if err != nil {
+			return "", false, fmt.Errorf("store: find active run: %w", err)
+		}
+		return runID, false, nil
 	}
-	if err != nil {
-		return "", false, fmt.Errorf("store: find active run: %w", err)
-	}
-	return runID, false, nil
+	return "", false, fmt.Errorf("store: enqueue run: lost the insert race repeatedly for workspace %s", workspaceID)
 }
 
 // ClaimNextRun atomically claims the oldest queued run for this worker.

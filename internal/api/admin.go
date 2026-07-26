@@ -30,6 +30,7 @@ type AdminStore interface {
 	CreateCredential(ctx context.Context, orgID, kind string, ciphertext, nonce []byte) (string, error)
 	ListCredentialMeta(ctx context.Context, orgID string) ([]store.CredentialMeta, error)
 	DeleteCredential(ctx context.Context, orgID, id string) error
+	CredentialInOrg(ctx context.Context, orgID, id string) (bool, error)
 	OrgOfWorkspace(ctx context.Context, workspaceID string) (string, error)
 }
 
@@ -159,6 +160,9 @@ func (s *Server) handleConnectorCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
+	if !s.credentialUsable(w, r, ws, body.CredentialID) {
+		return
+	}
 
 	enabled := true
 	if body.Enabled != nil {
@@ -209,6 +213,10 @@ func (s *Server) handleConnectorPatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if body.CredentialID != nil && !s.credentialUsable(w, r, ws, *body.CredentialID) {
+		return
+	}
+
 	err := s.Admin.UpdateConnector(r.Context(), ws.ID, chi.URLParam(r, "id"), store.ConnectorPatch{
 		Name: body.Name, Config: body.Config, CredentialID: body.CredentialID,
 		TriggerMode: body.TriggerMode, Enabled: body.Enabled,
@@ -231,6 +239,34 @@ func (s *Server) handleConnectorDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": chi.URLParam(r, "id"), "status": "deleted"})
+}
+
+// credentialUsable verifies a referenced credential belongs to the
+// workspace's own org. The schema does not enforce this; without the check, a
+// connector row could name another tenant's secret and the worker would
+// decrypt it at sync time. Empty ids (no credential, or clearing one) pass.
+// Returns false after writing the response.
+func (s *Server) credentialUsable(w http.ResponseWriter, r *http.Request, ws store.WorkspaceRow, credentialID string) bool {
+	if credentialID == "" {
+		return true
+	}
+	orgID, err := s.Admin.OrgOfWorkspace(r.Context(), ws.ID)
+	if err != nil {
+		s.fail(w, err)
+		return false
+	}
+	ok, err := s.Admin.CredentialInOrg(r.Context(), orgID, credentialID)
+	if err != nil {
+		s.fail(w, err)
+		return false
+	}
+	if !ok {
+		// Absent and foreign answer identically, so credential ids cannot be
+		// probed across org boundaries.
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "credential not found"})
+		return false
+	}
+	return true
 }
 
 // connectorInWorkspace loads one connector and confirms it belongs to the

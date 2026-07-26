@@ -96,6 +96,21 @@ func (s *WikiStore) LoadSealedCredential(ctx context.Context, id string) (*Seale
 	return &c, nil
 }
 
+// CredentialInOrg reports whether a credential belongs to an org. The schema
+// does not force a connector's credential into the connector's own org, so
+// the API must: without this check, any admin-writable connector row could
+// point at another tenant's secret and have the worker decrypt it.
+func (s *WikiStore) CredentialInOrg(ctx context.Context, orgID, id string) (bool, error) {
+	var ok bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM credentials WHERE id = $1 AND org_id = $2)`,
+		id, orgID).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("store: credential in org: %w", err)
+	}
+	return ok, nil
+}
+
 // OrgOfWorkspace maps a workspace to its org, which is where credentials live.
 func (s *WikiStore) OrgOfWorkspace(ctx context.Context, workspaceID string) (string, error) {
 	var orgID string
