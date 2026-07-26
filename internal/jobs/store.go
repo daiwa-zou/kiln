@@ -50,6 +50,12 @@ type Store interface {
 	// EnsureDeletionReviews files one open review item per disappeared source,
 	// deduplicated so a source that stays missing raises exactly one question.
 	EnsureDeletionReviews(ctx context.Context, workspaceID string, cands []DeletionCandidate) error
+
+	// TrailingUnitCost returns the average actual cost of recently succeeded
+	// units for this workspace, or 0 when there is no history. It feeds the
+	// pre-spend estimate, so previews reflect what this workspace's pages
+	// really cost rather than a global constant.
+	TrailingUnitCost(ctx context.Context, workspaceID string) (float64, error)
 }
 
 // DeletionCandidate is a source that vanished from the map and needs a human
@@ -128,8 +134,12 @@ type ItemSummary struct {
 	Key     diff.Key
 	Status  string
 	CostUSD float64
-	Turns   int
-	Err     string
+	// EstCostUSD is what the plan projected for this unit before it ran.
+	// Recorded so estimates can be audited against actuals, which is also
+	// where the trailing average that produces future estimates comes from.
+	EstCostUSD float64
+	Turns      int
+	Err        string
 }
 
 // Run status values.

@@ -61,11 +61,13 @@ processes separately so builds scale independently of the API.`,
 
 			ws := store.NewWikiStore(db.Pool)
 			srv := &api.Server{
-				Store:       ws,
-				Writes:      ws,
-				DB:          db,
-				Log:         log,
-				CORSOrigins: cfg.CORSOrigins,
+				Store:        ws,
+				Writes:       ws,
+				Runs:         ws,
+				BudgetWindow: cfg.Agent.BudgetWindow,
+				DB:           db,
+				Log:          log,
+				CORSOrigins:  cfg.CORSOrigins,
 			}
 			if cfg.Auth.Mode == config.AuthNone {
 				log.Warn("API authentication is disabled (auth.mode = none); every bench is readable by anyone who can reach this port")

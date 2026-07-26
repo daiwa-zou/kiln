@@ -25,6 +25,10 @@ type WikiStore struct {
 // NewWikiStore wraps a pool.
 func NewWikiStore(pool *pgxpool.Pool) *WikiStore { return &WikiStore{pool: pool} }
 
+// Pool exposes the underlying pool, for callers (and tests) that need SQL the
+// store does not wrap.
+func (s *WikiStore) Pool() *pgxpool.Pool { return s.pool }
+
 var _ jobs.Store = (*WikiStore)(nil)
 
 // LoadSources returns the live source records for a workspace. These are the
@@ -481,10 +485,10 @@ func (s *WikiStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 
 	for _, item := range run.Items {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, turns, error, finished_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7, now())`,
+			INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, est_cost_usd, turns, error, finished_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())`,
 			runID, item.Key.Prefix(), string(item.Key), item.Status,
-			item.CostUSD, item.Turns, nullable(item.Err),
+			item.CostUSD, nullableFloat(item.EstCostUSD), item.Turns, nullable(item.Err),
 		); err != nil {
 			return fmt.Errorf("store: insert run item %s: %w", item.Key, err)
 		}
@@ -592,6 +596,15 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nullableFloat maps zero to SQL NULL: an estimate of zero means "none was
+// made", and NULL keeps it out of averages.
+func nullableFloat(f float64) any {
+	if f == 0 {
+		return nil
+	}
+	return f
 }
 
 func orEmpty(s []string) []string {

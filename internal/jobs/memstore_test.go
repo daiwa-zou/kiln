@@ -36,6 +36,9 @@ type memStore struct {
 	// failImport makes Import return an error, to prove the run is still
 	// ledgered as failed when the commit does not land.
 	failImport error
+
+	// trailingUnitCost is what TrailingUnitCost reports; zero means no history.
+	trailingUnitCost float64
 }
 
 func newMemStore() *memStore {
@@ -156,6 +159,12 @@ func (m *memStore) EnsureDeletionReviews(_ context.Context, _ string, cands []De
 		}
 	}
 	return nil
+}
+
+func (m *memStore) TrailingUnitCost(context.Context, string) (float64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.trailingUnitCost, nil
 }
 
 func (m *memStore) lastImport() *ImportRequest {

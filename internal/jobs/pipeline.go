@@ -177,8 +177,19 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		dirty = truncatePreservingArch(dirty, p.Budget.MaxPages)
 	}
 
+	// The estimate prefers this workspace's own cost history over the global
+	// constant: previews are what humans approve spend against, and a
+	// workspace whose pages run expensive should say so before, not after.
+	perUnit, err := p.Store.TrailingUnitCost(ctx, req.WorkspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("jobs: trailing unit cost: %w", err)
+	}
+	if perUnit <= 0 {
+		perUnit = defaultEstimatePerUnit
+	}
+
 	res.Planned = dirty
-	res.EstimatedUSD = float64(len(dirty)) * defaultEstimatePerUnit
+	res.EstimatedUSD = float64(len(dirty)) * perUnit
 
 	// Nothing is charged before a human sees the estimate.
 	if req.DryRun {
@@ -238,7 +249,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		}
 
 		unit := units[string(key)]
-		item := ItemSummary{Key: key, Status: StatusPending}
+		item := ItemSummary{Key: key, Status: StatusPending, EstCostUSD: perUnit}
 
 		out := p.generateUnit(ctx, req, key, unit, unitScope{
 			steering:        steering,

@@ -152,6 +152,9 @@ type Agent struct {
 	PageBudgetUSD    float64 `mapstructure:"page_budget_usd"`
 	RunBudgetUSD     float64 `mapstructure:"run_budget_usd"`
 	MaxPagesPerRun   int     `mapstructure:"max_pages_per_run"`
+	// BudgetWindow is the rolling window a workspace's budget_usd cap applies
+	// to, enforced when runs are enqueued. Zero disables window enforcement.
+	BudgetWindow time.Duration `mapstructure:"budget_window"`
 	// WarnTurns triggers a log warning; the installed claude CLI has no
 	// --max-turns, so wall-clock capping is done with Timeout instead.
 	WarnTurns int `mapstructure:"warn_turns"`
