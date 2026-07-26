@@ -8,7 +8,7 @@ TEST_DB_URL := postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
 # Pinned to match .github/workflows/ci.yml. Bump both together.
 GOLANGCI := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
-.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev clean
+.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev dev-db migrate-dev dev-build dev-clean clean
 
 all: fmt test build
 
@@ -68,8 +68,37 @@ tidy:
 migrate: build
 	./bin/$(BINARY) admin migrate
 
-dev: build
-	./bin/$(BINARY) serve --with-worker
+# --- Local development environment ------------------------------------------
+# Everything below runs against config.dev.toml: the fake agent runner (full
+# pipeline, zero LLM cost, no API key) and a dedicated kiln_dev database so
+# `make test-integration` (which drops the `kiln` database's schema) can never
+# wipe dev state.
+
+DEV_CONFIG := config.dev.toml
+
+dev-db: db-up
+	@docker exec kiln-test psql -U kiln -tc "SELECT 1 FROM pg_database WHERE datname='kiln_dev'" | grep -q 1 || \
+		docker exec kiln-test psql -U kiln -c "CREATE DATABASE kiln_dev"
+	@echo "kiln_dev ready"
+
+migrate-dev: build dev-db
+	./bin/$(BINARY) admin migrate --config $(DEV_CONFIG)
+
+# API + UI + in-process worker. Connectors may read anything under this repo.
+dev: migrate-dev
+	KILN_WORKER_PERMITTED_SOURCE_ROOTS=$(CURDIR) \
+		./bin/$(BINARY) serve --with-worker --config $(DEV_CONFIG)
+
+# One-shot build of kiln itself into the dev wiki through the full pipeline.
+# Bootstraps the org/workspace/wiki chain on first run; repeating it is free
+# (the hash gate skips unchanged sources).
+dev-build: migrate-dev
+	./bin/$(BINARY) build $(CURDIR) --config $(DEV_CONFIG)
+
+dev-clean:
+	@docker exec kiln-test psql -U kiln -c "DROP DATABASE IF EXISTS kiln_dev" 2>/dev/null || true
+	@rm -rf .dev
+	@echo "dev state removed"
 
 clean:
 	rm -rf bin dist

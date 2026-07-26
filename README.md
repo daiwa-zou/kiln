@@ -82,6 +82,37 @@ make db-up / db-down   # manage the test Postgres container
 Integration tests key off `KILN_TEST_DATABASE_URL` and skip themselves when it is
 unset, so `make test` stays fast and offline.
 
+### Local end-to-end run (no API key, zero cost)
+
+`make dev` brings up the whole system against [config.dev.toml](config.dev.toml):
+Postgres (in the same container the tests use, but a dedicated `kiln_dev`
+database that test runs cannot wipe), migrations, and `serve --with-worker`
+with `agent.runner = "fake"` — a deterministic runner that exercises every real
+pipeline stage (sync, map, plan, validate, import, the queue, the budget
+ledger, the UI) while generating placeholder prose with zero API spend.
+
+```bash
+make dev          # terminal 1: API + UI + worker on :8080
+make dev-build    # terminal 2: build kiln itself into the dev wiki
+make dev-build    # again: "nothing changed; no model calls, no cost"
+make dev-clean    # drop the dev database and blobs
+```
+
+To exercise the queue path, register the repo as a connector and enqueue a run:
+
+```bash
+curl -X POST localhost:8080/api/v1/workspaces/kiln/connectors \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"git","name":"local","config":{"path":"'$PWD'"}}'
+curl -X POST localhost:8080/api/v1/workspaces/kiln/runs
+```
+
+then watch it on the Runs view at http://localhost:8080. The fake runner
+charges a synthetic $0.01/call so cost columns, estimates, and budget windows
+behave realistically; `KILN_AGENT_FAKE_FAIL_UNITS=module:foo` injects failures
+for exercising partial runs, and `KILN_AGENT_FAKE_LATENCY=2s` slows calls down
+enough to watch state transitions.
+
 `make lint` needs golangci-lint **v2** (`brew install golangci-lint`); the v1 series
 cannot read `.golangci.yml`.
 

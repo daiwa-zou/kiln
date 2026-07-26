@@ -217,6 +217,33 @@ func TestValidateReportsAllProblemsAtOnce(t *testing.T) {
 	}
 }
 
+func TestValidateFakeRunner(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Role: RoleServer, HTTPAddr: ":8080",
+			Database: Database{Host: "h", Port: 5432, Name: "kiln", MaxConns: 10, MinConns: 2},
+			Storage:  Storage{Backend: BackendFS, Path: "/tmp/blobs"},
+			Agent:    Agent{Runner: RunnerFake, Timeout: time.Minute, MaxPagesPerRun: 12},
+		}
+	}
+
+	if err := base().Validate(); err != nil {
+		t.Errorf("fake runner rejected: %v", err)
+	}
+
+	c := base()
+	c.Agent.FakeCostUSD = -1
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "fake_cost_usd") {
+		t.Errorf("negative fake cost accepted: %v", err)
+	}
+
+	c = base()
+	c.Agent.Runner = "carrier-pigeon"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "want api, cli, or fake") {
+		t.Errorf("unknown-runner message must name all three kinds: %v", err)
+	}
+}
+
 func TestValidateStorageCredentialPairing(t *testing.T) {
 	base := func() *Config {
 		return &Config{

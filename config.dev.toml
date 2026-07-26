@@ -1,0 +1,38 @@
+# Local development configuration, used by `make dev` and `make dev-build`.
+#
+# Two deliberate choices:
+#   - agent.runner = "fake": builds run the entire real pipeline (sync, map,
+#     plan, validate, import, queue, budget ledger) but the prose is generated
+#     deterministically with zero API spend. No API key needed.
+#   - database kiln_dev: `make test-integration` drops and recreates the
+#     schema of the `kiln` database on the same container, so dev state lives
+#     in its own database and survives test runs.
+#
+# Contains no secrets; safe to commit. worker.permitted_source_roots is
+# machine-specific, so the Makefile supplies it via environment instead.
+
+http_addr = ":8080"
+log_level = "debug"
+
+[database]
+url = "postgres://kiln:kiln@localhost:55432/kiln_dev?sslmode=disable"
+
+[storage]
+# fs backend so local dev needs no MinIO/S3.
+backend = "fs"
+path    = ".dev/blobs"
+
+[auth]
+# Single-user localhost; serve logs a warning about this on boot.
+mode = "none"
+
+[agent]
+runner = "fake"
+fake_cost_usd = 0.01
+# Low enough that the over-budget path is easy to demonstrate by setting a
+# small workspace budget_usd.
+run_budget_usd = 1.00
+
+[worker]
+# Snappy queue pickup so enqueued runs start visibly fast.
+poll_interval = "1s"
