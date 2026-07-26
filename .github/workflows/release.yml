@@ -16,7 +16,9 @@ jobs:
           fetch-depth: 0 # goreleaser needs full history for the changelog
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # Latest 1.25 patch: release binaries should not ship a stdlib with
+          # known CVEs, which go.mod's literal 1.25.0 would.
+          go-version: '1.25.x'
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'
