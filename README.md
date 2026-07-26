@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.svg" alt="kiln" width="220"></p>
+
 # kiln
 
 [![ci](https://github.com/daiwa-zou/kiln/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/daiwa-zou/kiln/actions/workflows/ci.yml)

@@ -44,7 +44,7 @@ func newBuildCmd(g *globalFlags) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "build [path]",
-		Short: "Build or refresh a workspace's wiki from a local directory",
+		Short: "Build or refresh a bench's wiki from a local directory",
 		Long: `Scans a directory, works out what changed since the last run, and regenerates
 only the affected pages.
 
@@ -63,7 +63,9 @@ before anything is spent.`,
 	fl := cmd.Flags()
 	fl.StringVar(&f.path, "path", "", "directory to scan (defaults to the positional argument)")
 	fl.StringVar(&f.docs, "docs", "", "also ingest documents from this directory into the same wiki")
-	fl.StringVar(&f.workspace, "workspace", "", "workspace slug (defaults to the directory name)")
+	fl.StringVar(&f.workspace, "bench", "", "bench slug (defaults to the directory name)")
+	fl.StringVar(&f.workspace, "workspace", "", "deprecated alias for --bench")
+	_ = fl.MarkDeprecated("workspace", "use --bench")
 	fl.StringVar(&f.org, "org", "local", "organization slug")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "plan and estimate without calling the model")
 	fl.BoolVar(&f.full, "full", false, "ignore cached hashes and rebuild every unit")

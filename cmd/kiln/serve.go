@@ -61,7 +61,7 @@ single-user localhost deployment.`,
 				CORSOrigins: cfg.CORSOrigins,
 			}
 			if cfg.Auth.Mode == config.AuthNone {
-				log.Warn("API authentication is disabled (auth.mode = none); every workspace is readable by anyone who can reach this port")
+				log.Warn("API authentication is disabled (auth.mode = none); every bench is readable by anyone who can reach this port")
 			} else {
 				srv.Auth = &auth.Middleware{Source: &auth.PGSource{Pool: db.Pool}, Log: log}
 			}

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 64" width="160" height="64" role="img" aria-label="kiln">
+  <style>
+    .mark { fill: #b4530a; }
+    .word { fill: #2b2622; font: 600 44px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
+    @media (prefers-color-scheme: dark) {
+      .mark { fill: #e0872f; }
+      .word { fill: #ece5db; }
+    }
+  </style>
+  <path class="mark" fill-rule="evenodd" transform="translate(8 8) scale(2)" d="M3 22 L3 12 Q3 2 12 2 Q21 2 21 12 L21 22 Z
+    M8 22 L8 15 Q8 10 12 10 Q16 10 16 15 L16 22 Z
+    M9.8 18.5 a2.2 2.2 0 1 0 4.4 0 a2.2 2.2 0 1 0 -4.4 0 Z"/>
+  <text class="word" x="62" y="52">kiln</text>
+</svg>
