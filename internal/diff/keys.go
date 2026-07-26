@@ -31,6 +31,14 @@ func ModuleKey(slug string) Key { return Key(PrefixModule + ":" + slug) }
 // DocKey builds the key for an ingested document, URL, or research result.
 func DocKey(id string) Key { return Key(PrefixDoc + ":" + id) }
 
+// UploadOrigin namespaces an uploaded document's docs-directory-relative path
+// so its cache key and change path can never collide with a repo-relative
+// document path: a README.md in the repo and a README.md in the uploads
+// folder are different sources and must stay different keys. Every producer
+// and every future change source for uploaded documents must build ids
+// through here.
+func UploadOrigin(rel string) string { return "upload:" + rel }
+
 // EntryKey builds the key for an entry point.
 func EntryKey(name string) Key { return Key(PrefixEntry + ":" + name) }
 

@@ -192,13 +192,14 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (_ *mapper.Workspa
 		fmt.Fprintf(out, "  skipped %s: %s\n", s.Path, s.Reason)
 	}
 
-	// Keyed by the docs-directory-relative path. These never collide with the
-	// repo's own change paths today because docs are routed only under
-	// FullRebuild; when incremental doc changes land, the change source must
-	// produce paths relative to the same docs root.
+	// Routes are keyed by the namespaced upload path (diff.UploadOrigin), the
+	// same namespace the connector keys the source cache with, so an uploaded
+	// document can never collide with a repo file of the same name. A future
+	// incremental change source for uploads must emit paths through
+	// diff.UploadOrigin to be routable.
 	routes := map[string]diff.Key{}
 	for _, d := range payload.Docs {
-		routes[d.Origin] = diff.DocKey(d.Origin)
+		routes[diff.UploadOrigin(d.Origin)] = diff.Key(d.Key)
 	}
 	return wm, routes, staging, nil
 }

@@ -20,7 +20,8 @@ nothing changes, a run costs nothing.
 ## Status
 
 Early development. See [ROADMAP.md](ROADMAP.md) for the milestone plan — M1 (the human loop and
-reader upgrades) has shipped; M2 (server-side builds) is next.
+reader upgrades) and M2 (server-side builds: the worker, the run queue and dashboard, DB-driven
+connectors with sealed credentials) have shipped; M3 (multi-tenant SaaS shell) is next.
 
 ## How it works
 
@@ -52,11 +53,14 @@ through three channels, all editable from the UI (or the write API):
 ## Architecture
 
 Modular monolith: one Go binary against Postgres. `kiln serve` runs the HTTP API and the
-embedded reading UI; `kiln build` runs the generation pipeline against a local directory.
+embedded reading UI; `kiln build` runs the generation pipeline against a local directory;
+`kiln worker` claims queued runs from the database and builds them through the same pipeline
+(`kiln serve --with-worker` runs both in one process for single-node deployments). Builds
+scale by adding worker processes — the queue is the runs table itself, claimed with
+`FOR UPDATE SKIP LOCKED`, one active run per bench.
 The API requires a bearer token by default — mint one with `kiln admin token create`.
 
-Planned, not yet built: a queue-backed `kiln worker` role (so builds are schedulable
-server-side and scale by adding workers) and a Next.js frontend in its own container.
+Planned, not yet built: a Next.js frontend in its own container.
 
 ## Development
 
