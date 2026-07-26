@@ -143,3 +143,28 @@ func TestIdentityHasScope(t *testing.T) {
 		t.Error("ungranted scope reported as present")
 	}
 }
+
+// erroringSource fails with an infrastructure error, not a bad token.
+type erroringSource struct{}
+
+func (erroringSource) IdentityForToken(context.Context, string) (Identity, error) {
+	return Identity{}, context.DeadlineExceeded
+}
+
+func TestMiddlewareAnswersLookupFailureWith500(t *testing.T) {
+	// A dead database is an outage, not an invalid token: the caller must see
+	// 500, never 401, or clients would discard perfectly good tokens.
+	h, reached := newHandler(t, erroringSource{})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer kiln_"+strings.Repeat("a", 64))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("lookup failure = %d, want 500", rec.Code)
+	}
+	if *reached {
+		t.Error("handler ran despite the auth source failing")
+	}
+}

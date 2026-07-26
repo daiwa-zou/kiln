@@ -3,17 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
 <title>kiln</title>
 <style>
   /* Fired clay: warm neutrals rather than the cold slate default, because the
      primary surface here is long-form reading. Serif for prose signals
      reference work; sans for chrome; mono for paths and shas, which appear
-     constantly and are load-bearing rather than decorative. */
+     constantly and are load-bearing rather than decorative.
+
+     Contrast: every text/background pair here clears WCAG AA 4.5:1 except the
+     dead-wikilink token, which pairs low contrast WITH a dashed underline so
+     "absent" is never conveyed by color alone. --on-ember exists because the
+     dark theme lightens --ember and #fff stops clearing AA on it. */
   :root {
     --bg: #faf7f2;        --surface: #f2ece2;   --border: #e0d6c7;
-    --ink: #2b2622;       --ink-dim: #6f6459;   --ink-faint: #9a8d7f;
-    --ember: #b4530a;     --ember-soft: #e8c9a8;
-    --ash: #8a8f96;       --oxide: #a3341f;
+    --ink: #2b2622;       --ink-dim: #6f6459;   --ink-faint: #7a6d5f;
+    --ember: #b4530a;     --ember-soft: #e8c9a8; --on-ember: #fff;
+    --ash: #5f656c;       --oxide: #a3341f;
     --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     --serif: Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
@@ -21,9 +28,9 @@
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #1a1715;      --surface: #241f1b;   --border: #3a322b;
-      --ink: #ece5db;     --ink-dim: #b0a294;   --ink-faint: #7d7166;
-      --ember: #e0872f;   --ember-soft: #4a3320;
-      --ash: #6b7178;     --oxide: #d4694f;
+      --ink: #ece5db;     --ink-dim: #b0a294;   --ink-faint: #948779;
+      --ember: #e0872f;   --ember-soft: #4a3320; --on-ember: #1a1715;
+      --ash: #8b9198;     --oxide: #d4694f;
     }
   }
   * { box-sizing: border-box; }
@@ -34,39 +41,76 @@
   a { color: var(--ember); text-decoration: none; }
   a:hover { text-decoration: underline; }
   code, .mono { font-family: var(--mono); font-size: 0.9em; }
+  :focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+  main:focus { outline: none; }
 
-  .shell { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
-  @media (max-width: 760px) { .shell { grid-template-columns: 1fr; } aside { display: none; } }
+  .skip {
+    position: absolute; left: -9999px; z-index: 40;
+    padding: 8px 14px; background: var(--ember); color: var(--on-ember);
+    border-radius: 6px;
+  }
+  .skip:focus { left: 8px; top: 8px; }
+
+  .shell { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; min-height: 100dvh; }
 
   aside {
     background: var(--surface); border-right: 1px solid var(--border);
-    padding: 18px 16px; overflow-y: auto; max-height: 100vh;
+    padding: 18px 16px; overflow-y: auto;
+    position: sticky; top: 0; height: 100vh; height: 100dvh;
   }
   .brand { font-weight: 600; letter-spacing: -0.01em; font-size: 17px; margin-bottom: 2px; }
-  .brand small { color: var(--ink-faint); font-weight: 400; font-size: 12px; }
+  .brand small { color: var(--ink-dim); font-weight: 400; font-size: 12px; }
 
-  select, input {
+  /* Small screens get the same sidebar as a drawer rather than losing it:
+     before this, under 760px there was no way to navigate at all. */
+  .menu-btn {
+    display: none; position: fixed; top: 10px; right: 10px; z-index: 30;
+    padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface); color: var(--ink); font-size: 14px; cursor: pointer;
+  }
+  @media (max-width: 760px) {
+    .shell { grid-template-columns: 1fr; }
+    aside { display: none; }
+    .menu-btn { display: block; }
+    body.nav-open { overflow: hidden; }
+    body.nav-open aside {
+      display: block; position: fixed; inset: 0 64px 0 0; z-index: 20;
+      box-shadow: 4px 0 24px rgba(0,0,0,0.25);
+    }
+    /* The strip main leaves visible acts as a backdrop: tap to dismiss. */
+    body.nav-open::before {
+      content: ""; position: fixed; inset: 0; z-index: 15;
+      background: rgba(0,0,0,0.2);
+    }
+    /* Comfortable touch targets where fingers are the pointer. */
+    .tree a { padding: 7px 8px; }
+    .nav a { padding: 6px 12px; }
+    .chip { padding: 5px 10px; }
+  }
+
+  select, input, textarea {
     width: 100%; padding: 7px 9px; margin: 10px 0;
     background: var(--bg); color: var(--ink);
     border: 1px solid var(--border); border-radius: 6px;
     font-family: var(--sans); font-size: 14px;
   }
-  input:focus, select:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
+  textarea { font-family: var(--mono); font-size: 13px; line-height: 1.5; resize: vertical; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
 
   .nav { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
-  .nav button {
+  .nav a {
     padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
     background: var(--bg); color: var(--ink-dim);
-    font-family: var(--sans); font-size: 12.5px; cursor: pointer;
+    font-family: var(--sans); font-size: 12.5px;
   }
-  .nav button:hover { border-color: var(--ember); color: var(--ember); }
-  .nav button[aria-current="true"] {
-    background: var(--ember); border-color: var(--ember); color: #fff;
+  .nav a:hover { border-color: var(--ember); color: var(--ember); text-decoration: none; }
+  .nav a[aria-current="page"] {
+    background: var(--ember); border-color: var(--ember); color: var(--on-ember);
   }
 
   .group-label {
     font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
-    color: var(--ink-faint); margin: 16px 0 5px;
+    color: var(--ink-dim); margin: 16px 0 5px;
   }
   .tree a {
     display: block; padding: 3px 7px; border-radius: 5px;
@@ -74,7 +118,13 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .tree a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
-  .tree a[aria-current="true"] { background: var(--ember-soft); color: var(--ink); }
+  .tree a[aria-current="page"] { background: var(--ember-soft); color: var(--ink); }
+  .signout {
+    margin-top: 18px; font-size: 12px; color: var(--ink-faint);
+    background: none; border: none; padding: 2px 0; cursor: pointer;
+    text-decoration: underline; font-family: var(--sans);
+  }
+  .signout:hover { color: var(--oxide); }
 
   main { padding: 34px 40px 80px; max-width: 74ch; }
   @media (max-width: 760px) { main { padding: 22px 18px 60px; } }
@@ -88,8 +138,8 @@
   }
 
   /* Freshness as temperature: a page built from current sources reads warm and
-     cools toward ash as it falls behind. Staleness is the reader's central
-     question, so it is legible at a glance rather than by comparing dates. */
+     cools toward ash as it falls behind. The text labels carry the meaning;
+     color reinforces but never carries it alone. */
   .chip.fresh { border-color: var(--ember); color: var(--ember); }
   .chip.stale { border-color: var(--ash); color: var(--ash); }
 
@@ -111,12 +161,21 @@
     margin: 1em 0; padding-left: 14px;
     border-left: 3px solid var(--ember-soft); color: var(--ink-dim);
   }
+  .prose table {
+    border-collapse: collapse; margin: 1em 0; font-size: 15px;
+    display: block; overflow-x: auto;
+  }
+  .prose th, .prose td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; }
+  .prose th { background: var(--surface); font-weight: 600; }
+  .prose img { max-width: 100%; border-radius: 8px; }
+  .prose hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
   .wikilink { border-bottom: 1px solid var(--ember-soft); }
   .wikilink.dead {
     color: var(--ink-faint); border-bottom: 1px dashed var(--ink-faint); cursor: help;
   }
 
   .hint { color: var(--ink-dim); font-size: 14px; }
+  .hint.error { color: var(--oxide); }
   .empty { padding: 40px 0; color: var(--ink-dim); }
   .empty code { background: var(--surface); padding: 2px 6px; border-radius: 4px; }
 
@@ -124,28 +183,78 @@
     display: flex; justify-content: space-between; gap: 12px;
     padding: 9px 0; border-bottom: 1px solid var(--border);
   }
-  .row .count { color: var(--ink-faint); font-size: 13px; white-space: nowrap; }
+  .row .count { color: var(--ink-dim); font-size: 13px; white-space: nowrap; }
+  .hit { padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .hit .snippet { font-size: 13.5px; color: var(--ink-dim); margin-top: 3px; }
+  mark { background: var(--ember-soft); color: var(--ink); border-radius: 3px; padding: 0 2px; }
   .banner {
     background: var(--surface); border: 1px solid var(--oxide); color: var(--oxide);
     padding: 9px 12px; border-radius: 7px; margin-bottom: 18px; font-size: 13.5px;
   }
+  .banner button {
+    margin-left: 8px; background: none; border: 1px solid var(--oxide);
+    color: var(--oxide); border-radius: 5px; padding: 2px 10px; cursor: pointer;
+    font-size: 12.5px;
+  }
+
+  .btn {
+    padding: 6px 14px; border: 1px solid var(--ember); border-radius: 6px;
+    background: var(--ember); color: var(--on-ember); font-family: var(--sans);
+    font-size: 13px; cursor: pointer;
+  }
+  .btn.quiet { background: var(--bg); color: var(--ember); }
+  .btn.quiet:hover { background: var(--ember-soft); }
+  .btn.danger { background: var(--oxide); border-color: var(--oxide); color: var(--on-ember); }
+  .btn:disabled { opacity: 0.55; cursor: default; }
+  .btn + .btn { margin-left: 6px; }
+  .linkish {
+    background: none; border: none; padding: 2px 6px; cursor: pointer;
+    color: var(--ink-dim); text-decoration: underline; font-size: 12px;
+    font-family: var(--sans);
+  }
+  .linkish:hover { color: var(--oxide); }
+
+  .review { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
+  .review .detail { font-size: 13.5px; color: var(--ink-dim); margin: 6px 0 10px; white-space: pre-wrap; }
+  .review .meta { margin-bottom: 6px; }
+
+  .correction { border-left: 3px solid var(--ember-soft); padding: 4px 0 4px 12px; margin: 8px 0; }
+  .correction.inactive { border-left-color: var(--border); color: var(--ink-faint); }
+  .correction .body { white-space: pre-wrap; font-size: 14px; }
+  .correction .tools { font-size: 12px; margin-top: 2px; color: var(--ink-dim); }
+  details.panel { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 10px; }
+  details.panel summary { cursor: pointer; color: var(--ink-dim); font-size: 13.5px; }
+
+  @media print {
+    aside, .menu-btn, .skip, details.panel { display: none !important; }
+    .shell { display: block; }
+    main { max-width: none; padding: 0; }
+  }
 </style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
+<button class="menu-btn" id="menu" aria-label="Navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
 <div class="shell">
-  <aside>
+  <aside id="sidebar" aria-label="Sidebar">
     <div class="brand">kiln <small id="version"></small></div>
     <select id="workspace" aria-label="Workspace"></select>
-    <input id="search" type="search" placeholder="Search pages…" aria-label="Search">
-    <div class="nav">
-      <button data-view="overview">Overview</button>
-      <button data-view="index">Index</button>
-      <button data-view="gaps">Gaps</button>
-      <button data-view="log">Log</button>
+    <div role="search">
+      <input id="search" type="search" placeholder="Search pages…  ( / )" aria-label="Search"
+             enterkeyhint="search" autocomplete="off">
     </div>
-    <div class="tree" id="tree"></div>
+    <nav class="nav" aria-label="Views">
+      <a href="#/overview" data-view="overview">Overview</a>
+      <a href="#/index" data-view="index">Index</a>
+      <a href="#/gaps" data-view="gaps">Gaps</a>
+      <a href="#/reviews" data-view="reviews">Reviews</a>
+      <a href="#/log" data-view="log">Log</a>
+      <a href="#/steering" data-view="steering">Steering</a>
+    </nav>
+    <nav class="tree" id="tree" aria-label="Pages"></nav>
+    <button class="signout" id="signout" hidden>Sign out of this kiln</button>
   </aside>
-  <main id="main"><div class="empty">Loading…</div></main>
+  <main id="main" tabindex="-1"><div class="empty">Loading…</div></main>
 </div>
 
 <script>
@@ -154,35 +263,74 @@ const $ = (id) => document.getElementById(id);
 const state = { workspace: null, pages: [], slugs: new Set(), view: "overview" };
 
 const TOKEN_KEY = "kiln.token";
+const WORKSPACE_KEY = "kiln.workspace";
 
-const api = async (path) => {
+// Conditional-request cache: the server ETags most reads off the wiki
+// revision, which only moves on import, so a 304 saves the whole body.
+// Cached payloads are frozen because 304s hand back the same reference.
+const etagCache = new Map();
+
+// nav is the navigation token: each route change increments it, and any
+// in-flight view render checks it before touching the DOM. Without this a
+// slow fetch could overwrite a newer view.
+let nav = 0;
+
+const api = async (path, opts = {}) => {
+  const method = opts.method || "GET";
   const headers = {};
   const token = localStorage.getItem(TOKEN_KEY);
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`/api/v1${path}`, { headers });
+  let body;
+  if (opts.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(opts.body);
+  }
+  const cached = method === "GET" ? etagCache.get(path) : null;
+  if (cached) headers["If-None-Match"] = cached.etag;
+
+  const res = await fetch(`/api/v1${path}`, { method, headers, body });
+  if (res.status === 304 && cached) return cached.data;
   if (res.status === 401) {
     showTokenForm(Boolean(token));
     const err = new Error("401 unauthorized");
     err.handled = true; // the form is already on screen; don't overwrite it
     throw err;
   }
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  if (!res.ok) {
+    // The server answers errors as {"error": ...}; surface that message
+    // rather than a bare status line when it is present.
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const j = await res.json();
+      if (j.error) msg = j.error;
+    } catch { /* not JSON; keep the status line */ }
+    throw new Error(msg);
+  }
+
+  const data = await res.json();
+  const etag = res.headers.get("ETag");
+  if (method === "GET" && etag) etagCache.set(path, { etag, data: Object.freeze(data) });
+  return data;
 };
 
 // The API requires a bearer token (kiln admin token create). The token lives
-// in localStorage; a rejected one falls back here rather than looping.
+// in localStorage; a rejected one falls back here rather than looping. The
+// guard stops concurrent 401s from re-rendering the form under the user's
+// fingers.
+let tokenFormShown = false;
 function showTokenForm(hadToken) {
+  if (tokenFormShown) return;
+  tokenFormShown = true;
   $("main").innerHTML = `
-    ${hadToken ? `<div class="banner">That token was rejected. It may be revoked or expired.</div>` : ""}
+    ${hadToken ? `<div class="banner" role="alert">That token was rejected. It may be revoked or expired.</div>` : ""}
     <h1>Sign in</h1>
     <p class="hint">This kiln requires an access token. Mint one with
       <code>kiln admin token create --login you</code> and paste it here.
       It is stored only in this browser.</p>
-    <input id="token-input" type="password" placeholder="kiln_…" aria-label="Access token">
-    <button id="token-save" class="nav-button" style="padding:7px 16px;border:1px solid var(--ember);
-      border-radius:6px;background:var(--ember);color:#fff;cursor:pointer">Save token</button>`;
+    <input id="token-input" type="password" placeholder="kiln_…" aria-label="Access token"
+           autocomplete="off" spellcheck="false">
+    <button id="token-save" class="btn">Save token</button>`;
   const save = () => {
     const v = $("token-input").value.trim();
     if (!v) return;
@@ -191,72 +339,142 @@ function showTokenForm(hadToken) {
   };
   $("token-save").addEventListener("click", save);
   $("token-input").addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+  $("token-input").focus();
 }
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// unesc inverts esc for text captured AFTER whole-source escaping -- wikilink
+// targets must be compared against real slugs, not entity-encoded ones.
+// &amp; must be last or double-encoded input would double-decode.
+const unesc = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+
+// safeURL admits only destinations that cannot execute script: http(s) and
+// internal hash routes. Anything else renders as text, which fails safe.
+const safeURL = (u) => /^(https?:\/\/|#\/)/.test(u) ? u : null;
+
 // A very small markdown subset: enough to read a generated page without
 // shipping a parser. Everything is escaped first, so page content is data.
-function renderMarkdown(src) {
+// headingOffset shifts markdown headings: 0 for artifacts (whose # is the
+// page title), 1 for pages (whose <h1> is rendered by the chrome).
+function renderMarkdown(src, headingOffset = 1) {
+  // Artifacts arrive with their frontmatter fence intact; metadata is chrome
+  // here, not prose, and the --- fences would otherwise render as rules.
+  src = src.replace(/^﻿?\s*---\n[\s\S]*?\n---\n/, "");
   const lines = esc(src).split("\n");
-  let html = "", inCode = false, listType = null;
+  let html = "", inCode = false, listType = null, para = [];
 
   const closeList = () => { if (listType) { html += `</${listType}>`; listType = null; } };
   const openList = (t) => { if (listType !== t) { closeList(); html += `<${t}>`; listType = t; } };
+  // Consecutive prose lines join into one paragraph; markdown hard-wrapped at
+  // 80 columns must not become one <p> per line.
+  const flushPara = () => {
+    if (para.length) { html += `<p>${inline(para.join(" "))}</p>`; para = []; }
+  };
+  const isTableRow = (s) => /^\s*\|.*\|\s*$/.test(s);
+  const isTableRule = (s) => /^\s*\|[\s:|-]+\|\s*$/.test(s);
+  const splitRow = (s) => s.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
 
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     if (raw.trimStart().startsWith("```")) {
-      closeList();
+      flushPara(); closeList();
       html += inCode ? "</code></pre>" : "<pre><code>";
       inCode = !inCode;
       continue;
     }
     if (inCode) { html += raw + "\n"; continue; }
 
-    const heading = raw.match(/^(#{1,4})\s+(.*)$/);
+    // A pipe row followed by a |---| rule opens a table; rows are consumed
+    // until the first non-row line.
+    if (isTableRow(raw) && isTableRule(lines[i + 1] ?? "")) {
+      flushPara(); closeList();
+      html += "<table><thead><tr>" +
+        splitRow(raw).map((c) => `<th>${inline(c)}</th>`).join("") +
+        "</tr></thead><tbody>";
+      i += 1;
+      while (isTableRow(lines[i + 1] ?? "")) {
+        i += 1;
+        html += "<tr>" + splitRow(lines[i]).map((c) => `<td>${inline(c)}</td>`).join("") + "</tr>";
+      }
+      html += "</tbody></table>";
+      continue;
+    }
+
+    const heading = raw.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
-      closeList();
-      const level = Math.min(heading[1].length + 1, 4);
+      flushPara(); closeList();
+      const level = Math.min(heading[1].length + headingOffset, 6);
       html += `<h${level}>${inline(heading[2])}</h${level}>`;
       continue;
     }
+    if (/^\s*(---+|\*\*\*+)\s*$/.test(raw)) { flushPara(); closeList(); html += "<hr>"; continue; }
     if (/^\s*[-*]\s+/.test(raw)) {
-      openList("ul");
+      flushPara(); openList("ul");
       html += `<li>${inline(raw.replace(/^\s*[-*]\s+/, ""))}</li>`;
       continue;
     }
     if (/^\s*\d+\.\s+/.test(raw)) {
-      openList("ol");
+      flushPara(); openList("ol");
       html += `<li>${inline(raw.replace(/^\s*\d+\.\s+/, ""))}</li>`;
       continue;
     }
     if (raw.trimStart().startsWith("&gt;")) {
-      closeList();
+      flushPara(); closeList();
       html += `<blockquote>${inline(raw.replace(/^\s*&gt;\s?/, ""))}</blockquote>`;
       continue;
     }
-    if (raw.trim() === "") { closeList(); continue; }
+    if (raw.trim() === "") { flushPara(); closeList(); continue; }
     closeList();
-    html += `<p>${inline(raw)}</p>`;
+    para.push(raw.trim());
   }
+  flushPara();
   closeList();
   if (inCode) html += "</code></pre>";
   return html;
 }
 
+// inline runs the span-level transforms on non-code text only: code spans are
+// carved out first so `**ptr` stays literal and paths in backticks are never
+// linkified -- paths and shas are load-bearing here.
 function inline(text) {
+  return text.split(/(`[^`]+`)/).map((seg) => {
+    if (seg.startsWith("`") && seg.endsWith("`") && seg.length > 1) {
+      return `<code>${seg.slice(1, -1)}</code>`;
+    }
+    return inlineText(seg);
+  }).join("");
+}
+
+function inlineText(text) {
   return text
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    // Images before links, since the syntaxes nest.
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, url) => {
+      const u = safeURL(url);
+      return u ? `<img src="${u}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">` : m;
+    })
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
+      const u = safeURL(url);
+      if (!u) return m;
+      const ext = u.startsWith("#/") ? "" : ` target="_blank" rel="noopener"`;
+      return `<a href="${u}"${ext}>${label}</a>`;
+    })
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, "$1<em>$2</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, alias) => {
-      const slug = target.split("/").pop().replace(/\.md$/, "");
-      const label = alias || slug;
+      // The captured target is entity-encoded (the whole source was escaped
+      // first); decode before comparing with real slugs or any page whose
+      // name contains & or an apostrophe renders as a false dead link.
+      const slug = unesc(target.split("/").pop().replace(/\.md$/, ""));
+      const label = alias || esc(slug);
       // A link to a page that does not exist is drawn as a gap rather than
       // hidden: it is the wiki saying what it wants and does not have.
       return state.slugs.has(slug)
         ? `<a class="wikilink" href="#/page/${encodeURIComponent(slug)}">${label}</a>`
-        : `<span class="wikilink dead" title="No page for &quot;${slug}&quot; yet">${label}</span>`;
+        : `<span class="wikilink dead" title="No page for ${esc(slug)} yet">${label}</span>`;
     });
 }
 
@@ -273,10 +491,10 @@ function renderTree(active) {
   for (const type of order) {
     const group = byType[type];
     if (!group) continue;
-    group.sort((a, b) => (a.title || a.slug).localeCompare(b.title || b.slug));
+    [...group].sort((a, b) => (a.title || a.slug).localeCompare(b.title || b.slug));
     html += `<div class="group-label">${labels[type]}</div>`;
     for (const p of group) {
-      const current = p.slug === active ? ' aria-current="true"' : "";
+      const current = p.slug === active ? ' aria-current="page"' : "";
       html += `<a href="#/page/${encodeURIComponent(p.slug)}"${current}>${esc(p.title || p.slug)}</a>`;
     }
   }
@@ -284,9 +502,49 @@ function renderTree(active) {
 }
 
 function setNav(view) {
-  for (const b of document.querySelectorAll(".nav button")) {
-    b.setAttribute("aria-current", String(b.dataset.view === view));
+  for (const a of document.querySelectorAll(".nav a")) {
+    if (a.dataset.view === view) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
   }
+}
+
+const setTitle = (s) => { document.title = s ? `${s} · kiln` : "kiln"; };
+
+// No inline handlers anywhere: the CSP allows only the hashed script block,
+// so a retry button is wired up after insertion.
+const banner = (err, retry) => `<div class="banner" role="alert">${esc(err.message)}
+  ${retry ? `<button id="banner-retry">Reload</button>` : ""}</div>`;
+const wireBannerRetry = () =>
+  $("banner-retry")?.addEventListener("click", () => location.reload());
+
+// beginView starts a navigation: bumps the token, resets scroll and focus
+// (the SPA equivalent of a page load), and shows a delayed loading state so
+// slow fetches don't read as dead clicks while fast ones don't flash.
+function beginView(title, view, activeSlug) {
+  const my = ++nav;
+  setTitle(title);
+  setNav(view);
+  renderTree(activeSlug ?? null);
+  document.body.classList.remove("nav-open");
+  $("menu").setAttribute("aria-expanded", "false");
+  const m = $("main");
+  m.setAttribute("aria-busy", "true");
+  m.focus({ preventScroll: true });
+  window.scrollTo(0, 0);
+  setTimeout(() => {
+    if (my === nav && m.getAttribute("aria-busy") === "true") {
+      m.innerHTML = `<div class="empty">Loading…</div>`;
+    }
+  }, 150);
+  return {
+    current: () => my === nav,
+    done: (html) => {
+      if (my !== nav) return false;
+      m.removeAttribute("aria-busy");
+      m.innerHTML = html;
+      return true;
+    },
+  };
 }
 
 const freshnessChip = (ref) => ref
@@ -294,11 +552,20 @@ const freshnessChip = (ref) => ref
   : `<span class="chip stale">source revision unknown</span>`;
 
 async function showPage(slug) {
-  setNav(null);
-  renderTree(slug);
+  const view = beginView(slug, null, slug);
   try {
-    const p = await api(`/workspaces/${state.workspace}/pages/${encodeURIComponent(slug)}`);
-    $("main").innerHTML = `
+    const p = await api(`/workspaces/${encodeURIComponent(state.workspace)}/pages/${encodeURIComponent(slug)}`);
+
+    // Backlinks and corrections degrade to absent panels on failure; null
+    // means "unavailable", [] means "genuinely none" -- different renders.
+    const [backlinks, corrections] = await Promise.all([
+      api(`/workspaces/${encodeURIComponent(state.workspace)}/backlinks/${encodeURIComponent(p.slug)}`).catch(() => null),
+      api(`/workspaces/${encodeURIComponent(state.workspace)}/corrections/${encodeURIComponent(p.slug)}`).catch(() => null),
+    ]);
+    if (!view.current()) return;
+
+    setTitle(p.title || p.slug);
+    view.done(`
       <div class="page-head">
         <h1>${esc(p.title || p.slug)}</h1>
         <div class="meta">
@@ -309,61 +576,279 @@ async function showPage(slug) {
         </div>
       </div>
       <div class="prose">${renderMarkdown(p.body)}</div>
-      ${(p.sources || []).length ? `<div class="page-head" style="margin-top:32px;border-bottom:none">
+      ${backlinks === null ? "" : `<div class="page-head" style="margin-top:32px;border-bottom:none">
+        <div class="group-label">Linked from</div>
+        ${backlinks.length ? `<div class="meta">${backlinks.map((b) =>
+          `<a class="chip" href="#/page/${encodeURIComponent(b.slug)}">${esc(b.title || b.slug)}</a>`).join("")}</div>`
+        : `<div class="hint">No pages link here yet.</div>`}
+      </div>`}
+      ${(p.sources || []).length ? `<div class="page-head" style="margin-top:16px;border-bottom:none">
         <div class="group-label">Derived from</div>
         <div class="meta">${p.sources.map((s) => `<span class="chip mono">${esc(s)}</span>`).join("")}</div>
-      </div>` : ""}`;
+      </div>` : ""}
+      ${correctionsPanel(corrections)}`);
+
+    wireCorrections(p.slug);
   } catch (err) {
-    if (err.handled) return;
-    $("main").innerHTML = `<div class="banner">Could not load that page: ${esc(err.message)}</div>`;
+    if (err.handled || !view.current()) return;
+    view.done(`<div class="banner" role="alert">Could not load that page: ${esc(err.message)}</div>`);
   }
 }
 
-async function showArtifact(kind) {
-  setNav(kind);
-  renderTree(null);
-  const { body } = await api(`/workspaces/${state.workspace}/${kind}`);
-  if (!body.trim()) {
-    $("main").innerHTML = `<div class="empty">
-      No ${kind} yet. Run <code>kiln build &lt;path&gt;</code> to generate one.</div>`;
-    return;
+// correctionsPanel renders pinned corrections and the form to add one. Pages
+// are never hand-edited -- regeneration would clobber the edit -- so this is
+// the sanctioned way to teach the wiki something it got wrong.
+function correctionsPanel(corrections) {
+  if (corrections === null) return ""; // endpoint unavailable
+  const items = corrections.map((c) => `
+    <div class="correction ${c.active ? "" : "inactive"}">
+      <div class="body">${esc(c.body)}</div>
+      <div class="tools">${esc(c.created)} ·
+        <button class="linkish" data-correction="${esc(c.id)}" data-active="${!c.active}">
+          ${c.active ? "deactivate" : "reactivate"}</button></div>
+    </div>`).join("");
+  return `
+    <details class="panel" ${corrections.some((c) => c.active) ? "open" : ""}>
+      <summary>Corrections (${corrections.filter((c) => c.active).length} active)</summary>
+      <p class="hint">A correction is pinned beside the page and re-injected into
+        every future rebuild. Use it when the wiki states something wrong; the
+        next regeneration will honor it.</p>
+      ${items}
+      <label class="hint" for="correction-body">New correction</label>
+      <textarea id="correction-body" rows="3" placeholder="What should the wiki know about this page?"></textarea>
+      <button class="btn" id="correction-pin">Pin correction</button>
+      <span class="hint" id="correction-note" role="status"></span>
+    </details>`;
+}
+
+// once guards a button against double submission: disabled while in flight.
+const once = (btn, fn) => btn.addEventListener("click", async () => {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try { await fn(); } finally { btn.disabled = false; }
+});
+
+function wireCorrections(slug) {
+  const note = (msg, isErr) => {
+    const el = $("correction-note");
+    if (el) { el.textContent = msg; el.classList.toggle("error", Boolean(isErr)); }
+  };
+  const pin = $("correction-pin");
+  if (pin) once(pin, async () => {
+    const body = $("correction-body").value.trim();
+    if (!body) return;
+    try {
+      await api(`/workspaces/${encodeURIComponent(state.workspace)}/corrections/${encodeURIComponent(slug)}`,
+        { method: "POST", body: { body } });
+      showPage(slug);
+    } catch (err) {
+      if (!err.handled) note(err.message, true);
+    }
+  });
+  for (const b of document.querySelectorAll("[data-correction]")) {
+    once(b, async () => {
+      try {
+        await api(`/workspaces/${encodeURIComponent(state.workspace)}/correction/${encodeURIComponent(b.dataset.correction)}`,
+          { method: "PATCH", body: { active: b.dataset.active === "true" } });
+        showPage(slug);
+      } catch (err) {
+        if (!err.handled) note(err.message, true);
+      }
+    });
   }
-  $("main").innerHTML = `<div class="prose">${renderMarkdown(body)}</div>`;
+}
+
+const artifactTitles = { overview: "Overview", index: "Index", log: "Log" };
+
+async function showArtifact(kind) {
+  const view = beginView(artifactTitles[kind], kind);
+  try {
+    const { body } = await api(`/workspaces/${encodeURIComponent(state.workspace)}/${kind}`);
+    if (!body.trim()) {
+      view.done(`<div class="empty">
+        No ${kind} yet. Run <code>kiln build &lt;path&gt;</code> to generate one.</div>`);
+      return;
+    }
+    // Artifacts carry their own # heading, so no offset: it becomes the h1.
+    view.done(`<div class="prose">${renderMarkdown(body, 0)}</div>`);
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
 }
 
 async function showGaps() {
-  setNav("gaps");
-  renderTree(null);
-  const gaps = await api(`/workspaces/${state.workspace}/gaps`);
-  if (!gaps.length) {
-    $("main").innerHTML = `<h1>Gaps</h1><div class="empty">
-      Every wikilink resolves. Nothing is missing.</div>`;
-    return;
+  const view = beginView("Gaps", "gaps");
+  try {
+    const gaps = await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`);
+    if (!gaps.length) {
+      view.done(`<h1>Gaps</h1><div class="empty">
+        Every wikilink resolves. Nothing is missing.</div>`);
+      return;
+    }
+    view.done(`<h1>Gaps</h1>
+      <p class="hint">Pages the wiki links to but does not have — the most precise
+      signal of what is missing, since the wiki asked for these itself.</p>
+      ${gaps.map((g) => `<div class="row">
+        <span class="mono">${esc(g.slug)}</span>
+        <span class="count">wanted by ${esc(g.wantedBy)} page${g.wantedBy === 1 ? "" : "s"}</span>
+      </div>`).join("")}`);
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
   }
-  $("main").innerHTML = `<h1>Gaps</h1>
-    <p class="hint">Pages the wiki links to but does not have — the most precise
-    signal of what is missing, since the wiki asked for these itself.</p>
-    ${gaps.map((g) => `<div class="row">
-      <span class="mono">${esc(g.slug)}</span>
-      <span class="count">wanted by ${g.wantedBy} page${g.wantedBy === 1 ? "" : "s"}</span>
-    </div>`).join("")}`;
+}
+
+// showReviews renders the wiki's questions for its humans: contradictions and
+// uncertainties the agent flagged, and deletions awaiting approval.
+async function showReviews(all) {
+  const view = beginView("Reviews", "reviews");
+  try {
+    const status = all ? "" : "open";
+    const reviews = await api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=${status}`);
+    const toggle = all
+      ? `<a href="#/reviews">show open only</a>`
+      : `<a href="#/reviews/all">show resolved too</a>`;
+
+    if (!reviews.length) {
+      view.done(`<h1>Reviews</h1>
+        <p class="hint">${toggle}</p>
+        <div class="empty">No ${all ? "" : "open "}reviews. When a build is uncertain
+        about something — or a source disappears — the question lands here.</div>`);
+      return;
+    }
+    if (!view.done(`<h1>Reviews</h1>
+      <p class="hint">Questions the wiki cannot answer alone. Resolving one records
+        your judgment; approving a deletion authorizes the next build to act on it.
+        ${toggle}</p>
+      <div id="review-note" class="hint" role="status"></div>
+      ${reviews.map((r) => `
+        <div class="review">
+          <div class="meta">
+            <span class="chip">${esc(r.kind)}</span>
+            ${r.pageSlug ? `<a class="chip" href="#/page/${encodeURIComponent(r.pageSlug)}">${esc(r.pageSlug)}</a>` : ""}
+            <span>${esc(r.created)}</span>
+            ${r.status !== "open" ? `<span class="chip">${esc(r.status)}${r.resolved ? " " + esc(r.resolved) : ""}</span>` : ""}
+          </div>
+          <strong>${esc(r.title)}</strong>
+          <div class="detail">${esc(r.detail)}</div>
+          ${r.status === "open" ? (r.actions && r.actions.length ? r.actions : ["dismiss"]).map((a) =>
+            `<button class="btn ${a === "approve" ? "" : "quiet"}" data-review="${esc(r.id)}" data-action="${esc(a)}">${esc(a)}</button>`
+          ).join("") : ""}
+        </div>`).join("")}`)) return;
+
+    for (const b of document.querySelectorAll("[data-review]")) {
+      once(b, async () => {
+        // Approval authorizes the next build's deletion cascade -- the most
+        // consequential click in the UI gets a two-step confirm, inline.
+        if (b.dataset.action === "approve" && b.dataset.armed !== "true") {
+          b.dataset.armed = "true";
+          b.textContent = "confirm approve";
+          b.classList.add("danger");
+          setTimeout(() => {
+            if (b.isConnected) {
+              b.dataset.armed = "false";
+              b.textContent = "approve";
+              b.classList.remove("danger");
+            }
+          }, 4000);
+          return;
+        }
+        try {
+          await api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews/${encodeURIComponent(b.dataset.review)}/resolve`,
+            { method: "POST", body: { action: b.dataset.action } });
+          showReviews(all);
+        } catch (err) {
+          if (err.handled) return;
+          const note = $("review-note");
+          if (note) { note.textContent = err.message; note.classList.add("error"); }
+        }
+      });
+    }
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
+}
+
+// showSteering edits the purpose and schema documents: the main lever for
+// changing a wiki's character, injected into every prompt from the next run.
+async function showSteering() {
+  const view = beginView("Steering", "steering");
+  try {
+    const docs = await api(`/workspaces/${encodeURIComponent(state.workspace)}/steering`);
+    const label = { purpose: "Purpose — what this wiki is for and who reads it",
+                    schema: "Schema — page conventions the builds should follow" };
+    const placeholder = {
+      purpose: "e.g. Documents the dispatch subsystem for on-call engineers. Assume Go fluency; explain domain terms.",
+      schema: "e.g. One entity page per service. Comparisons only for alternatives we actually evaluated.",
+    };
+    if (!view.done(`<h1>Steering</h1>
+      <p class="hint">These documents are injected into every generation prompt.
+      Edit them to change what future builds emphasize; existing pages update as
+      their sources next change (or with a forced rebuild).</p>
+      ${["purpose", "schema"].map((k) => `
+        <label class="group-label" for="steering-${k}">${esc(label[k])}</label>
+        <textarea id="steering-${k}" rows="8" placeholder="${esc(placeholder[k])}">${esc(docs[k] || "")}</textarea>
+        <button class="btn" data-steer="${k}">Save ${k}</button>
+        <span class="hint" id="steering-note-${k}" role="status"></span>`).join("")}`)) return;
+
+    for (const b of document.querySelectorAll("[data-steer]")) {
+      once(b, async () => {
+        const kind = b.dataset.steer;
+        const note = $(`steering-note-${kind}`);
+        try {
+          await api(`/workspaces/${encodeURIComponent(state.workspace)}/steering/${kind}`,
+            { method: "PUT", body: { body: $(`steering-${kind}`).value } });
+          note.textContent = "saved — applies from the next build";
+          note.classList.remove("error");
+        } catch (err) {
+          if (!err.handled) { note.textContent = err.message; note.classList.add("error"); }
+        }
+      });
+    }
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
 }
 
 async function showSearch(query) {
-  setNav(null);
-  const hits = await api(`/workspaces/${state.workspace}/search?q=${encodeURIComponent(query)}`);
-  $("main").innerHTML = `<h1>Search</h1>
-    <p class="hint">${hits.length} result${hits.length === 1 ? "" : "s"} for
-      <strong>${esc(query)}</strong></p>
-    ${hits.map((h) => `<div class="row">
-      <a href="#/page/${encodeURIComponent(h.slug)}">${esc(h.title || h.slug)}</a>
-      <span class="count">${esc(h.type)}</span>
-    </div>`).join("") || `<div class="empty">Nothing matched.</div>`}`;
+  const view = beginView(`Search: ${query}`, null);
+  $("search").value = query;
+  try {
+    const hits = await api(`/workspaces/${encodeURIComponent(state.workspace)}/search?q=${encodeURIComponent(query)}`);
+    // Snippets arrive with [[[match]]] markers; content is escaped first, so
+    // swapping the markers for <mark> afterwards cannot introduce markup.
+    // Pairwise replacement: a stray [[[ in page text stays literal.
+    const snippet = (s) => esc(s).replace(/\[\[\[([\s\S]*?)\]\]\]/g, "<mark>$1</mark>");
+    view.done(`<h1>Search</h1>
+      <p class="hint">${hits.length} result${hits.length === 1 ? "" : "s"} for
+        <strong>${esc(query)}</strong></p>
+      ${hits.map((h) => `<div class="hit">
+        <a href="#/page/${encodeURIComponent(h.slug)}">${esc(h.title || h.slug)}</a>
+        <span class="count"> · ${esc(h.type)}</span>
+        ${h.snippet ? `<div class="snippet">${snippet(h.snippet)}</div>` : ""}
+      </div>`).join("") || `<div class="empty">Nothing matched.</div>`}`);
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
+}
+
+// loadAllPages pages through the summaries endpoint until it runs dry. The
+// server caps a single response; stopping at one page silently truncated the
+// sidebar and -- worse -- made links to pages beyond the cap render as dead.
+async function loadAllPages(slug) {
+  const limit = 1000;
+  const all = [];
+  for (let offset = 0; ; offset += limit) {
+    const batch = await api(`/workspaces/${encodeURIComponent(slug)}/pages?limit=${limit}&offset=${offset}`);
+    all.push(...batch);
+    if (batch.length < limit) return all;
+  }
 }
 
 async function loadWorkspace(slug) {
   state.workspace = slug;
-  state.pages = await api(`/workspaces/${slug}/pages`);
+  localStorage.setItem(WORKSPACE_KEY, slug);
+  $("workspace").value = slug;
+  state.pages = await loadAllPages(slug);
   state.slugs = new Set(state.pages.map((p) => p.slug));
   route();
 }
@@ -371,12 +856,43 @@ async function loadWorkspace(slug) {
 function route() {
   const hash = location.hash.replace(/^#\//, "");
   if (hash.startsWith("page/")) return showPage(decodeURIComponent(hash.slice(5)));
+  if (hash.startsWith("search/")) return showSearch(decodeURIComponent(hash.slice(7)));
   if (["index", "overview", "log"].includes(hash)) return showArtifact(hash);
   if (hash === "gaps") return showGaps();
+  if (hash === "reviews") return showReviews(false);
+  if (hash === "reviews/all") return showReviews(true);
+  if (hash === "steering") return showSteering();
   return showArtifact("overview");
 }
 
+function setDrawer(open) {
+  document.body.classList.toggle("nav-open", open);
+  $("menu").setAttribute("aria-expanded", String(open));
+  if (open) $("sidebar").querySelector("select, input, a")?.focus();
+  else $("menu").focus();
+}
+
 async function boot() {
+  $("menu").addEventListener("click", () =>
+    setDrawer(!document.body.classList.contains("nav-open")));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("nav-open")) setDrawer(false);
+    // "/" or cmd/ctrl-K focuses search from anywhere outside a field.
+    const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? "");
+    if (!inField && (e.key === "/" || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k"))) {
+      e.preventDefault();
+      if (window.matchMedia("(max-width: 760px)").matches) setDrawer(true);
+      $("search").select();
+    }
+  });
+  // Tapping the backdrop strip dismisses the drawer.
+  document.addEventListener("click", (e) => {
+    if (document.body.classList.contains("nav-open") &&
+        !$("sidebar").contains(e.target) && e.target !== $("menu")) {
+      setDrawer(false);
+    }
+  });
+
   try {
     const { version } = await api("/version");
     $("version").textContent = version;
@@ -388,22 +904,41 @@ async function boot() {
       return;
     }
     $("workspace").innerHTML = workspaces
-      .map((w) => `<option value="${esc(w.slug)}">${esc(w.name)} (${w.pageCount})</option>`)
+      .map((w) => `<option value="${esc(w.slug)}">${esc(w.name)} (${esc(w.pageCount)})</option>`)
       .join("");
 
-    $("workspace").addEventListener("change", (e) => loadWorkspace(e.target.value));
-    window.addEventListener("hashchange", route);
-    for (const b of document.querySelectorAll(".nav button")) {
-      b.addEventListener("click", () => { location.hash = `#/${b.dataset.view}`; });
-    }
-    $("search").addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && e.target.value.trim()) showSearch(e.target.value.trim());
+    $("workspace").addEventListener("change", (e) => {
+      // A new workspace starts at its overview: carrying the previous page's
+      // hash across would greet it with "page not found".
+      location.hash = "#/overview";
+      loadWorkspace(e.target.value);
     });
+    window.addEventListener("hashchange", route);
+    $("search").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.target.value.trim()) {
+        // Search is a route like any other view: Back returns to the results
+        // and the query survives reload and sharing.
+        location.hash = "#/search/" + encodeURIComponent(e.target.value.trim());
+      }
+    });
+    if (localStorage.getItem(TOKEN_KEY)) {
+      const so = $("signout");
+      so.hidden = false;
+      so.addEventListener("click", () => {
+        localStorage.removeItem(TOKEN_KEY);
+        location.reload();
+      });
+    }
 
-    await loadWorkspace(workspaces[0].slug);
+    // The workspace choice survives a reload; a remembered slug that no
+    // longer exists falls back to the first.
+    const stored = localStorage.getItem(WORKSPACE_KEY);
+    const initial = workspaces.some((w) => w.slug === stored) ? stored : workspaces[0].slug;
+    await loadWorkspace(initial);
   } catch (err) {
     if (err.handled) return;
-    $("main").innerHTML = `<div class="banner">Could not reach the API: ${esc(err.message)}</div>`;
+    $("main").innerHTML = banner(err, true);
+    wireBannerRetry();
   }
 }
 

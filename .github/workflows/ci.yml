@@ -85,7 +85,11 @@ jobs:
       # both DROP SCHEMA public on the one shared database, so running their
       # test binaries in parallel makes each tear the schema out from under
       # the other mid-migration.
-      - run: go test -race ./... -count=1 -p 1 -covermode=atomic -coverprofile=coverage.out
+      #
+      # -coverpkg makes attribution cross-package: without it, store code
+      # exercised by api tests counts for nothing and the readstore looks
+      # untested when it is merely tested from one package over.
+      - run: go test -race ./... -count=1 -p 1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out
       - name: Coverage summary
         run: |
           total=$(go tool cover -func=coverage.out | awk '/^total:/ { print $NF }')
@@ -104,13 +108,12 @@ jobs:
           name: coverage
           path: coverage.out
           retention-days: 14
-      # Set just under the measured baseline (71.8%): a ratchet against
-      # regressions, not a target to chase. Note the total includes cmd/kiln
-      # at 0.0% -- it has no tests, and its statements are in the denominator.
+      # Set just under the measured baseline (81.7% with -coverpkg union
+      # attribution): a ratchet against regressions, not a target to chase.
       # Raise this as the real number moves up.
       - name: Coverage floor
         env:
-          COVERAGE_FLOOR: '68.0'
+          COVERAGE_FLOOR: '78.0'
         run: |
           total=$(go tool cover -func=coverage.out | awk '/^total:/ { gsub(/%/,"",$NF); print $NF }')
           echo "coverage ${total}%, floor ${COVERAGE_FLOOR}%"

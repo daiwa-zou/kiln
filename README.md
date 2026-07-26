@@ -17,7 +17,8 @@ nothing changes, a run costs nothing.
 
 ## Status
 
-Early development. See the milestone plan for scope.
+Early development. See [ROADMAP.md](ROADMAP.md) for the milestone plan — M1 (the human loop and
+reader upgrades) has shipped; M2 (server-side builds) is next.
 
 ## How it works
 
@@ -32,6 +33,19 @@ sync → extract → map → plan → generate → validate → import → post-
 
 The LLM never writes the index, overview, or log — those are rebuilt from page frontmatter on every
 run, so navigation can't drift.
+
+## The human loop
+
+Pages are never hand-edited — regeneration would clobber the edit — so human judgment enters
+through three channels, all editable from the UI (or the write API):
+
+- **Steering docs** (`purpose`, `schema`): injected into every prompt; the main lever for changing
+  a wiki's character without touching code.
+- **Page corrections**: pinned beside a page and re-injected into every future rebuild of it, so
+  what you teach the wiki survives regeneration.
+- **The review queue**: the wiki's questions for its humans. The agent files contradictions,
+  uncertainties, and gaps it would otherwise guess at; a disappeared source files a deletion
+  request. Nothing is ever deleted until someone approves it there.
 
 ## Architecture
 

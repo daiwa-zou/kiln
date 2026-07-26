@@ -121,6 +121,29 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		return nil, fmt.Errorf("jobs: load pages: %w", err)
 	}
 
+	// Deletions approved through the review queue join whatever the caller
+	// passed explicitly. The queue is how a human answers the question a
+	// disappeared source raises; the explicit list remains for automation.
+	approved, err := p.Store.LoadApprovedDeletions(ctx, req.WorkspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("jobs: load approved deletions: %w", err)
+	}
+	req.ApprovedDeletions = mergeKeys(req.ApprovedDeletions, approved)
+
+	// A source on record but absent from the map has disappeared. That is a
+	// question, not a command -- file a review item and leave everything in
+	// place until a human answers it. Filed before the no-changes early return,
+	// because a vanished source is often the *only* thing that changed.
+	if !req.DryRun {
+		cands := deletionCandidates(sources, req.Map, req.ApprovedDeletions)
+		if len(cands) > 0 {
+			if err := p.Store.EnsureDeletionReviews(ctx, req.WorkspaceID, cands); err != nil {
+				return nil, fmt.Errorf("jobs: file deletion reviews: %w", err)
+			}
+			log.Info("filed deletion reviews for disappeared sources", "count", len(cands))
+		}
+	}
+
 	// Route changes to dirty units, then drop any whose content hash is
 	// unchanged. This gate is the primary cost control: an unchanged workspace
 	// costs nothing, so sweeps and no-op webhooks are free.
@@ -243,6 +266,15 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 			item.Status = StatusSucceeded
 			written = append(written, out.Pages...)
 			findings = append(findings, out.Findings...)
+
+			// Review flags ride the run summary and are persisted with it.
+			// Only successful units contribute: a failed unit retries next run
+			// and will raise its flags again alongside content that landed.
+			for _, rf := range out.Reviews {
+				res.Summary.Reviews = append(res.Summary.Reviews, ReviewNote{
+					Kind: rf.Kind, Title: rf.Title, Detail: rf.Detail, Unit: key,
+				})
+			}
 
 			// The source record is only updated on success, so a failed unit
 			// keeps its old hash and is retried on the next run. The
@@ -387,8 +419,11 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 // the caller needs pages, findings, cost, turns, and two distinct failure modes,
 // and positional returns stop being readable well before that.
 type unitResult struct {
-	Pages      []wiki.Page
-	Findings   []string
+	Pages    []wiki.Page
+	Findings []string
+	// Reviews are flags the agent raised for human judgment, from both the
+	// analyze and generate steps.
+	Reviews    []agent.ReviewFlag
 	CostUSD    float64
 	Turns      int
 	Tokens     int
@@ -467,7 +502,8 @@ func (p *Pipeline) generateUnit(
 	// The plan is handed to generation explicitly. The CLI runner also resumes
 	// the session, but the default API runner is stateless -- without this the
 	// analyze step would be paid for and never read.
-	plan, planned := planFrom(analyzeRes)
+	plan, planned, analyzeReviews := planFrom(analyzeRes)
+	res.Reviews = append(res.Reviews, analyzeReviews...)
 
 	attempts := p.MaxRetries + 1
 	var lastViolations []wiki.Violation
@@ -522,6 +558,7 @@ func (p *Pipeline) generateUnit(
 			res.Pages = derefPages(collected)
 			if genRes.Generation != nil {
 				res.Findings = genRes.Generation.Findings
+				res.Reviews = append(res.Reviews, genRes.Generation.Reviews...)
 			}
 			return res
 		}
@@ -546,9 +583,10 @@ func (p *Pipeline) generateUnit(
 }
 
 // planFrom extracts the analysis for the generate prompt: the serialized plan,
-// and the set of paths it authorized, which validation enforces as the
-// quarantine boundary on what the agent may write.
-func planFrom(res *agent.Result) (plan string, planned map[string]bool) {
+// the set of paths it authorized -- which validation enforces as the
+// quarantine boundary on what the agent may write -- and any review flags the
+// analyze step raised.
+func planFrom(res *agent.Result) (plan string, planned map[string]bool, reviews []agent.ReviewFlag) {
 	analysis := res.Analysis
 	if analysis == nil {
 		// The CLI runner returns the schema-constrained JSON as envelope text.
@@ -556,7 +594,7 @@ func planFrom(res *agent.Result) (plan string, planned map[string]bool) {
 		if err != nil {
 			// Unparseable analysis text still carries signal; pass it through
 			// verbatim with no quarantine rather than dropping it.
-			return strings.TrimSpace(res.Result), nil
+			return strings.TrimSpace(res.Result), nil, nil
 		}
 		analysis = parsed
 	}
@@ -570,7 +608,7 @@ func planFrom(res *agent.Result) (plan string, planned map[string]bool) {
 			planned[pg.Path] = true
 		}
 	}
-	return plan, planned
+	return plan, planned, analysis.Reviews
 }
 
 // stampDates fills created/updated. Updated is always the run date -- the page

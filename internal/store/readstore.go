@@ -42,6 +42,9 @@ type SearchHit struct {
 	Type  string
 	Title string
 	Rank  float64
+	// Snippet is a ts_headline excerpt with the match marked up, so results
+	// show why they matched instead of a bare title.
+	Snippet string
 }
 
 // Gap is a page the wiki links to but does not have.
@@ -174,9 +177,15 @@ func (s *WikiStore) LoadPage(ctx context.Context, workspaceID, ref string) (wiki
 
 // Search runs weighted full-text search over live pages.
 func (s *WikiStore) Search(ctx context.Context, workspaceID, query string, limit, offset int) ([]SearchHit, error) {
+	// The headline marker is [[[match]]] rather than HTML: the UI escapes all
+	// content before rendering, so an HTML marker would arrive escaped and
+	// useless, while a bracket marker survives escaping and is swapped for a
+	// highlight span afterwards.
 	rows, err := s.pool.Query(ctx, `
 		SELECT p.path, p.slug, p.type, p.title,
-		       ts_rank(p.search, plainto_tsquery('english', $2)) AS rank
+		       ts_rank(p.search, plainto_tsquery('english', $2)) AS rank,
+		       ts_headline('english', p.body, plainto_tsquery('english', $2),
+		                   'StartSel=[[[, StopSel=]]], MaxWords=25, MinWords=10, MaxFragments=1')
 		FROM pages p
 		JOIN wikis w ON w.id = p.wiki_id
 		WHERE w.workspace_id = $1
@@ -192,7 +201,7 @@ func (s *WikiStore) Search(ctx context.Context, workspaceID, query string, limit
 	out := []SearchHit{}
 	for rows.Next() {
 		var h SearchHit
-		if err := rows.Scan(&h.Path, &h.Slug, &h.Type, &h.Title, &h.Rank); err != nil {
+		if err := rows.Scan(&h.Path, &h.Slug, &h.Type, &h.Title, &h.Rank, &h.Snippet); err != nil {
 			return nil, fmt.Errorf("store: scan search hit: %w", err)
 		}
 		out = append(out, h)

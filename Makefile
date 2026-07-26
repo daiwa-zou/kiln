@@ -34,7 +34,7 @@ test-integration: db-up
 # reason CI measures coverage in the integration job: without it internal/store
 # reports ~5% and the badge understates the project by a wide margin.
 cover: db-up
-	KILN_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race ./... -count=1 -p 1 -covermode=atomic -coverprofile=coverage.out
+	KILN_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race ./... -count=1 -p 1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out
 	@go tool cover -func=coverage.out | tail -1
 	@./scripts/coverage-badge.sh coverage.out .github/badges/coverage.svg
 

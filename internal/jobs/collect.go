@@ -313,3 +313,89 @@ func sanitize(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return base + "-" + hex.EncodeToString(sum[:4])
 }
+
+// mergeKeys unions two key lists, preserving first-seen order.
+func mergeKeys(a, b []diff.Key) []diff.Key {
+	seen := make(map[diff.Key]bool, len(a)+len(b))
+	out := make([]diff.Key, 0, len(a)+len(b))
+	for _, k := range append(append([]diff.Key{}, a...), b...) {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// maxCandidatePages bounds the page list quoted in a deletion review's detail.
+const maxCandidatePages = 10
+
+// deletionCandidates finds sources on record that the current map no longer
+// contains -- each one a question for the review queue, never an automatic
+// deletion.
+//
+// A key is only flagged when the map still contains units of the same prefix.
+// Without that guard, a `kiln build` run without --docs would flag every doc
+// source as deleted merely because documents were not mapped this time. The
+// cost of the guard is that removing the *last* source of a kind raises no
+// flag until a later run maps that kind again -- acceptable for a mechanism
+// whose whole point is asking rather than acting.
+func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, approved []diff.Key) []DeletionCandidate {
+	units := unitsByKey(m)
+
+	prefixes := map[string]bool{}
+	for k := range units {
+		prefixes[diff.Key(k).Prefix()] = true
+	}
+	skip := make(map[diff.Key]bool, len(approved))
+	for _, k := range approved {
+		skip[k] = true
+	}
+
+	var out []DeletionCandidate
+	for _, s := range sources {
+		if s.Key == diff.ArchOverview || skip[s.Key] {
+			continue
+		}
+		if _, live := units[string(s.Key)]; live {
+			continue
+		}
+		if !prefixes[s.Key.Prefix()] {
+			continue
+		}
+		out = append(out, DeletionCandidate{
+			Key:    s.Key,
+			Detail: describeDeletion(sources, s.Key),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
+// describeDeletion states the consequence a reviewer is approving: how many
+// pages go, which ones, and that shared pages are regenerated rather than
+// removed. This is the number a deletion review shows before anyone confirms.
+func describeDeletion(sources []diff.SourceRecord, key diff.Key) string {
+	c := diff.PlanCascade(sources, []diff.Key{key})
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Source %s is no longer present in the map.", key)
+	if n := c.PageCount(); n > 0 {
+		fmt.Fprintf(&b, " Approving removes %d page(s):", n)
+		for i, p := range c.DeletePages {
+			if i == maxCandidatePages {
+				fmt.Fprintf(&b, " … and %d more", n-maxCandidatePages)
+				break
+			}
+			b.WriteString(" ")
+			b.WriteString(p)
+		}
+		b.WriteString(".")
+	} else {
+		b.WriteString(" No pages are exclusively owned by it.")
+	}
+	if len(c.RegeneratePages) > 0 {
+		fmt.Fprintf(&b, " %d shared page(s) would be regenerated, not removed.", len(c.RegeneratePages))
+	}
+	return b.String()
+}
