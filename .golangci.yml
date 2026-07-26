@@ -1,0 +1,81 @@
+version: "2"
+
+# Start from the standard set (errcheck, govet, ineffassign, staticcheck,
+# unused) and add the checks that earn their keep on this codebase. gosec is
+# here because CodeQL is not available on private repos without paid Code
+# Security -- see .github/workflows/security.yml.
+linters:
+  default: standard
+  enable:
+    - bodyclose # unclosed HTTP response bodies (connector, agent/api)
+    - copyloopvar
+    - errorlint # %w and errors.Is/As correctness
+    - misspell
+    - nilerr # `return nil` after a non-nil error
+    - revive
+  # Deliberately not enabled: `unconvert` and `unparam`. Both are style-only on
+  # this codebase -- three no-op conversions of anthropic.Model (a `= string`
+  # alias) and two functions whose error return is always nil. Neither is a
+  # bug, and silencing them one by one would be noisier than leaving them off.
+  # Turn them on with a dedicated cleanup pass, not as CI churn.
+
+  settings:
+    errcheck:
+      exclude-functions:
+        # Writes to an in-memory buffer cannot fail.
+        - (*bytes.Buffer).WriteString
+        - (*bytes.Buffer).Write
+        - (*strings.Builder).WriteString
+        - (*strings.Builder).WriteRune
+        # `defer tx.Rollback(ctx)` is the standard pgx idiom: after a
+        # successful Commit it is a no-op returning ErrTxClosed, and there is
+        # nothing useful to do with the error on the failure path either.
+        - (github.com/jackc/pgx/v5.Tx).Rollback
+    gosec:
+      # errcheck already reports unhandled errors; G104 is pure duplication.
+      excludes:
+        - G104
+    revive:
+      rules:
+        - name: exported
+          disabled: true # internal/ packages are not a public API surface
+    staticcheck:
+      checks:
+        - all
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Tests intentionally ignore errors, hardcode fixture credentials, and
+      # take unused params to satisfy helper signatures.
+      - path: _test\.go$
+        linters:
+          - errcheck
+          - gosec
+          - unparam
+      # Golden/fixture helpers read paths built from testdata.
+      - path: _test\.go$
+        text: "G304" # file inclusion via variable
+      # filepath.WalkDir callbacks return nil to mean "skip this entry, keep
+      # walking" -- an unreadable file must not abort the scan. nilerr reads
+      # every one of those as a swallowed error.
+      - path: (internal/mapper/repomap/walk\.go|internal/connector/upload/upload\.go)$
+        linters:
+          - nilerr
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  # v2 moved gofmt/goimports out of `linters` into their own section.
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/daiwa-zou/kiln
