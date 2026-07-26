@@ -20,8 +20,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/daiwa-zou/kiln/internal/auth"
+	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
 	"github.com/daiwa-zou/kiln/internal/wiki"
@@ -85,6 +87,13 @@ type Server struct {
 	// keeps connector CRUD working but answers credential writes with 503.
 	Keyring *Keyring
 
+	// GitHub, Users, SessionPool, and SessionTTL enable browser sign-in. The
+	// /auth routes mount only when the GitHub client has OAuth credentials.
+	GitHub      *github.Client
+	Users       UserStore
+	SessionPool *pgxpool.Pool
+	SessionTTL  time.Duration
+
 	// writeLimit buckets mutating requests per caller; created by Router().
 	writeLimit *limiter
 }
@@ -120,6 +129,14 @@ func (s *Server) Router() http.Handler {
 	})
 	r.Get("/readyz", s.handleReady)
 
+	// Sign-in lives outside the API auth wrap by nature: its whole job is to
+	// create the credentials the wrap checks.
+	if s.GitHub.SignInConfigured() && s.Users != nil && s.SessionPool != nil {
+		r.Get("/auth/github/login", s.handleGitHubLogin)
+		r.Get("/auth/github/callback", s.handleGitHubCallback)
+		r.Post("/auth/logout", s.handleLogout)
+	}
+
 	r.Route("/api/v1", func(r chi.Router) {
 		// Version stays outside auth so the UI can render a sensible sign-in
 		// state; it discloses nothing about content.
@@ -128,6 +145,9 @@ func (s *Server) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			if s.Auth != nil {
 				r.Use(s.Auth.Wrap)
+			}
+			if s.Users != nil {
+				r.Get("/me", s.handleMe)
 			}
 			r.Get("/workspaces", s.handleWorkspaces)
 
@@ -236,10 +256,12 @@ func (s *Server) scope(r *http.Request) (userID string, admin bool) {
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	// The UI compares this to its own build so a skewed pair is visible rather
-	// than mysterious.
+	// than mysterious. githubSignIn tells the sign-in form whether to offer
+	// the OAuth button; it discloses only that the deployment configured it.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":       observability.Version,
 		"schemaVersion": store.SchemaVersion,
+		"githubSignIn":  s.GitHub.SignInConfigured(),
 	})
 }
 

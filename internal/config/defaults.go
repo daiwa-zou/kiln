@@ -63,6 +63,10 @@ func applyDefaults(v setter, role Role) {
 	// authentication deliberately rather than ship open by omission.
 	v.SetDefault("auth.mode", string(AuthToken))
 
+	// A month-long browser session; sessions are server-side rows, so a
+	// stolen cookie is revocable regardless of this.
+	v.SetDefault("github.session_ttl", 30*24*time.Hour)
+
 	v.SetDefault("worker.poll_interval", 5*time.Second)
 	// Comfortably above agent.timeout, so only a genuinely dead worker's run is
 	// requeued, never one still inside a slow model call.

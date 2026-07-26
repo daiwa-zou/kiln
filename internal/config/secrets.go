@@ -23,6 +23,7 @@ func loadSecrets(v *viper.Viper) (Secrets, error) {
 		{"MASTER_KEY", &s.MasterKey},
 		{"ANTHROPIC_API_KEY", &s.AnthropicAPIKey},
 		{"SESSION_SECRET", &s.SessionSecret},
+		{"GITHUB_CLIENT_SECRET", &s.GitHubClientSecret},
 		{"GITHUB_PRIVATE_KEY", &s.GitHubPrivateKey},
 		{"GITHUB_WEBHOOK_SECRET", &s.GitHubWebhookSecret},
 		{"STORAGE_SECRET_KEY", &s.StorageSecretKey},

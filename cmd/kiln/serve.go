@@ -11,6 +11,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/crypto"
+	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -80,10 +81,33 @@ processes separately so builds scale independently of the API.`,
 				}
 				srv.Keyring = keyring
 			}
+			gh := &github.Client{
+				ClientID:     cfg.GitHub.ClientID,
+				ClientSecret: cfg.Secrets.GitHubClientSecret,
+				AppID:        cfg.GitHub.AppID,
+				PrivateKey:   []byte(cfg.Secrets.GitHubPrivateKey),
+				BaseURL:      cfg.GitHub.BaseURL,
+				APIBaseURL:   cfg.GitHub.APIBaseURL,
+			}
+			if gh.SignInConfigured() {
+				srv.GitHub = gh
+				srv.Users = ws
+				srv.SessionPool = db.Pool
+				srv.SessionTTL = cfg.GitHub.SessionTTL
+				fmt.Fprintln(cmd.OutOrStdout(), "  GitHub sign-in enabled")
+			}
+
 			if cfg.Auth.Mode == config.AuthNone {
 				log.Warn("API authentication is disabled (auth.mode = none); every bench is readable by anyone who can reach this port")
 			} else {
-				srv.Auth = &auth.Middleware{Source: &auth.PGSource{Pool: db.Pool}, Log: log}
+				source := &auth.PGSource{Pool: db.Pool}
+				m := &auth.Middleware{Source: source, Log: log}
+				if gh.SignInConfigured() {
+					// Cookie sessions ride the same identity pipeline as
+					// bearer tokens; CSRF is enforced inside the middleware.
+					m.Sessions = source
+				}
+				srv.Auth = m
 			}
 
 			out := cmd.OutOrStdout()

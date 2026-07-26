@@ -650,11 +650,20 @@ function matchPages(q) {
   return out.sort((a, b) => b.score - a.score);
 }
 
+// csrfToken reads the double-submit cookie a GitHub session sets. Its
+// presence is also the "signed in with a session" signal, since the session
+// cookie itself is HttpOnly.
+const csrfToken = () =>
+  document.cookie.split("; ").find((c) => c.startsWith("kiln_csrf="))?.slice(10) || "";
+
 const api = async (path, opts = {}) => {
   const method = opts.method || "GET";
   const headers = {};
   const token = localStorage.getItem(TOKEN_KEY);
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  // Cookie-authenticated mutations must echo the CSRF cookie in a header;
+  // harmless to send alongside a bearer token, which ignores it.
+  if (method !== "GET" && csrfToken()) headers["X-CSRF-Token"] = csrfToken();
 
   let body;
   if (opts.body !== undefined) {
@@ -701,9 +710,13 @@ function showTokenForm(hadToken) {
     ${hadToken ? `<div class="banner" role="alert">That token was rejected. It may be revoked or expired.</div>` : ""}
     <svg class="logo logo-signin" aria-hidden="true"><use href="#logo-mark"/></svg>
     <h1>Sign in</h1>
-    <p class="hint">This kiln requires an access token. Mint one with
-      <code>kiln admin token create --login you</code> and paste it here.
-      It is stored only in this browser.</p>
+    ${state.githubSignIn ? `
+      <p class="hint">Sign in with your GitHub account:</p>
+      <a class="btn" href="/auth/github/login">Sign in with GitHub</a>
+      <p class="hint" style="margin-top:20px">Or use an access token.</p>` : `
+      <p class="hint">This kiln requires an access token. Mint one with
+        <code>kiln admin token create --login you</code> and paste it here.
+        It is stored only in this browser.</p>`}
     <input id="token-input" type="password" placeholder="kiln_…" aria-label="Access token"
            autocomplete="off" spellcheck="false">
     <button id="token-save" class="btn">Save token</button>`;
@@ -1783,8 +1796,9 @@ async function boot() {
   });
 
   try {
-    const { version } = await api("/version");
+    const { version, githubSignIn } = await api("/version");
     $("version").textContent = version;
+    state.githubSignIn = Boolean(githubSignIn);
 
     const workspaces = await api("/workspaces");
     if (!workspaces.length) {
@@ -1814,11 +1828,19 @@ async function boot() {
         location.hash = "#/search/" + encodeURIComponent(e.target.value.trim());
       }
     });
-    if (localStorage.getItem(TOKEN_KEY)) {
+    if (localStorage.getItem(TOKEN_KEY) || csrfToken()) {
       const so = $("signout");
       so.hidden = false;
-      so.addEventListener("click", () => {
+      so.addEventListener("click", async () => {
         localStorage.removeItem(TOKEN_KEY);
+        // A GitHub session is server-side: revoke it, not just the cookie.
+        if (csrfToken()) {
+          try {
+            await fetch("/auth/logout", {
+              method: "POST", headers: { "X-CSRF-Token": csrfToken() },
+            });
+          } catch { /* the reload lands on the sign-in form either way */ }
+        }
         location.reload();
       });
     }

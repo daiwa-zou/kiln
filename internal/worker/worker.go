@@ -17,6 +17,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/config"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 	"github.com/daiwa-zou/kiln/internal/crypto"
+	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -57,6 +58,11 @@ type Worker struct {
 	// MasterKey opens sealed credentials, here and nowhere else: the worker
 	// at sync time is the single place plaintext secrets are reconstructed.
 	MasterKey string
+
+	// GitHub mints installation tokens for clones when a connector names a
+	// github installation. Short-lived and repo-scoped, these supersede
+	// stored PATs wherever the App is installed.
+	GitHub *github.Client
 }
 
 // New assembles a worker from resolved configuration.
@@ -74,6 +80,12 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 		StaleAfter:           cfg.Worker.StaleAfter,
 		PermittedSourceRoots: cfg.Worker.PermittedSourceRoots,
 		MasterKey:            cfg.Secrets.MasterKey,
+		GitHub: &github.Client{
+			AppID:      cfg.GitHub.AppID,
+			PrivateKey: []byte(cfg.Secrets.GitHubPrivateKey),
+			BaseURL:    cfg.GitHub.BaseURL,
+			APIBaseURL: cfg.GitHub.APIBaseURL,
+		},
 	}
 }
 
@@ -253,12 +265,25 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 	return spec, gitConnectorID, cleanup, nil
 }
 
-// cloneRemote materializes a shallow clone of a connector's https remote,
-// decrypting its credential just-in-time. The plaintext token lives only in
-// this frame and the clone subprocess's environment.
+// cloneRemote materializes a shallow clone of a connector's https remote.
+// Authentication prefers an App installation token (short-lived, repo-scoped,
+// nothing durable to leak) and falls back to a sealed credential decrypted
+// just-in-time. Either way the plaintext lives only in this frame and the
+// clone subprocess's environment.
 func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteURL string) (dir string, cleanup func(), err error) {
 	token := ""
-	if c.CredentialID != "" {
+	switch {
+	case installationID(c.Config) != 0:
+		if !w.GitHub.AppConfigured() {
+			return "", nil, fmt.Errorf(
+				"connector names github installation %d, but no GitHub App is configured (set github.app_id and KILN_GITHUB_PRIVATE_KEY)",
+				installationID(c.Config))
+		}
+		token, _, err = w.GitHub.InstallationToken(ctx, installationID(c.Config))
+		if err != nil {
+			return "", nil, err
+		}
+	case c.CredentialID != "":
 		token, err = w.openCredential(ctx, c.CredentialID)
 		if err != nil {
 			return "", nil, err
@@ -277,6 +302,20 @@ func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteUR
 		return "", cleanup, err
 	}
 	return staging, cleanup, nil
+}
+
+// installationID reads a connector's github installation reference. JSON
+// numbers decode as float64; ids fit comfortably below the 2^53 boundary.
+func installationID(cfg map[string]any) int64 {
+	switch v := cfg["installation_id"].(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	}
+	return 0
 }
 
 // openCredential loads and opens a sealed credential. This is the only call
