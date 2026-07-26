@@ -23,8 +23,8 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Latest 1.25 patch, not go.mod's literal 1.25.0 -- that release
           # ships 22 stdlib CVEs this job would (correctly) fail on.
@@ -42,7 +42,7 @@ jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history on the scheduled sweep; the default shallow checkout
           # is enough for a push or PR.

@@ -26,8 +26,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - uses: golangci/golangci-lint-action@v9
@@ -46,8 +46,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: go test -race ./...
@@ -77,8 +77,8 @@ jobs:
     env:
       KILN_TEST_DATABASE_URL: postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       # -p 1 is required, not a tuning knob: internal/api and internal/store
@@ -98,7 +98,7 @@ jobs:
       # Uploaded before the floor gate, and with if: always(), so a failing
       # floor still leaves the profile downloadable -- that is exactly when
       # you want to inspect it.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage
@@ -126,10 +126,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # make build shells out to `git describe`
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: make build
@@ -139,7 +139,7 @@ jobs:
           test -n "$version" || { echo "kiln version printed nothing"; exit 1; }
           echo "built kiln $version"
           ./bin/kiln --help >/dev/null
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: kiln-linux-amd64
           path: bin/kiln
@@ -154,11 +154,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: coverage
       - run: ./scripts/coverage-badge.sh coverage.out .github/badges/coverage.svg
