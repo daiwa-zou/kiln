@@ -993,14 +993,16 @@ async function showGraph() {
       return;
     }
 
-    const W = 900, H = 640;
+    // Sized after render: the canvas fills the content column and the
+    // viewport height, so the graph uses the screen it is given.
+    let W = 900, H = 640;
     const bySlug = new Map(nodes.map((n, i) => [n.slug, i]));
-    const pts = nodes.map((_, i) => ({
+    const pts = nodes.map(() => ({ x: 0, y: 0, vx: 0, vy: 0, pinned: false }));
+    const seed = () => pts.forEach((p, i) => {
       // Deterministic golden-angle disc seeding: same graph, same picture.
-      x: W / 2 + Math.sqrt(i + 1) * 22 * Math.cos(i * 2.39996),
-      y: H / 2 + Math.sqrt(i + 1) * 22 * Math.sin(i * 2.39996),
-      vx: 0, vy: 0, pinned: false,
-    }));
+      p.x = W / 2 + Math.sqrt(i + 1) * (Math.min(W, H) / 26) * Math.cos(i * 2.39996);
+      p.y = H / 2 + Math.sqrt(i + 1) * (Math.min(W, H) / 26) * Math.sin(i * 2.39996);
+    });
     const links = edges
       .map((e) => [bySlug.get(e.from), bySlug.get(e.to)])
       .filter(([a, b]) => a !== undefined && b !== undefined && a !== b);
@@ -1056,14 +1058,22 @@ async function showGraph() {
              style="border-color:${hue[t] || "var(--border)"}">${esc(t)} ${c}</button>`).join("")}
         <button class="chip quiet" id="graph-reset">reset view</button>
       </div>
-      <svg id="graph-svg" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;touch-action:none"
+      <svg id="graph-svg" style="width:100%;touch-action:none;display:block"
            role="img" aria-label="Page link graph"></svg>`)) return;
+
+    const svg = $("graph-svg");
+    {
+      const rect = svg.getBoundingClientRect();
+      W = Math.max(700, Math.round(rect.width));
+      H = Math.max(520, Math.round(window.innerHeight - rect.top - 28));
+      svg.style.height = H + "px";
+    }
+    seed();
 
     // Retained DOM instead of per-frame innerHTML: interaction needs stable
     // elements to drag, hover, and filter, and attribute updates are cheaper
     // than reparsing the world anyway.
     const SVGNS = "http://www.w3.org/2000/svg";
-    const svg = $("graph-svg");
     const mk = (tag, attrs) => {
       const el = document.createElementNS(SVGNS, tag);
       for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
@@ -1117,8 +1127,14 @@ async function showGraph() {
     // after a drag.
     let budget = 260;
     let settling = false;
+    let autoFitted = false;
     const settle = () => {
-      if (!view.current() || budget <= 0) { settling = false; return; }
+      if (!view.current()) { settling = false; return; }
+      if (budget <= 0) {
+        settling = false;
+        if (!autoFitted) { autoFitted = true; fitView(); }
+        return;
+      }
       for (let i = 0; i < 10 && budget > 0; i++, budget--) tick(Math.max(0.15, budget / 300));
       position();
       requestAnimationFrame(settle);
@@ -1132,6 +1148,22 @@ async function showGraph() {
     // --- pan & zoom -------------------------------------------------------
     const vb = { x: 0, y: 0, w: W, h: H };
     const applyVB = () => svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    applyVB();
+    // fitView frames the visible nodes (labels included, roughly) with some
+    // air, so the layout always fills the canvas it was given.
+    const fitView = () => {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      pts.forEach((p, i) => {
+        if (nodeEls[i].classList.contains("graph-hidden")) return;
+        minX = Math.min(minX, p.x - 20); maxX = Math.max(maxX, p.x + 150);
+        minY = Math.min(minY, p.y - 20); maxY = Math.max(maxY, p.y + 20);
+      });
+      if (minX === Infinity) return;
+      vb.x = minX; vb.y = minY;
+      vb.w = Math.max(320, maxX - minX);
+      vb.h = Math.max(240, maxY - minY);
+      applyVB();
+    };
     const toSVG = (e) => {
       const rect = svg.getBoundingClientRect();
       return {
@@ -1150,10 +1182,7 @@ async function showGraph() {
       vb.w *= f; vb.h *= f;
       applyVB();
     }, { passive: false });
-    $("graph-reset").addEventListener("click", () => {
-      vb.x = 0; vb.y = 0; vb.w = W; vb.h = H;
-      applyVB();
-    });
+    $("graph-reset").addEventListener("click", fitView);
 
     // --- drag (nodes) and pan (background) --------------------------------
     // One pointer state machine; a press that never travels is a click and

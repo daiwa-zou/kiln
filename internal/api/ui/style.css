@@ -429,3 +429,6 @@
   .graph-legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
   .graph-legend .chip { cursor: pointer; }
   .graph-legend .chip.graph-off { opacity: 0.4; text-decoration: line-through; }
+
+  /* The graph is a canvas, not a column: give it everything. */
+  main[data-view="graph"] { max-width: none; }
