@@ -999,8 +999,9 @@ async function showGraph() {
     const bySlug = new Map(nodes.map((n, i) => [n.slug, i]));
     const pts = nodes.map(() => ({ x: 0, y: 0, vx: 0, vy: 0, pinned: false }));
     // Physics scale with the canvas: the same 19 nodes should spread over a
-    // 2000px canvas the way they spread over a 900px one.
-    let repulse = 2600, springLen = 90;
+    // 2000px canvas the way they spread over a 900px one. Equilibrium radius
+    // goes as (repulse/gravity)^(1/3), so both knobs move together.
+    let repulse = 2600, springLen = 90, gravity = 0.004;
     const seed = () => pts.forEach((p, i) => {
       // Deterministic golden-angle disc seeding: same graph, same picture.
       p.x = W / 2 + Math.sqrt(i + 1) * (Math.min(W, H) / 26) * Math.cos(i * 2.39996);
@@ -1033,13 +1034,14 @@ async function showGraph() {
       }
       for (const p of pts) {
         if (p.pinned) { p.vx = 0; p.vy = 0; continue; }
-        p.vx += (W / 2 - p.x) * 0.004 * k;
-        p.vy += (H / 2 - p.y) * 0.004 * k;
+        // Gravity aims at the content-box center (labels hang right), and
+        // is the only confinement: a hard position clamp would pile nodes
+        // along the canvas edges whenever the layout outgrows it.
+        p.vx += (W / 2 - 65 - p.x) * gravity * k;
+        p.vy += (H / 2 - p.y) * gravity * k;
         p.x += Math.max(-8, Math.min(8, p.vx));
         p.y += Math.max(-8, Math.min(8, p.vy));
         p.vx *= 0.55; p.vy *= 0.55;
-        p.x = Math.max(20, Math.min(W - 20, p.x));
-        p.y = Math.max(20, Math.min(H - 20, p.y));
       }
     };
 
@@ -1094,6 +1096,7 @@ async function showGraph() {
       const scale = Math.min(W, H) / 640;
       repulse = 2600 * scale * scale;
       springLen = 90 * scale;
+      gravity = 0.004 / scale;
     }
     seed();
 
@@ -1200,10 +1203,16 @@ async function showGraph() {
       // 150px of right margin leaves room for the labels hanging off nodes;
       // the growth cap keeps a near-degenerate layout from being flung to
       // the corners.
-      const s = Math.min(6,
+      let s = Math.min(6,
         (W - 60 - 150) / Math.max(1, m.x1 - m.x0),
         (H - 60) / Math.max(1, m.y1 - m.y0));
-      const grow = s > 1.02 ? s : 1;
+      // Shrinking is allowed too (leaving full screen), but never below the
+      // spacing floor that keeps nodes apart; the camera absorbs the rest.
+      if (s < 1) {
+        s = Math.max(s, (40 * Math.sqrt(pts.length)) /
+          Math.max(1, m.x1 - m.x0, m.y1 - m.y0));
+      }
+      const grow = Math.abs(s - 1) > 0.02 ? s : 1;
       const cx = (m.x0 + m.x1) / 2, cy = (m.y0 + m.y1) / 2;
       for (const p of pts) {
         // Center the content box, not the node box: labels hang 150px off
@@ -1211,11 +1220,13 @@ async function showGraph() {
         p.x = W / 2 - 65 + (p.x - cx) * grow;
         p.y = H / 2 + (p.y - cy) * grow;
       }
-      if (grow > 1) {
-        // Keep the physics in equilibrium at the new spacing, or the next
-        // drag's reheat would pull the layout back into a cluster.
+      if (grow !== 1) {
+        // Keep the physics in equilibrium at the rescaled spacing
+        // (radius ~ (repulse/gravity)^(1/3)), or the relaxation pass
+        // below would simply undo the rescale.
         repulse *= grow * grow;
         springLen *= grow;
+        gravity /= grow;
       }
       position();
       m = bounds();
@@ -1224,12 +1235,16 @@ async function showGraph() {
       if (bw <= W && bh <= H) {
         vb.x = 0; vb.y = 0; vb.w = W; vb.h = H;
       } else {
-        // Oversized layout (grow stayed 1): shrink the camera to frame it.
+        // Still oversized (the spacing floor refused to shrink further):
+        // the camera frames it instead.
         vb.x = bx; vb.y = by;
         vb.w = Math.max(320, bw);
         vb.h = Math.max(240, bh);
       }
       applyVB();
+      // Uniform rescaling magnifies the old layout's irregularities: let
+      // the simulation relax into even spacing at the new scale.
+      reheat(140);
     };
     const toSVG = (e) => {
       const rect = svg.getBoundingClientRect();
