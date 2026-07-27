@@ -14,8 +14,9 @@ A self-hosted platform that builds and maintains knowledge bases from your sourc
 documents, and web pages — and keeps them current as those sources change.
 
 Instead of retrieving from raw material on every question, kiln **compiles a persistent wiki** and
-maintains it incrementally. When a source changes, only the affected pages are regenerated. When
-nothing changes, a run costs nothing.
+maintains it incrementally. A per-unit content-hash gate means only units whose sources
+actually changed spend anything on regeneration, and a run over unchanged sources costs
+nothing. Commit-range change routing narrows the work further on webhook-triggered builds.
 
 ## Status
 

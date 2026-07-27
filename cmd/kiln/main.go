@@ -1,10 +1,11 @@
 // Command kiln builds and maintains knowledge bases from code repos, documents,
 // and web sources.
 //
-// Two roles exist today: `kiln serve` runs the HTTP API and the reading UI, and
-// `kiln build` runs the generation pipeline against a local directory. A
-// queue-backed `kiln worker` role is planned but not yet implemented; when it
-// lands, builds will also be schedulable server-side.
+// Three roles: `kiln serve` runs the HTTP API and the reading UI, `kiln build`
+// runs the generation pipeline against a local directory, and `kiln worker`
+// claims queued runs from the database and builds them through the same
+// pipeline. `kiln serve --with-worker` runs server and worker in one process
+// for single-node deployments.
 package main
 
 import (
