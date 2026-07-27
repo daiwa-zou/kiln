@@ -189,6 +189,7 @@ func (s *Server) Router() http.Handler {
 					// write limiter and role gate, because a rebuild spends
 					// real money.
 					r.Get("/runs", s.handleRunsList)
+					r.Get("/runs/{id}/items", s.handleRunItems)
 					r.Group(func(r chi.Router) {
 						r.Use(writeLimiter(s.writeLimit))
 						r.Post("/runs", s.handleRunCreate)

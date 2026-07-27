@@ -35,6 +35,9 @@ type Store interface {
 	LoadSealedCredential(ctx context.Context, id string) (*store.SealedCredential, error)
 	PollDueConnectors(ctx context.Context, olderThan time.Duration) ([]store.ConnectorRow, error)
 	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error)
+	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
+	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
+	FileReview(ctx context.Context, workspaceID, kind, title, detail string) error
 }
 
 // Worker is one claim-and-build loop.
@@ -56,6 +59,11 @@ type Worker struct {
 	// for a refresh, for origins with no useful webhook. Zero disables the
 	// scheduler.
 	SourcePollInterval time.Duration
+
+	// BudgetWindow is the rolling window workspace budgets apply to. After
+	// each run, spend at or past 80% of budget_usd files a warning review,
+	// so the pause the API enforces at 100% never arrives unannounced.
+	BudgetWindow time.Duration
 
 	// lastSourcePoll throttles the scheduler to roughly one sweep per
 	// interval regardless of how fast the claim loop spins.
@@ -91,6 +99,7 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 		Poll:                 cfg.Worker.PollInterval,
 		StaleAfter:           cfg.Worker.StaleAfter,
 		SourcePollInterval:   cfg.Worker.SourcePollInterval,
+		BudgetWindow:         cfg.Agent.BudgetWindow,
 		PermittedSourceRoots: cfg.Worker.PermittedSourceRoots,
 		MasterKey:            cfg.Secrets.MasterKey,
 		GitHub: &github.Client{
@@ -192,6 +201,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		log.Info("build finished", "status", res.Summary.Status,
 			"cost_usd", res.Summary.CostUSD,
 			"created", res.Summary.Created, "updated", res.Summary.Updated)
+		w.warnNearBudget(ctx, run.WorkspaceID, log)
 	}
 	if connectorID != "" {
 		if merr := w.Store.MarkConnectorSync(ctx, connectorID, syncErr); merr != nil {
@@ -377,6 +387,39 @@ func (w *Worker) failRun(ctx context.Context, runID string, cause error, log *sl
 	// gone, or the workspace stays blocked until the stale deadline.
 	if err := w.Store.FailRun(context.WithoutCancel(ctx), runID, cause.Error()); err != nil {
 		log.Error("recording run failure failed", "error", err)
+	}
+}
+
+// warnNearBudget files a review when a workspace has spent 80% or more of
+// its budget within the rolling window. The queue humans already watch is
+// where the warning lands, deduplicated so a workspace hovering near the
+// line asks once, and the hard stop at 100% (enforced at enqueue by the API)
+// never arrives unannounced.
+func (w *Worker) warnNearBudget(ctx context.Context, workspaceID string, log *slog.Logger) {
+	if w.BudgetWindow <= 0 {
+		return
+	}
+	budget, err := w.Store.WorkspaceBudgetUSD(ctx, workspaceID)
+	if err != nil || budget == nil || *budget <= 0 {
+		if err != nil {
+			log.Error("budget lookup failed", "error", err)
+		}
+		return
+	}
+	spent, err := w.Store.SpendInWindow(ctx, workspaceID, w.BudgetWindow)
+	if err != nil {
+		log.Error("spend lookup failed", "error", err)
+		return
+	}
+	if spent < *budget*0.8 {
+		return
+	}
+	detail := fmt.Sprintf(
+		"$%.2f of the $%.2f budget is spent in the current %s window. "+
+			"At 100%% new runs are refused until the window rolls on; raise the bench budget if this pace is intended.",
+		spent, *budget, w.BudgetWindow)
+	if err := w.Store.FileReview(ctx, workspaceID, "budget", "budget window nearly exhausted", detail); err != nil {
+		log.Error("filing budget warning failed", "error", err)
 	}
 }
 

@@ -108,7 +108,12 @@ tests; a live browser round trip additionally needs a registered GitHub App
 **Verification:** OAuth round trip in a browser; webhook with valid/invalid HMAC → 202/401; push
 storm → one queued run; CSRF probe on a mutating route fails without the token.
 
-## M4 — New Source Types & Compounding Polish
+## M4 — New Source Types & Compounding Polish ✅ shipped
+
+*Shipped 2026-07-26. Web connector with the full SSRF posture
+(resolve-then-connect pinning, https-only, size caps, no credential
+forwarding), the graph view, budget warnings at 80% of the window, per-unit
+cost attribution in the dashboard, and the EntryKey deletion.*
 
 - **Web/URL connector** feeding the already-working `extract.FormatHTML`;
   `trigger_mode='poll'`. Ships with SSRF guardrails: deny private/link-local/metadata ranges with

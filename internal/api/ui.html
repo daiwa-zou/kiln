@@ -1568,8 +1568,31 @@ async function showRuns() {
           <strong>${money(r.costUsd)}</strong>
           <span class="count">${pages(r) || (r.status === "no_changes" ? "nothing changed — no cost" : "")}</span>
           ${r.error ? `<div class="detail">${esc(r.error)}</div>` : ""}
+          ${r.costUsd > 0 ? `<details class="panel" data-run-items="${esc(r.id)}">
+            <summary>cost by unit</summary>
+            <div class="detail">loading…</div>
+          </details>` : ""}
         </div>`).join("") || `<div class="empty">No runs yet. Rebuild now, or push
           a build from the CLI with <span class="mono">kiln build</span>.</div>`}`)) return;
+
+    // Per-unit cost attribution, fetched lazily on first expand: where the
+    // money went, costliest unit first, estimate beside actual.
+    for (const d of document.querySelectorAll("[data-run-items]")) {
+      d.addEventListener("toggle", async () => {
+        if (!d.open || d.dataset.loaded) return;
+        d.dataset.loaded = "true";
+        const box = d.querySelector(".detail");
+        try {
+          const items = await api(`/workspaces/${encodeURIComponent(state.workspace)}/runs/${encodeURIComponent(d.dataset.runItems)}/items`);
+          box.innerHTML = items.map((it) => `<div class="row">
+              <span class="mono">${esc(it.key)}${it.status !== "succeeded" ? ` <span class="chip run-failed">${esc(it.status)}</span>` : ""}</span>
+              <span class="count">${money(it.costUsd)}${it.estCostUsd ? ` (est ${money(it.estCostUsd)})` : ""}</span>
+            </div>`).join("") || "no unit records";
+        } catch (err) {
+          if (!err.handled) box.textContent = err.message;
+        }
+      });
+    }
 
     const btn = $("run-now");
     if (btn && !btn.disabled) once(btn, async () => {

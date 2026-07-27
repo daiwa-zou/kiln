@@ -30,6 +30,10 @@ type loopStore struct {
 	// pollDue and enqueued script and record the poll scheduler.
 	pollDue  []store.ConnectorRow
 	enqueued []string
+	// budget/spent/reviews script and record the budget warning.
+	budget  *float64
+	spent   float64
+	reviews []string
 
 	claimErr   error
 	requeueErr error
@@ -116,6 +120,25 @@ func (l *loopStore) EnqueueRun(_ context.Context, workspaceID, trigger, connecto
 	defer l.mu.Unlock()
 	l.enqueued = append(l.enqueued, trigger+":"+connectorID)
 	return "run-" + connectorID, true, nil
+}
+
+func (l *loopStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.budget, nil
+}
+
+func (l *loopStore) SpendInWindow(context.Context, string, time.Duration) (float64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.spent, nil
+}
+
+func (l *loopStore) FileReview(_ context.Context, _, kind, title, _ string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.reviews = append(l.reviews, kind+":"+title)
+	return nil
 }
 
 func TestNewWiresConfigAndIdentity(t *testing.T) {
@@ -259,6 +282,37 @@ func TestPollSchedulerDisabledByZeroInterval(t *testing.T) {
 	defer st.mu.Unlock()
 	if len(st.enqueued) != 0 {
 		t.Errorf("scheduler ran despite being disabled: %v", st.enqueued)
+	}
+}
+
+func TestWarnNearBudget(t *testing.T) {
+	budget := 10.0
+	cases := []struct {
+		name    string
+		budget  *float64
+		spent   float64
+		window  time.Duration
+		reviews int
+	}{
+		{"under threshold", &budget, 7.9, time.Hour, 0},
+		{"at threshold", &budget, 8.0, time.Hour, 1},
+		{"over budget", &budget, 12.0, time.Hour, 1},
+		{"no budget set", nil, 100, time.Hour, 0},
+		{"window disabled", &budget, 12, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newLoopStore()
+			st.budget, st.spent = tc.budget, tc.spent
+			w := &Worker{Store: st, BudgetWindow: tc.window}
+			w.warnNearBudget(context.Background(), "ws1", w.logger())
+			if len(st.reviews) != tc.reviews {
+				t.Errorf("reviews = %v, want %d", st.reviews, tc.reviews)
+			}
+			if tc.reviews == 1 && st.reviews[0] != "budget:budget window nearly exhausted" {
+				t.Errorf("review = %q", st.reviews[0])
+			}
+		})
 	}
 }
 
