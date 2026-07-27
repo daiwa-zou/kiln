@@ -516,6 +516,9 @@ function beginView(title, view, activeSlug) {
   document.body.classList.remove("nav-open");
   $("menu").setAttribute("aria-expanded", "false");
   const m = $("main");
+  // The view name drives the layout width: prose views keep the reading
+  // measure, data views use the room they need.
+  m.dataset.view = view || "page";
   m.setAttribute("aria-busy", "true");
   m.focus({ preventScroll: true });
   window.scrollTo(0, 0);

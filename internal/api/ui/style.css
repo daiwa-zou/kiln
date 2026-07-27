@@ -178,7 +178,14 @@
   }
   .signout:hover { color: var(--oxide); }
 
-  main { padding: 34px 40px 80px; max-width: 74ch; }
+  /* Two width tiers, both centered. Prose views keep the 74ch reading
+     measure — a line of body text should not run the width of a monitor —
+     while data views (runs, graph, members, search…) use the room their
+     tables, cards, and canvases actually need instead of squeezing into a
+     left-aligned prose column with half the screen dead. */
+  main { padding: 34px 40px 80px; max-width: 1200px; width: 100%; margin: 0 auto; }
+  main[data-view="page"], main[data-view="overview"],
+  main[data-view="index"], main[data-view="log"] { max-width: calc(74ch + 80px); }
   @media (max-width: 760px) { main { padding: 22px 18px 60px; } }
 
   .page-head { border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 22px; }
