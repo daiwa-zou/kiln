@@ -1052,17 +1052,32 @@ async function showGraph() {
     const truncated = totalPages > nodes.length
       ? ` Showing the ${nodes.length} best-connected of ${totalPages} pages.` : "";
 
+    const icon = (d) => `<svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="2" stroke-linecap="round"
+      stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+    const iconReset = icon(`<polyline points="1 4 1 10 7 10"/>
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>`);
+    const iconMax = icon(`<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/>
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/>`);
+    const iconMin = icon(`<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M16 3v3a2 2 0 0 0 2 2h3"/>
+      <path d="M16 21v-3a2 2 0 0 1 2-2h3"/><path d="M8 21v-3a2 2 0 0 0-2-2H3"/>`);
+
     if (!view.done(`<h1>Graph</h1>
       <p class="hint">${nodes.length} pages, ${links.length} links. Drag nodes,
       scroll to zoom, drag the background to pan; click opens the page.${esc(truncated)}</p>
       <div id="graph-wrap">
-      <div class="graph-legend" role="group" aria-label="Graph controls">
-        ${Object.entries(typeCounts).map(([t, c]) =>
-          `<button class="chip" data-type="${esc(t)}" aria-pressed="true">${esc(t)} ${c}</button>`).join("")}
-        <button class="chip quiet graph-zoom" id="graph-zoom-out" aria-label="Zoom out">&minus;</button>
-        <button class="chip quiet graph-zoom" id="graph-zoom-in" aria-label="Zoom in">+</button>
-        <button class="chip quiet" id="graph-reset">reset view</button>
-        <button class="chip quiet" id="graph-full">full screen</button>
+      <div class="graph-toolbar">
+        <div class="graph-legend" role="group" aria-label="Filter by page type">
+          ${Object.entries(typeCounts).map(([t, c]) =>
+            `<button class="chip" data-type="${esc(t)}" aria-pressed="true">${esc(t)} ${c}</button>`).join("")}
+        </div>
+        <div class="graph-controls" role="group" aria-label="View controls">
+          <button class="chip quiet graph-zoom" id="graph-zoom-out" aria-label="Zoom out" title="Zoom out">&minus;</button>
+          <span class="graph-zoom-level" id="graph-zoom-level" title="Zoom level">100%</span>
+          <button class="chip quiet graph-zoom" id="graph-zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
+          <button class="chip quiet graph-icon" id="graph-reset" aria-label="Reset view" title="Reset view">${iconReset}</button>
+          <button class="chip quiet graph-icon" id="graph-full" aria-label="Full screen" title="Full screen">${iconMax}</button>
+        </div>
       </div>
       <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>
       </div>`)) return;
@@ -1159,7 +1174,11 @@ async function showGraph() {
 
     // --- pan & zoom -------------------------------------------------------
     const vb = { x: 0, y: 0, w: W, h: H };
-    const applyVB = () => svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    const zoomLabel = $("graph-zoom-level");
+    const applyVB = () => {
+      svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+      zoomLabel.textContent = Math.round((W / vb.w) * 100) + "%";
+    };
     applyVB();
     // fitView fills the canvas by spreading the layout, never by zooming the
     // camera: nodes move apart while circles and labels keep their natural
@@ -1248,7 +1267,10 @@ async function showGraph() {
     const wrap = $("graph-wrap");
     const isFull = () => !!document.fullscreenElement || wrap.classList.contains("graph-fs");
     const resync = () => {
-      $("graph-full").textContent = isFull() ? "exit full screen" : "full screen";
+      const fb = $("graph-full");
+      fb.innerHTML = isFull() ? iconMin : iconMax;
+      fb.title = isFull() ? "Exit full screen" : "Full screen";
+      fb.setAttribute("aria-label", fb.title);
       const rect = svg.getBoundingClientRect();
       W = Math.max(320, Math.round(rect.width));
       H = Math.max(320, Math.min(Math.round(window.innerHeight - rect.top - 28),
