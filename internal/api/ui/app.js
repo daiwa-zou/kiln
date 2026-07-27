@@ -239,10 +239,10 @@ function showTokenForm(hadToken) {
     ${state.githubSignIn ? `
       <p class="hint">Sign in with your GitHub account:</p>
       <a class="btn" href="/auth/github/login">Sign in with GitHub</a>
-      <p class="hint" style="margin-top:20px">Or use an access token.</p>` : `
-      <p class="hint">This kiln requires an access token. Mint one with
-        <code>kiln admin token create --login you</code> and paste it here.
-        It is stored only in this browser.</p>`}
+      <p class="hint login-alt">Or use an access token.</p>` : `
+      <p class="hint">Sign-in requires an access token. Create one with
+        <code>kiln admin token create --login you</code>.
+        The token is stored only in this browser.</p>`}
     <input id="token-input" type="password" placeholder="kiln_…" aria-label="Access token"
            autocomplete="off" spellcheck="false">
     <button id="token-save" class="btn">Save token</button>`;
@@ -782,13 +782,13 @@ async function showPage(slug) {
       </div>
       <div class="prose">${renderMarkdown(p.body)}</div>
       ${pagerFor(p)}
-      ${backlinks === null ? "" : `<div class="page-head" style="margin-top:32px;border-bottom:none">
+      ${backlinks === null ? "" : `<div class="page-foot">
         <div class="group-label">Linked from</div>
         ${backlinks.length ? `<div class="meta">${backlinks.map((b) =>
           `<a class="chip" href="#/page/${encodeURIComponent(b.slug)}">${esc(b.title || b.slug)}</a>`).join("")}</div>`
         : `<div class="hint">No pages link here yet.</div>`}
       </div>`}
-      ${(p.sources || []).length ? `<div class="page-head" style="margin-top:16px;border-bottom:none">
+      ${(p.sources || []).length ? `<div class="page-foot tight">
         <div class="group-label">Derived from</div>
         <div class="meta">${p.sources.map((s) => `<span class="chip mono">${esc(s)}</span>`).join("")}</div>
       </div>` : ""}
@@ -817,9 +817,9 @@ function correctionsPanel(corrections) {
   return `
     <details class="panel" ${corrections.some((c) => c.active) ? "open" : ""}>
       <summary>Corrections (${corrections.filter((c) => c.active).length} active)</summary>
-      <p class="hint">A correction is pinned beside the page and re-injected into
-        every future rebuild. Use it when the wiki states something wrong; the
-        next regeneration will honor it.</p>
+      <p class="hint">Corrections stay attached to this page and are applied to
+        every future rebuild. Pin one when the page states something incorrect;
+        the next regeneration takes it into account.</p>
       ${items}
       <label class="hint" for="correction-body">New correction</label>
       <textarea id="correction-body" rows="3" placeholder="What should the wiki know about this page?"></textarea>
@@ -890,12 +890,12 @@ async function showGaps() {
     const gaps = await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`);
     if (!gaps.length) {
       view.done(`<h1>Gaps</h1><div class="empty">
-        Every wikilink resolves. Nothing is missing.</div>`);
+        No gaps — every link resolves to an existing page.</div>`);
       return;
     }
     view.done(`<h1>Gaps</h1>
-      <p class="hint">Pages the wiki links to but does not have — the most precise
-      signal of what is missing, since the wiki asked for these itself.</p>
+      <p class="hint">Pages that are linked from existing content but have not
+      been written yet.</p>
       ${gaps.map((g) => `<div class="row">
         <span class="mono">${esc(g.slug)}</span>
         <span class="count">wanted by ${esc(g.wantedBy)} page${g.wantedBy === 1 ? "" : "s"}</span>
@@ -919,13 +919,14 @@ async function showReviews(all) {
     if (!reviews.length) {
       view.done(`<h1>Reviews</h1>
         <p class="hint">${toggle}</p>
-        <div class="empty">No ${all ? "" : "open "}reviews. When a build is uncertain
-        about something — or a source disappears — the question lands here.</div>`);
+        <div class="empty">No ${all ? "" : "open "}reviews. Builds file a review
+        here when they need a decision, such as confirming a deletion after a
+        source disappears.</div>`);
       return;
     }
     if (!view.done(`<h1>Reviews</h1>
-      <p class="hint">Questions the wiki cannot answer alone. Resolving one records
-        your judgment; approving a deletion authorizes the next build to act on it.
+      <p class="hint">Decisions that require review. Resolving one records your
+        answer; an approved deletion is applied by the next build.
         ${toggle}</p>
       <div id="review-note" class="hint" role="status"></div>
       ${reviews.map((r) => `
@@ -998,6 +999,10 @@ async function showGraph() {
     let W = 900, H = 640;
     const bySlug = new Map(nodes.map((n, i) => [n.slug, i]));
     const pts = nodes.map(() => ({ x: 0, y: 0, vx: 0, vy: 0, pinned: false }));
+    // Physics scale with the canvas: the same 19 nodes should spread over a
+    // 2000px canvas the way they spread over a 900px one. Equilibrium radius
+    // goes as (repulse/gravity)^(1/3), so both knobs move together.
+    let repulse = 2600, springLen = 90, gravity = 0.004;
     const seed = () => pts.forEach((p, i) => {
       // Deterministic golden-angle disc seeding: same graph, same picture.
       p.x = W / 2 + Math.sqrt(i + 1) * (Math.min(W, H) / 26) * Math.cos(i * 2.39996);
@@ -1014,7 +1019,7 @@ async function showGraph() {
         for (let j = i + 1; j < pts.length; j++) {
           let dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
           const d2 = Math.max(64, dx * dx + dy * dy);
-          const f = (2600 / d2) * k;
+          const f = (repulse / d2) * k;
           const d = Math.sqrt(d2);
           dx /= d; dy /= d;
           pts[i].vx += dx * f; pts[i].vy += dy * f;
@@ -1024,19 +1029,20 @@ async function showGraph() {
       for (const [a, b] of links) {
         const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
         const d = Math.max(1, Math.hypot(dx, dy));
-        const f = (d - 90) * 0.015 * k;
+        const f = (d - springLen) * 0.015 * k;
         pts[a].vx += (dx / d) * f; pts[a].vy += (dy / d) * f;
         pts[b].vx -= (dx / d) * f; pts[b].vy -= (dy / d) * f;
       }
       for (const p of pts) {
         if (p.pinned) { p.vx = 0; p.vy = 0; continue; }
-        p.vx += (W / 2 - p.x) * 0.004 * k;
-        p.vy += (H / 2 - p.y) * 0.004 * k;
+        // Gravity aims at the content-box center (labels hang right), and
+        // is the only confinement: a hard position clamp would pile nodes
+        // along the canvas edges whenever the layout outgrows it.
+        p.vx += (W / 2 - 65 - p.x) * gravity * k;
+        p.vy += (H / 2 - p.y) * gravity * k;
         p.x += Math.max(-8, Math.min(8, p.vx));
         p.y += Math.max(-8, Math.min(8, p.vy));
         p.vx *= 0.55; p.vy *= 0.55;
-        p.x = Math.max(20, Math.min(W - 20, p.x));
-        p.y = Math.max(20, Math.min(H - 20, p.y));
       }
     };
 
@@ -1046,27 +1052,52 @@ async function showGraph() {
 
     const typeCounts = {};
     for (const n of nodes) typeCounts[n.type] = (typeCounts[n.type] || 0) + 1;
+    const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
     const truncated = totalPages > nodes.length
-      ? ` Showing the ${nodes.length} best-connected of ${totalPages} pages.` : "";
+      ? ` · showing the ${nodes.length} most linked of ${totalPages}` : "";
+
+    const icon = (d) => `<svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="2" stroke-linecap="round"
+      stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+    const iconReset = icon(`<polyline points="1 4 1 10 7 10"/>
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>`);
+    const iconMax = icon(`<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/>
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/>`);
+    const iconMin = icon(`<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M16 3v3a2 2 0 0 0 2 2h3"/>
+      <path d="M16 21v-3a2 2 0 0 1 2-2h3"/><path d="M8 21v-3a2 2 0 0 0-2-2H3"/>`);
 
     if (!view.done(`<h1>Graph</h1>
-      <p class="hint">${nodes.length} pages, ${links.length} links. Drag nodes,
-      scroll to zoom, drag the background to pan; click opens the page.${esc(truncated)}</p>
-      <div class="graph-legend" role="group" aria-label="Filter by page type">
-        ${Object.entries(typeCounts).map(([t, c]) =>
-          `<button class="chip" data-type="${esc(t)}" aria-pressed="true"
-             style="border-color:${hue[t] || "var(--border)"}">${esc(t)} ${c}</button>`).join("")}
-        <button class="chip quiet" id="graph-reset">reset view</button>
+      <p class="hint">${plural(nodes.length, "page")} · ${plural(links.length, "link")}${esc(truncated)}</p>
+      <div id="graph-wrap">
+      <div class="graph-toolbar">
+        <div class="graph-legend" role="group" aria-label="Filter by page type">
+          ${Object.entries(typeCounts).map(([t, c]) =>
+            `<button class="chip" data-type="${esc(t)}" aria-pressed="true">${esc(t)} ${c}</button>`).join("")}
+        </div>
+        <div class="graph-controls" role="group" aria-label="View controls">
+          <button class="chip quiet graph-zoom" id="graph-zoom-out" aria-label="Zoom out" title="Zoom out">&minus;</button>
+          <span class="graph-zoom-level" id="graph-zoom-level" title="Zoom level">100%</span>
+          <button class="chip quiet graph-zoom" id="graph-zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
+          <button class="chip quiet graph-icon" id="graph-reset" aria-label="Reset view" title="Reset view">${iconReset}</button>
+          <button class="chip quiet graph-icon" id="graph-full" aria-label="Full screen" title="Full screen">${iconMax}</button>
+        </div>
       </div>
-      <svg id="graph-svg" style="width:100%;touch-action:none;display:block"
-           role="img" aria-label="Page link graph"></svg>`)) return;
+      <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>
+      </div>`)) return;
 
     const svg = $("graph-svg");
     {
       const rect = svg.getBoundingClientRect();
       W = Math.max(700, Math.round(rect.width));
-      H = Math.max(520, Math.round(window.innerHeight - rect.top - 28));
+      // Cap the aspect: a portrait window would otherwise make a canvas far
+      // taller than a roughly-round layout can fill.
+      H = Math.max(520, Math.min(Math.round(window.innerHeight - rect.top - 28),
+                                 Math.round(W * 1.2)));
       svg.style.height = H + "px";
+      const scale = Math.min(W, H) / 640;
+      repulse = 2600 * scale * scale;
+      springLen = 90 * scale;
+      gravity = 0.004 / scale;
     }
     seed();
 
@@ -1147,22 +1178,74 @@ async function showGraph() {
 
     // --- pan & zoom -------------------------------------------------------
     const vb = { x: 0, y: 0, w: W, h: H };
-    const applyVB = () => svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    const zoomLabel = $("graph-zoom-level");
+    const applyVB = () => {
+      svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+      zoomLabel.textContent = Math.round((W / vb.w) * 100) + "%";
+    };
     applyVB();
-    // fitView frames the visible nodes (labels included, roughly) with some
-    // air, so the layout always fills the canvas it was given.
-    const fitView = () => {
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    // fitView fills the canvas by spreading the layout, never by zooming the
+    // camera: nodes move apart while circles and labels keep their natural
+    // size. Zooming in to fill made 19 nodes look like beach balls; leaving
+    // the settled cluster alone left 80% of a big screen empty.
+    const bounds = () => {
+      let m = null;
       pts.forEach((p, i) => {
         if (nodeEls[i].classList.contains("graph-hidden")) return;
-        minX = Math.min(minX, p.x - 20); maxX = Math.max(maxX, p.x + 150);
-        minY = Math.min(minY, p.y - 20); maxY = Math.max(maxY, p.y + 20);
+        if (!m) m = { x0: p.x, x1: p.x, y0: p.y, y1: p.y };
+        m.x0 = Math.min(m.x0, p.x); m.x1 = Math.max(m.x1, p.x);
+        m.y0 = Math.min(m.y0, p.y); m.y1 = Math.max(m.y1, p.y);
       });
-      if (minX === Infinity) return;
-      vb.x = minX; vb.y = minY;
-      vb.w = Math.max(320, maxX - minX);
-      vb.h = Math.max(240, maxY - minY);
+      return m;
+    };
+    const fitView = () => {
+      let m = bounds();
+      if (!m) return;
+      // 150px of right margin leaves room for the labels hanging off nodes;
+      // the growth cap keeps a near-degenerate layout from being flung to
+      // the corners.
+      let s = Math.min(6,
+        (W - 60 - 150) / Math.max(1, m.x1 - m.x0),
+        (H - 60) / Math.max(1, m.y1 - m.y0));
+      // Shrinking is allowed too (leaving full screen), but never below the
+      // spacing floor that keeps nodes apart; the camera absorbs the rest.
+      if (s < 1) {
+        s = Math.max(s, (40 * Math.sqrt(pts.length)) /
+          Math.max(1, m.x1 - m.x0, m.y1 - m.y0));
+      }
+      const grow = Math.abs(s - 1) > 0.02 ? s : 1;
+      const cx = (m.x0 + m.x1) / 2, cy = (m.y0 + m.y1) / 2;
+      for (const p of pts) {
+        // Center the content box, not the node box: labels hang 150px off
+        // the right, so the node cloud sits 65px left of center.
+        p.x = W / 2 - 65 + (p.x - cx) * grow;
+        p.y = H / 2 + (p.y - cy) * grow;
+      }
+      if (grow !== 1) {
+        // Keep the physics in equilibrium at the rescaled spacing
+        // (radius ~ (repulse/gravity)^(1/3)), or the relaxation pass
+        // below would simply undo the rescale.
+        repulse *= grow * grow;
+        springLen *= grow;
+        gravity /= grow;
+      }
+      position();
+      m = bounds();
+      const bx = m.x0 - 20, by = m.y0 - 20;
+      const bw = m.x1 - m.x0 + 170, bh = m.y1 - m.y0 + 40;
+      if (bw <= W && bh <= H) {
+        vb.x = 0; vb.y = 0; vb.w = W; vb.h = H;
+      } else {
+        // Still oversized (the spacing floor refused to shrink further):
+        // the camera frames it instead.
+        vb.x = bx; vb.y = by;
+        vb.w = Math.max(320, bw);
+        vb.h = Math.max(240, bh);
+      }
       applyVB();
+      // Uniform rescaling magnifies the old layout's irregularities: let
+      // the simulation relax into even spacing at the new scale.
+      reheat(140);
     };
     const toSVG = (e) => {
       const rect = svg.getBoundingClientRect();
@@ -1171,18 +1254,82 @@ async function showGraph() {
         y: vb.y + ((e.clientY - rect.top) / rect.height) * vb.h,
       };
     };
-    svg.addEventListener("wheel", (e) => {
-      e.preventDefault();
-      const scale = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+    // zoomBy scales the viewBox about an anchor point: the cursor for wheel
+    // zoom, the canvas center for the toolbar buttons.
+    const zoomBy = (scale, ax, ay) => {
       const next = Math.min(W * 3, Math.max(W / 8, vb.w * scale));
       const f = next / vb.w;
-      const p = toSVG(e);
-      vb.x = p.x - (p.x - vb.x) * f;
-      vb.y = p.y - (p.y - vb.y) * f;
+      vb.x = ax - (ax - vb.x) * f;
+      vb.y = ay - (ay - vb.y) * f;
       vb.w *= f; vb.h *= f;
       applyVB();
+    };
+    svg.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const p = toSVG(e);
+      zoomBy(e.deltaY > 0 ? 1.12 : 1 / 1.12, p.x, p.y);
     }, { passive: false });
+    $("graph-zoom-in").addEventListener("click", () =>
+      zoomBy(1 / 1.35, vb.x + vb.w / 2, vb.y + vb.h / 2));
+    $("graph-zoom-out").addEventListener("click", () =>
+      zoomBy(1.35, vb.x + vb.w / 2, vb.y + vb.h / 2));
     $("graph-reset").addEventListener("click", fitView);
+
+    // Full screen wraps the toolbar too, so filtering and zooming keep
+    // working inside it. Native fullscreen when the environment allows it;
+    // a fixed overlay covering the window when it doesn't (embedded panes
+    // deny the Fullscreen API). Either way the canvas is re-measured and
+    // the layout re-fitted to the new geometry.
+    const wrap = $("graph-wrap");
+    const isFull = () => !!document.fullscreenElement || wrap.classList.contains("graph-fs");
+    const resync = () => {
+      const fb = $("graph-full");
+      fb.innerHTML = isFull() ? iconMin : iconMax;
+      fb.title = isFull() ? "Exit full screen" : "Full screen";
+      fb.setAttribute("aria-label", fb.title);
+      const rect = svg.getBoundingClientRect();
+      W = Math.max(320, Math.round(rect.width));
+      H = Math.max(320, Math.min(Math.round(window.innerHeight - rect.top - 28),
+                                 Math.round(W * 1.2)));
+      svg.style.height = H + "px";
+      fitView();
+    };
+    const enterOverlay = () => {
+      if (isFull()) return;
+      wrap.classList.add("graph-fs");
+      resync();
+    };
+    $("graph-full").addEventListener("click", () => {
+      if (document.fullscreenElement) { document.exitFullscreen(); return; }
+      if (wrap.classList.contains("graph-fs")) {
+        wrap.classList.remove("graph-fs");
+        resync();
+        return;
+      }
+      wrap.requestFullscreen().catch(enterOverlay);
+      // Some embedded panes leave the fullscreen promise forever pending
+      // instead of rejecting; fall back if nothing materializes.
+      setTimeout(enterOverlay, 400);
+    });
+    const onFullscreen = () => {
+      if (!view.current()) {
+        document.removeEventListener("fullscreenchange", onFullscreen);
+        return;
+      }
+      resync();
+    };
+    document.addEventListener("fullscreenchange", onFullscreen);
+    const onEsc = (e) => {
+      if (!view.current()) {
+        document.removeEventListener("keydown", onEsc);
+        return;
+      }
+      if (e.key === "Escape" && wrap.classList.contains("graph-fs")) {
+        wrap.classList.remove("graph-fs");
+        resync();
+      }
+    };
+    document.addEventListener("keydown", onEsc);
 
     // --- drag (nodes) and pan (background) --------------------------------
     // One pointer state machine; a press that never travels is a click and
@@ -1253,6 +1400,9 @@ async function showGraph() {
     // --- legend: toggle types on and off ----------------------------------
     const hidden = new Set();
     for (const b of document.querySelectorAll(".graph-legend [data-type]")) {
+      // CSSOM, not a style attribute: the CSP (style-src 'self') refuses
+      // inline style attributes.
+      b.style.borderColor = hue[b.dataset.type] || "var(--border)";
       b.addEventListener("click", () => {
         const t = b.dataset.type;
         hidden.has(t) ? hidden.delete(t) : hidden.add(t);
@@ -1287,9 +1437,9 @@ async function showRuns() {
       return parts.join(", ");
     };
     if (!view.done(`<h1>Runs</h1>
-      <p class="hint">Each run syncs this bench's sources and regenerates only what
-      changed; an unchanged bench costs nothing. Runs are built by the worker —
-      one at a time per bench.</p>
+      <p class="hint">A run synchronizes this bench's sources and regenerates only
+      the pages whose sources changed; an unchanged bench incurs no cost. Runs
+      execute one at a time per bench.</p>
       <button class="btn" id="run-now" ${active ? "disabled" : ""}>
         ${active ? "A run is already queued or running" : "Rebuild now"}</button>
       <span class="hint" id="run-note" role="status"></span>
@@ -1372,8 +1522,8 @@ async function showMembers() {
     </select>`;
 
     if (!view.done(`<h1>Members</h1>
-      <p class="hint">Roles: viewers read, members write content, owners manage
-      connectors, credentials, and this list. The last owner cannot be removed.</p>
+      <p class="hint">Viewers can read, members can edit content, and owners manage
+      connectors, credentials, and membership. The last owner cannot be removed.</p>
       <div id="member-note" class="hint" role="status"></div>
       ${members.map((m) => `
         <div class="row">
@@ -1449,9 +1599,9 @@ async function showSteering() {
       schema: "e.g. One entity page per service. Comparisons only for alternatives we actually evaluated.",
     };
     if (!view.done(`<h1>Steering</h1>
-      <p class="hint">These documents are injected into every generation prompt.
-      Edit them to change what future builds emphasize; existing pages update as
-      their sources next change (or with a forced rebuild).</p>
+      <p class="hint">These documents guide every build. Edits apply to future
+      builds; existing pages incorporate them when their sources next change,
+      or on a forced rebuild.</p>
       ${["purpose", "schema"].map((k) => `
         <label class="group-label" for="steering-${k}">${esc(label[k])}</label>
         <textarea id="steering-${k}" rows="8" placeholder="${esc(placeholder[k])}">${esc(docs[k] || "")}</textarea>

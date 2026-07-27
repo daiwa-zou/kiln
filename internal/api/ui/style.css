@@ -178,17 +178,20 @@
   }
   .signout:hover { color: var(--oxide); }
 
-  /* Two width tiers, both centered. Prose views keep the 74ch reading
-     measure — a line of body text should not run the width of a monitor —
-     while data views (runs, graph, members, search…) use the room their
-     tables, cards, and canvases actually need instead of squeezing into a
-     left-aligned prose column with half the screen dead. */
-  main { padding: 34px 40px 80px; max-width: 1200px; width: 100%; margin: 0 auto; }
+  /* Two width tiers sharing ONE left edge, so titles and content never hop
+     sideways between views. Prose keeps the 74ch reading measure — a line
+     of body text should not run the width of a monitor — while data views
+     (runs, members, search…) grow to the room their tables and cards need,
+     and the graph takes everything. Only the right edge varies. */
+  main { padding: 34px 48px 80px; max-width: 1240px; }
   main[data-view="page"], main[data-view="overview"],
-  main[data-view="index"], main[data-view="log"] { max-width: calc(74ch + 80px); }
+  main[data-view="index"], main[data-view="log"] { max-width: calc(74ch + 96px); }
   @media (max-width: 760px) { main { padding: 22px 18px 60px; } }
 
   .page-head { border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 22px; }
+  .page-foot { margin-top: 32px; padding-bottom: 14px; }
+  .page-foot.tight { margin-top: 16px; }
+  .login-alt { margin-top: 20px; }
   h1 { font-family: var(--serif); font-size: 30px; line-height: 1.2; margin: 0 0 8px; font-weight: 600; }
   .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12.5px; color: var(--ink-dim); }
   .chip {
@@ -426,9 +429,26 @@
   line.graph-hot { stroke: var(--ember); stroke-width: 1.5; }
   .graph-node, line { transition: opacity 0.15s ease; }
   .graph-hidden { display: none; }
-  .graph-legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+  .graph-toolbar { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin: 0 0 10px; }
+  .graph-legend { display: flex; flex-wrap: wrap; gap: 6px; }
   .graph-legend .chip { cursor: pointer; }
   .graph-legend .chip.graph-off { opacity: 0.4; text-decoration: line-through; }
+  .graph-controls { display: flex; gap: 6px; align-items: center; margin-left: auto; }
+  .graph-controls .chip { cursor: pointer; }
+  .graph-icon { display: inline-flex; align-items: center; }
+  .graph-icon svg { display: block; }
+  .graph-zoom-level {
+    font-size: 12px; color: var(--ink-dim); min-width: 40px; text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
 
-  /* The graph is a canvas, not a column: give it everything. */
+  /* The graph is a canvas, not a column: give it everything. The svg must
+     be styled here, not via a style attribute — the CSP refuses those. */
   main[data-view="graph"] { max-width: none; }
+  #graph-svg { width: 100%; display: block; touch-action: none; }
+  #graph-wrap:fullscreen, #graph-wrap.graph-fs {
+    background: var(--bg); padding: 16px 20px; overflow: hidden;
+  }
+  /* Overlay fallback for environments that deny the Fullscreen API. */
+  #graph-wrap.graph-fs { position: fixed; inset: 0; z-index: 50; }
+  .graph-zoom { min-width: 30px; text-align: center; font-size: 14px; line-height: 1; }
