@@ -37,9 +37,12 @@ func TestGraphReturnsNodesAndResolvedEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nodes, edges, err := s.Graph(ctx, ws)
+	nodes, edges, total, err := s.Graph(ctx, ws, 300)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if total != 2 {
+		t.Errorf("total = %d, want 2", total)
 	}
 	if len(nodes) != 2 {
 		t.Fatalf("nodes = %d, want 2", len(nodes))
@@ -60,5 +63,18 @@ func TestGraphReturnsNodesAndResolvedEdges(t *testing.T) {
 		if n.Links != 1 {
 			t.Errorf("node %s inbound = %d, want 1", n.Slug, n.Links)
 		}
+	}
+
+	// A capped graph keeps only edges whose both endpoints survived, and
+	// reports the real total so the UI can say "showing top N of M".
+	capped, cappedEdges, total, err := s.Graph(ctx, ws, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != 1 || total != 2 {
+		t.Errorf("capped graph: nodes=%d total=%d, want 1 of 2", len(capped), total)
+	}
+	if len(cappedEdges) != 0 {
+		t.Errorf("capped graph kept dangling edges: %+v", cappedEdges)
 	}
 }

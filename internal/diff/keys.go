@@ -44,6 +44,26 @@ func UploadOrigin(rel string) string { return "upload:" + rel }
 // collision-free in the cache and the router.
 func WebOrigin(url string) string { return "web:" + url }
 
+// Namespace classifies a key by the sync source that produces it: repo
+// documents are "doc", uploaded ones "doc:upload", fetched ones "doc:web",
+// and everything else its plain prefix. Deletion detection needs this
+// granularity — "was this source's producer synced this run" is a question
+// about the namespace, not the prefix.
+func Namespace(k Key) string {
+	prefix := k.Prefix()
+	if prefix != PrefixDoc {
+		return prefix
+	}
+	id := strings.TrimPrefix(string(k), PrefixDoc+":")
+	switch {
+	case strings.HasPrefix(id, "upload:"):
+		return "doc:upload"
+	case strings.HasPrefix(id, "web:"):
+		return "doc:web"
+	}
+	return PrefixDoc
+}
+
 // Prefix returns the namespace of a key.
 func (k Key) Prefix() string {
 	if i := strings.Index(string(k), ":"); i >= 0 {

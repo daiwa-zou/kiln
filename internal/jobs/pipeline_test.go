@@ -24,6 +24,10 @@ type scriptedRunner struct {
 	// files written per generate call, keyed by attempt number so a retry can
 	// produce different output from the first try.
 	filesByAttempt map[int]map[string]string
+	// filesBySession overrides filesByAttempt for sessions whose id contains
+	// the key, so multi-unit runs can give each unit distinct pages (the
+	// cross-unit collision check makes shared paths a failure, as it should).
+	filesBySession map[string]map[int]map[string]string
 	attempts       map[string]int
 	costPerCall    float64
 	failWith       error
@@ -59,7 +63,13 @@ func (s *scriptedRunner) Run(_ context.Context, req agent.Request) (*agent.Resul
 	if req.Step == agent.StepGenerate {
 		attempt := s.attempts[req.SessionID]
 		s.attempts[req.SessionID] = attempt + 1
-		if files, ok := s.filesByAttempt[attempt]; ok {
+		files, ok := s.filesByAttempt[attempt]
+		for needle, byAttempt := range s.filesBySession {
+			if strings.Contains(req.SessionID, needle) {
+				files, ok = byAttempt[attempt], true
+			}
+		}
+		if ok && files != nil {
 			if err := writeFiles(req.ScratchDir, files); err != nil {
 				return nil, err
 			}
@@ -419,6 +429,11 @@ func TestBuildRetriesOnValidationFailure(t *testing.T) {
 	}
 	runner.filesByAttempt[1] = map[string]string{
 		"entities/ripple.md": validPage("entity", "Ripple"),
+	}
+	// The architecture unit writes its own page from the start: shared paths
+	// across units are now a run-level violation, which is not under test here.
+	runner.filesBySession = map[string]map[int]map[string]string{
+		"arch": {0: {"synthesis/overview-notes.md": validPage("synthesis", "Overview Notes")}},
 	}
 
 	p := testPipeline(store, runner)

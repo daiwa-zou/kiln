@@ -168,7 +168,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	log := w.logger().With("run", run.ID, "workspace", run.WorkspaceSlug)
 	log.Info("claimed run", "trigger", run.Trigger)
 
-	spec, connectorID, cleanup, err := w.sourceSpec(ctx, run)
+	spec, connectors, cleanup, err := w.sourceSpec(ctx, run)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -204,7 +204,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		WorkspaceID: run.WorkspaceID,
 		Trigger:     run.Trigger,
 		Source:      spec,
-		ConnectorID: connectorID,
+		Connectors:  connectors,
 		BaseRef:     baseRef,
 	})
 
@@ -220,8 +220,11 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		w.warnNearBudget(ctx, run.WorkspaceID, log)
 		w.enqueueContinuation(ctx, run, res, log)
 	}
-	if connectorID != "" {
-		if merr := w.Store.MarkConnectorSync(ctx, connectorID, syncErr); merr != nil {
+	for _, id := range []string{connectors.Git, connectors.Upload, connectors.Web} {
+		if id == "" {
+			continue
+		}
+		if merr := w.Store.MarkConnectorSync(ctx, id, syncErr); merr != nil {
 			log.Error("mark connector sync failed", "error", merr)
 		}
 	}
@@ -230,11 +233,12 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 // sourceSpec resolves a run's connectors into build material. A run pinned to
 // a connector uses that one; otherwise every enabled connector on the
 // workspace feeds the build, merged into one map like the CLI's --docs flag.
-// The returned connector id is the git connector's, for sync bookkeeping; the
-// cleanup (possibly nil) removes any staging a remote clone materialized.
-func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.SourceSpec, string, func(), error) {
-	fail := func(err error) (jobs.SourceSpec, string, func(), error) {
-		return jobs.SourceSpec{}, "", nil, err
+// The returned SourceConnectors carries the id of every connector that fed
+// the build, for per-source attribution and sync bookkeeping; the cleanup
+// (possibly nil) removes any staging a remote clone materialized.
+func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.SourceSpec, jobs.SourceConnectors, func(), error) {
+	fail := func(err error) (jobs.SourceSpec, jobs.SourceConnectors, func(), error) {
+		return jobs.SourceSpec{}, jobs.SourceConnectors{}, nil, err
 	}
 
 	var connectors []store.ConnectorRow
@@ -257,7 +261,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 	}
 
 	spec := jobs.SourceSpec{Slug: run.WorkspaceSlug}
-	gitConnectorID := ""
+	var ids jobs.SourceConnectors
 	var cleanup func()
 	for _, c := range connectors {
 		// Web connectors carry URLs, not paths: policy is enforced by the
@@ -265,11 +269,12 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 		// so nothing needs resolving here.
 		if c.Kind == "web" {
 			if len(spec.WebURLs) > 0 {
-				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("workspace %s has multiple web connectors; only one is supported", run.WorkspaceSlug)
+				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("workspace %s has multiple web connectors; only one is supported", run.WorkspaceSlug)
 			}
 			spec.WebURLs = webconn.URLsFrom(c.Config)
+			ids.Web = c.ID
 			if len(spec.WebURLs) == 0 {
-				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s (web) has no urls configured", c.Name)
+				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s (web) has no urls configured", c.Name)
 			}
 			continue
 		}
@@ -281,48 +286,44 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 		if remoteURL, _ := c.Config["url"].(string); remoteURL != "" && c.Kind == "git" {
 			resolved, cleanup, err = w.cloneRemote(ctx, c, remoteURL)
 			if err != nil {
-				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err)
+				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err)
 			}
 		} else {
 			path, _ := c.Config["path"].(string)
 			if path == "" {
-				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s (%s) has no path configured", c.Name, c.Kind)
+				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s (%s) has no path configured", c.Name, c.Kind)
 			}
 			// SECURITY: this config arrived through the API or the database,
 			// not the operator's command line. The allowlist is what keeps it
 			// from being a read of arbitrary directories the process can see.
 			resolved, err = AllowedPath(path, w.PermittedSourceRoots)
 			if err != nil {
-				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err)
+				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err)
 			}
 		}
 
 		switch c.Kind {
 		case "git":
 			if spec.Path != "" {
-				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug)
+				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug)
 			}
 			spec.Path = resolved
-			gitConnectorID = c.ID
+			ids.Git = c.ID
 		case "upload":
 			if spec.DocsDir != "" {
-				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug)
+				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug)
 			}
 			spec.DocsDir = resolved
+			ids.Upload = c.ID
 		default:
-			return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s has unsupported kind %q", c.Name, c.Kind)
+			return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s has unsupported kind %q", c.Name, c.Kind)
 		}
 	}
 	if spec.Path == "" {
-		return jobs.SourceSpec{}, "", cleanup, fmt.Errorf(
+		return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf(
 			"workspace %s has no git connector; a build needs a repository to scan", run.WorkspaceSlug)
 	}
-	// Bookkeeping attribution: prefer the git connector; a run pinned to a
-	// web-only sync still records against its own connector.
-	if gitConnectorID == "" && run.ConnectorID != "" {
-		gitConnectorID = run.ConnectorID
-	}
-	return spec, gitConnectorID, cleanup, nil
+	return spec, ids, cleanup, nil
 }
 
 // cloneRemote materializes a shallow clone of a connector's https remote.

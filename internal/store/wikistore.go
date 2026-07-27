@@ -196,7 +196,7 @@ func (s *WikiStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 		return err
 	}
 	for _, src := range in.UpsertSources {
-		if err := upsertSource(ctx, tx, in.WorkspaceID, in.ConnectorID, src); err != nil {
+		if err := upsertSource(ctx, tx, in.WorkspaceID, src); err != nil {
 			return err
 		}
 	}
@@ -401,7 +401,7 @@ func softDeletePages(ctx context.Context, tx pgx.Tx, wikiID string, paths []stri
 	return nil
 }
 
-func upsertSource(ctx context.Context, tx pgx.Tx, workspaceID, connectorID string, src diff.SourceRecord) error {
+func upsertSource(ctx context.Context, tx pgx.Tx, workspaceID string, src diff.SourceRecord) error {
 	files, err := json.Marshal(orEmpty(src.FilesWritten))
 	if err != nil {
 		return fmt.Errorf("store: encode files_written: %w", err)
@@ -411,19 +411,20 @@ func upsertSource(ctx context.Context, tx pgx.Tx, workspaceID, connectorID strin
 		return fmt.Errorf("store: encode blob_keys: %w", err)
 	}
 
-	// connector_id is only ever set, never cleared: a CLI rebuild of a
-	// connector-fed workspace must not detach its sources from the connector.
+	// Attribution is written exactly as this run produced it — including
+	// NULL for CLI builds — so a connector swap or a hand rebuild never
+	// leaves a source pointing at a connector that did not sync it.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO sources (workspace_id, connector_id, key, kind, input_hash, files_written, blob_keys)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		ON CONFLICT (workspace_id, key) DO UPDATE SET
-			connector_id = coalesce(EXCLUDED.connector_id, sources.connector_id),
+			connector_id = EXCLUDED.connector_id,
 			input_hash = EXCLUDED.input_hash,
 			files_written = EXCLUDED.files_written,
 			blob_keys = EXCLUDED.blob_keys,
 			deleted_at = NULL,
 			updated_at = now()`,
-		workspaceID, nullable(connectorID), string(src.Key), src.Key.Prefix(),
+		workspaceID, nullable(src.ConnectorID), string(src.Key), src.Key.Prefix(),
 		src.InputHash, files, blobs,
 	); err != nil {
 		return fmt.Errorf("store: upsert source %s: %w", src.Key, err)

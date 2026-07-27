@@ -334,13 +334,14 @@ const maxCandidatePages = 10
 // contains -- each one a question for the review queue, never an automatic
 // deletion.
 //
-// A key is only flagged when the map still contains units of the same prefix.
-// Without that guard, a `kiln build` run without --docs would flag every doc
-// source as deleted merely because documents were not mapped this time. The
-// cost of the guard is that removing the *last* source of a kind raises no
-// flag until a later run maps that kind again -- acceptable for a mechanism
-// whose whole point is asking rather than acting.
-func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, approved []diff.Key) []DeletionCandidate {
+// A key is only flagged when its producing namespace was synced this run
+// (per synced, when provided): a `kiln build` run without --docs must not
+// flag every uploaded document as deleted merely because uploads were not
+// mapped this time. Explicit synced namespaces close the old blind spot
+// where removing the *last* source of a kind raised no flag -- the caller
+// knows it synced uploads and found nothing, which is exactly a deletion.
+// A nil synced falls back to inferring from surviving unit prefixes.
+func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, approved []diff.Key, synced map[string]bool) []DeletionCandidate {
 	units := unitsByKey(m)
 
 	prefixes := map[string]bool{}
@@ -360,7 +361,11 @@ func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, app
 		if _, live := units[string(s.Key)]; live {
 			continue
 		}
-		if !prefixes[s.Key.Prefix()] {
+		if synced != nil {
+			if !synced[diff.Namespace(s.Key)] {
+				continue
+			}
+		} else if !prefixes[s.Key.Prefix()] {
 			continue
 		}
 		out = append(out, DeletionCandidate{

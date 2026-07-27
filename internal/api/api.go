@@ -39,7 +39,7 @@ type Store interface {
 	Search(ctx context.Context, workspaceID, query string, limit, offset int) ([]store.SearchHit, error)
 	Gaps(ctx context.Context, workspaceID string, limit, offset int) ([]store.Gap, error)
 	LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error)
-	Graph(ctx context.Context, workspaceID string) ([]store.GraphNode, []store.GraphEdge, error)
+	Graph(ctx context.Context, workspaceID string, limit int) ([]store.GraphNode, []store.GraphEdge, int, error)
 }
 
 // WriteStore is the human-loop surface: steering, corrections, the review
@@ -119,6 +119,10 @@ const (
 	defaultGapLimit  = 200
 	defaultHitLimit  = 50
 	maxHitLimit      = 200
+	// Graph node caps: 300 nodes is where the client layout stays smooth,
+	// and hubs-first truncation keeps a capped graph informative.
+	defaultGraphNodes = 300
+	maxGraphNodes     = 600
 )
 
 // Router builds the HTTP handler.
@@ -467,7 +471,8 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	if !ok || notModified(w, r, ws) {
 		return
 	}
-	nodes, edges, err := s.Store.Graph(r.Context(), ws.ID)
+	limit, _ := pagination(r, defaultGraphNodes, maxGraphNodes)
+	nodes, edges, total, err := s.Store.Graph(r.Context(), ws.ID, limit)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -482,7 +487,9 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	for _, e := range edges {
 		outEdges = append(outEdges, map[string]string{"from": e.From, "to": e.To})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": outNodes, "edges": outEdges})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes": outNodes, "edges": outEdges, "totalPages": total,
+	})
 }
 
 // handleGaps lists pages the wiki has declared it wants and does not have.

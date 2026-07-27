@@ -224,32 +224,44 @@ type GraphEdge struct {
 	To   string
 }
 
-// Graph returns the live pages and the resolved links between them. The
-// page_links table has been materialized since the first import precisely so
-// this is two indexed queries rather than a markdown re-parse.
-func (s *WikiStore) Graph(ctx context.Context, workspaceID string) ([]GraphNode, []GraphEdge, error) {
+// Graph returns up to limit live pages — the best-connected first, so a
+// truncated graph shows the wiki's hubs — and the resolved links between the
+// pages that made the cut. This was the one unpaginated read in the API; a
+// large bench must not ship its entire link table in one payload.
+func (s *WikiStore) Graph(ctx context.Context, workspaceID string, limit int) (nodes []GraphNode, edges []GraphEdge, total int, err error) {
+	if err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM pages p
+		JOIN wikis w ON w.id = p.wiki_id
+		WHERE w.workspace_id = $1 AND p.deleted_at IS NULL`,
+		workspaceID).Scan(&total); err != nil {
+		return nil, nil, 0, fmt.Errorf("store: graph total: %w", err)
+	}
+
 	rows, err := s.pool.Query(ctx, `
 		SELECT p.slug, p.title, p.type,
 		       (SELECT count(*) FROM page_links l WHERE l.to_page_id = p.id) AS inbound
 		FROM pages p
 		JOIN wikis w ON w.id = p.wiki_id
 		WHERE w.workspace_id = $1 AND p.deleted_at IS NULL
-		ORDER BY p.slug`, workspaceID)
+		ORDER BY inbound DESC, p.slug
+		LIMIT $2`, workspaceID, limit)
 	if err != nil {
-		return nil, nil, fmt.Errorf("store: graph nodes: %w", err)
+		return nil, nil, 0, fmt.Errorf("store: graph nodes: %w", err)
 	}
 	defer rows.Close()
 
-	nodes := []GraphNode{}
+	nodes = []GraphNode{}
+	included := map[string]bool{}
 	for rows.Next() {
 		var n GraphNode
 		if err := rows.Scan(&n.Slug, &n.Title, &n.Type, &n.Links); err != nil {
-			return nil, nil, fmt.Errorf("store: scan graph node: %w", err)
+			return nil, nil, 0, fmt.Errorf("store: scan graph node: %w", err)
 		}
 		nodes = append(nodes, n)
+		included[n.Slug] = true
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	links, err := s.pool.Query(ctx, `
@@ -260,19 +272,23 @@ func (s *WikiStore) Graph(ctx context.Context, workspaceID string) ([]GraphNode,
 		JOIN wikis w ON w.id = f.wiki_id
 		WHERE w.workspace_id = $1 AND l.resolved`, workspaceID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("store: graph edges: %w", err)
+		return nil, nil, 0, fmt.Errorf("store: graph edges: %w", err)
 	}
 	defer links.Close()
 
-	edges := []GraphEdge{}
+	edges = []GraphEdge{}
 	for links.Next() {
 		var e GraphEdge
 		if err := links.Scan(&e.From, &e.To); err != nil {
-			return nil, nil, fmt.Errorf("store: scan graph edge: %w", err)
+			return nil, nil, 0, fmt.Errorf("store: scan graph edge: %w", err)
 		}
-		edges = append(edges, e)
+		// An edge whose endpoint fell outside the node cap would render as a
+		// line to nowhere.
+		if included[e.From] && included[e.To] {
+			edges = append(edges, e)
+		}
 	}
-	return nodes, edges, links.Err()
+	return nodes, edges, total, links.Err()
 }
 
 // Gaps lists unresolved wikilink targets: pages the wiki has declared it wants
