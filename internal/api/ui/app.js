@@ -1051,8 +1051,9 @@ async function showGraph() {
 
     const typeCounts = {};
     for (const n of nodes) typeCounts[n.type] = (typeCounts[n.type] || 0) + 1;
+    const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
     const truncated = totalPages > nodes.length
-      ? ` Showing the ${nodes.length} best-connected of ${totalPages} pages.` : "";
+      ? ` · showing the ${nodes.length} most linked of ${totalPages}` : "";
 
     const icon = (d) => `<svg width="13" height="13" viewBox="0 0 24 24" fill="none"
       stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -1065,8 +1066,7 @@ async function showGraph() {
       <path d="M16 21v-3a2 2 0 0 1 2-2h3"/><path d="M8 21v-3a2 2 0 0 0-2-2H3"/>`);
 
     if (!view.done(`<h1>Graph</h1>
-      <p class="hint">${nodes.length} pages, ${links.length} links. Drag nodes,
-      scroll to zoom, drag the background to pan; click opens the page.${esc(truncated)}</p>
+      <p class="hint">${plural(nodes.length, "page")} · ${plural(links.length, "link")}${esc(truncated)}</p>
       <div id="graph-wrap">
       <div class="graph-toolbar">
         <div class="graph-legend" role="group" aria-label="Filter by page type">
