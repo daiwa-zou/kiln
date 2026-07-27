@@ -1055,12 +1055,17 @@ async function showGraph() {
     if (!view.done(`<h1>Graph</h1>
       <p class="hint">${nodes.length} pages, ${links.length} links. Drag nodes,
       scroll to zoom, drag the background to pan; click opens the page.${esc(truncated)}</p>
-      <div class="graph-legend" role="group" aria-label="Filter by page type">
+      <div id="graph-wrap">
+      <div class="graph-legend" role="group" aria-label="Graph controls">
         ${Object.entries(typeCounts).map(([t, c]) =>
           `<button class="chip" data-type="${esc(t)}" aria-pressed="true">${esc(t)} ${c}</button>`).join("")}
+        <button class="chip quiet graph-zoom" id="graph-zoom-out" aria-label="Zoom out">&minus;</button>
+        <button class="chip quiet graph-zoom" id="graph-zoom-in" aria-label="Zoom in">+</button>
         <button class="chip quiet" id="graph-reset">reset view</button>
+        <button class="chip quiet" id="graph-full">full screen</button>
       </div>
-      <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>`)) return;
+      <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>
+      </div>`)) return;
 
     const svg = $("graph-svg");
     {
@@ -1182,7 +1187,9 @@ async function showGraph() {
       const grow = s > 1.02 ? s : 1;
       const cx = (m.x0 + m.x1) / 2, cy = (m.y0 + m.y1) / 2;
       for (const p of pts) {
-        p.x = W / 2 + (p.x - cx) * grow;
+        // Center the content box, not the node box: labels hang 150px off
+        // the right, so the node cloud sits 65px left of center.
+        p.x = W / 2 - 65 + (p.x - cx) * grow;
         p.y = H / 2 + (p.y - cy) * grow;
       }
       if (grow > 1) {
@@ -1212,18 +1219,79 @@ async function showGraph() {
         y: vb.y + ((e.clientY - rect.top) / rect.height) * vb.h,
       };
     };
-    svg.addEventListener("wheel", (e) => {
-      e.preventDefault();
-      const scale = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+    // zoomBy scales the viewBox about an anchor point: the cursor for wheel
+    // zoom, the canvas center for the toolbar buttons.
+    const zoomBy = (scale, ax, ay) => {
       const next = Math.min(W * 3, Math.max(W / 8, vb.w * scale));
       const f = next / vb.w;
-      const p = toSVG(e);
-      vb.x = p.x - (p.x - vb.x) * f;
-      vb.y = p.y - (p.y - vb.y) * f;
+      vb.x = ax - (ax - vb.x) * f;
+      vb.y = ay - (ay - vb.y) * f;
       vb.w *= f; vb.h *= f;
       applyVB();
+    };
+    svg.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const p = toSVG(e);
+      zoomBy(e.deltaY > 0 ? 1.12 : 1 / 1.12, p.x, p.y);
     }, { passive: false });
+    $("graph-zoom-in").addEventListener("click", () =>
+      zoomBy(1 / 1.35, vb.x + vb.w / 2, vb.y + vb.h / 2));
+    $("graph-zoom-out").addEventListener("click", () =>
+      zoomBy(1.35, vb.x + vb.w / 2, vb.y + vb.h / 2));
     $("graph-reset").addEventListener("click", fitView);
+
+    // Full screen wraps the toolbar too, so filtering and zooming keep
+    // working inside it. Native fullscreen when the environment allows it;
+    // a fixed overlay covering the window when it doesn't (embedded panes
+    // deny the Fullscreen API). Either way the canvas is re-measured and
+    // the layout re-fitted to the new geometry.
+    const wrap = $("graph-wrap");
+    const isFull = () => !!document.fullscreenElement || wrap.classList.contains("graph-fs");
+    const resync = () => {
+      $("graph-full").textContent = isFull() ? "exit full screen" : "full screen";
+      const rect = svg.getBoundingClientRect();
+      W = Math.max(320, Math.round(rect.width));
+      H = Math.max(320, Math.min(Math.round(window.innerHeight - rect.top - 28),
+                                 Math.round(W * 1.2)));
+      svg.style.height = H + "px";
+      fitView();
+    };
+    const enterOverlay = () => {
+      if (isFull()) return;
+      wrap.classList.add("graph-fs");
+      resync();
+    };
+    $("graph-full").addEventListener("click", () => {
+      if (document.fullscreenElement) { document.exitFullscreen(); return; }
+      if (wrap.classList.contains("graph-fs")) {
+        wrap.classList.remove("graph-fs");
+        resync();
+        return;
+      }
+      wrap.requestFullscreen().catch(enterOverlay);
+      // Some embedded panes leave the fullscreen promise forever pending
+      // instead of rejecting; fall back if nothing materializes.
+      setTimeout(enterOverlay, 400);
+    });
+    const onFullscreen = () => {
+      if (!view.current()) {
+        document.removeEventListener("fullscreenchange", onFullscreen);
+        return;
+      }
+      resync();
+    };
+    document.addEventListener("fullscreenchange", onFullscreen);
+    const onEsc = (e) => {
+      if (!view.current()) {
+        document.removeEventListener("keydown", onEsc);
+        return;
+      }
+      if (e.key === "Escape" && wrap.classList.contains("graph-fs")) {
+        wrap.classList.remove("graph-fs");
+        resync();
+      }
+    };
+    document.addEventListener("keydown", onEsc);
 
     // --- drag (nodes) and pan (background) --------------------------------
     // One pointer state machine; a press that never travels is a click and

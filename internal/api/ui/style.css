@@ -437,3 +437,9 @@
      be styled here, not via a style attribute — the CSP refuses those. */
   main[data-view="graph"] { max-width: none; }
   #graph-svg { width: 100%; display: block; touch-action: none; }
+  #graph-wrap:fullscreen, #graph-wrap.graph-fs {
+    background: var(--bg); padding: 16px 20px; overflow: hidden;
+  }
+  /* Overlay fallback for environments that deny the Fullscreen API. */
+  #graph-wrap.graph-fs { position: fixed; inset: 0; z-index: 50; }
+  .graph-zoom { min-width: 30px; text-align: center; font-size: 14px; line-height: 1; }
