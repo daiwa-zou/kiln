@@ -16,6 +16,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/config"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
+	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/jobs"
@@ -232,6 +233,20 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 	gitConnectorID := ""
 	var cleanup func()
 	for _, c := range connectors {
+		// Web connectors carry URLs, not paths: policy is enforced by the
+		// connector's pinned dialer at fetch time (and at config write time),
+		// so nothing needs resolving here.
+		if c.Kind == "web" {
+			if len(spec.WebURLs) > 0 {
+				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("workspace %s has multiple web connectors; only one is supported", run.WorkspaceSlug)
+			}
+			spec.WebURLs = webconn.URLsFrom(c.Config)
+			if len(spec.WebURLs) == 0 {
+				return jobs.SourceSpec{}, "", cleanup, fmt.Errorf("connector %s (web) has no urls configured", c.Name)
+			}
+			continue
+		}
+
 		var (
 			resolved string
 			err      error
@@ -274,6 +289,11 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 	if spec.Path == "" {
 		return jobs.SourceSpec{}, "", cleanup, fmt.Errorf(
 			"workspace %s has no git connector; a build needs a repository to scan", run.WorkspaceSlug)
+	}
+	// Bookkeeping attribution: prefer the git connector; a run pinned to a
+	// web-only sync still records against its own connector.
+	if gitConnectorID == "" && run.ConnectorID != "" {
+		gitConnectorID = run.ConnectorID
 	}
 	return spec, gitConnectorID, cleanup, nil
 }

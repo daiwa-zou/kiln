@@ -12,6 +12,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/auth"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
+	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -37,7 +38,7 @@ type AdminStore interface {
 const maxAdminBodyBytes = 16 << 10
 
 var (
-	connectorKinds    = []string{"git", "upload"}
+	connectorKinds    = []string{"git", "upload", "web"}
 	credentialKinds   = []string{"git_pat"}
 	triggerModes      = []string{"manual", "webhook", "poll"}
 	errNotAdmin       = "requires an instance admin or an owner of this bench's org"
@@ -136,6 +137,18 @@ func validateConnectorConfig(kind string, cfg map[string]any) string {
 	case "upload":
 		if path == "" {
 			return "upload connector config needs path"
+		}
+	case "web":
+		urls := webconn.URLsFrom(cfg)
+		if len(urls) == 0 {
+			return "web connector config needs urls (an array of https addresses)"
+		}
+		// Reject bad URLs at write time exactly as the fetch would at sync
+		// time; the private-address check happens at connect (pinned dial).
+		for _, u := range urls {
+			if _, err := webconn.ValidateURL(u); err != nil {
+				return err.Error()
+			}
 		}
 	}
 	return ""
