@@ -998,6 +998,9 @@ async function showGraph() {
     let W = 900, H = 640;
     const bySlug = new Map(nodes.map((n, i) => [n.slug, i]));
     const pts = nodes.map(() => ({ x: 0, y: 0, vx: 0, vy: 0, pinned: false }));
+    // Physics scale with the canvas: the same 19 nodes should spread over a
+    // 2000px canvas the way they spread over a 900px one.
+    let repulse = 2600, springLen = 90;
     const seed = () => pts.forEach((p, i) => {
       // Deterministic golden-angle disc seeding: same graph, same picture.
       p.x = W / 2 + Math.sqrt(i + 1) * (Math.min(W, H) / 26) * Math.cos(i * 2.39996);
@@ -1014,7 +1017,7 @@ async function showGraph() {
         for (let j = i + 1; j < pts.length; j++) {
           let dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
           const d2 = Math.max(64, dx * dx + dy * dy);
-          const f = (2600 / d2) * k;
+          const f = (repulse / d2) * k;
           const d = Math.sqrt(d2);
           dx /= d; dy /= d;
           pts[i].vx += dx * f; pts[i].vy += dy * f;
@@ -1024,7 +1027,7 @@ async function showGraph() {
       for (const [a, b] of links) {
         const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
         const d = Math.max(1, Math.hypot(dx, dy));
-        const f = (d - 90) * 0.015 * k;
+        const f = (d - springLen) * 0.015 * k;
         pts[a].vx += (dx / d) * f; pts[a].vy += (dy / d) * f;
         pts[b].vx -= (dx / d) * f; pts[b].vy -= (dy / d) * f;
       }
@@ -1067,6 +1070,9 @@ async function showGraph() {
       W = Math.max(700, Math.round(rect.width));
       H = Math.max(520, Math.round(window.innerHeight - rect.top - 28));
       svg.style.height = H + "px";
+      const scale = Math.min(W, H) / 640;
+      repulse = 2600 * scale * scale;
+      springLen = 90 * scale;
     }
     seed();
 
@@ -1159,9 +1165,17 @@ async function showGraph() {
         minY = Math.min(minY, p.y - 20); maxY = Math.max(maxY, p.y + 20);
       });
       if (minX === Infinity) return;
-      vb.x = minX; vb.y = minY;
-      vb.w = Math.max(320, maxX - minX);
-      vb.h = Math.max(240, maxY - minY);
+      const bw = maxX - minX, bh = maxY - minY;
+      if (bw <= W && bh <= H) {
+        // Content fits at natural scale: center it, never magnify it.
+        vb.x = minX + bw / 2 - W / 2;
+        vb.y = minY + bh / 2 - H / 2;
+        vb.w = W; vb.h = H;
+      } else {
+        vb.x = minX; vb.y = minY;
+        vb.w = Math.max(320, bw);
+        vb.h = Math.max(240, bh);
+      }
       applyVB();
     };
     const toSVG = (e) => {
