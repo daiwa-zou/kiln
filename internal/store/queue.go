@@ -174,6 +174,72 @@ func (s *WikiStore) FailRun(ctx context.Context, runID, message string) error {
 	return nil
 }
 
+// RequeueRun returns one claimed run to the queue, for a worker draining at
+// shutdown: interrupted is not failed, and the pipeline is idempotent from
+// the start.
+func (s *WikiStore) RequeueRun(ctx context.Context, runID string) error {
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE runs
+		SET status = 'queued', claimed_by = NULL, claimed_at = NULL, started_at = NULL, error = NULL
+		WHERE id = $1 AND status = 'running'`, runID); err != nil {
+		return fmt.Errorf("store: requeue run: %w", err)
+	}
+	return nil
+}
+
+// Sweep enforces retention: soft-deleted pages past their window, expired
+// sessions, dead tokens, and finished runs past theirs. The spend ledger is
+// deliberately untouched — budget windows read it — and run deletion nulls
+// its run_id references rather than cascading into it. Zero durations
+// disable the corresponding part.
+func (s *WikiStore) Sweep(ctx context.Context, softDeleteRetention, runRetention time.Duration) (int64, error) {
+	var total int64
+
+	if softDeleteRetention > 0 {
+		tag, err := s.pool.Exec(ctx, `
+			DELETE FROM pages
+			WHERE deleted_at IS NOT NULL
+			  AND deleted_at < now() - make_interval(secs => $1)`,
+			softDeleteRetention.Seconds())
+		if err != nil {
+			return total, fmt.Errorf("store: sweep pages: %w", err)
+		}
+		total += tag.RowsAffected()
+	}
+
+	if runRetention > 0 {
+		tag, err := s.pool.Exec(ctx, `
+			DELETE FROM runs
+			WHERE finished_at IS NOT NULL
+			  AND finished_at < now() - make_interval(secs => $1)
+			  AND status NOT IN ('queued', 'running')`,
+			runRetention.Seconds())
+		if err != nil {
+			return total, fmt.Errorf("store: sweep runs: %w", err)
+		}
+		total += tag.RowsAffected()
+	}
+
+	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE expires_at < now()`)
+	if err != nil {
+		return total, fmt.Errorf("store: sweep sessions: %w", err)
+	}
+	total += tag.RowsAffected()
+
+	// Tokens linger a week past death so an operator can still see what a
+	// failing client was presenting.
+	tag, err = s.pool.Exec(ctx, `
+		DELETE FROM tokens
+		WHERE (revoked_at IS NOT NULL AND revoked_at < now() - interval '7 days')
+		   OR (expires_at IS NOT NULL AND expires_at < now() - interval '7 days')`)
+	if err != nil {
+		return total, fmt.Errorf("store: sweep tokens: %w", err)
+	}
+	total += tag.RowsAffected()
+
+	return total, nil
+}
+
 // RequeueStaleRuns returns runs claimed longer ago than the deadline to the
 // queue. A worker that died mid-build leaves a 'running' row that would
 // otherwise block its workspace forever via the active-run index; the pipeline

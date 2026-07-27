@@ -132,17 +132,30 @@ processes separately so builds scale independently of the API.`,
 
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "kiln %s listening on %s\n", observability.Version, cfg.HTTPAddr)
+			var workerDone chan struct{}
 			if withWorker {
 				w, err := newWorker(cfg, db, log)
 				if err != nil {
 					return err
 				}
 				fmt.Fprintln(out, "  build worker running in-process (--with-worker)")
-				go func() { _ = w.Run(ctx) }()
+				workerDone = make(chan struct{})
+				go func() {
+					defer close(workerDone)
+					_ = w.Run(ctx)
+				}()
 			}
 			fmt.Fprintln(out, "  press ctrl-c to stop")
 
-			return srv.Serve(ctx, cfg.HTTPAddr)
+			err = srv.Serve(ctx, cfg.HTTPAddr)
+			if workerDone != nil {
+				// The worker drains: it stops claiming immediately but may
+				// hold an in-flight build for its grace window, and exiting
+				// before it finishes would race the requeue write.
+				fmt.Fprintln(out, "  waiting for the worker to drain…")
+				<-workerDone
+			}
+			return err
 		},
 	}
 

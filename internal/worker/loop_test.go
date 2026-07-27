@@ -35,6 +35,9 @@ type loopStore struct {
 	budget  *float64
 	spent   float64
 	reviews []string
+	// requeued and sweeps record drain and GC activity.
+	requeued []string
+	sweeps   int
 
 	claimErr   error
 	requeueErr error
@@ -124,6 +127,20 @@ func (l *loopStore) EnqueueRun(_ context.Context, workspaceID, trigger, connecto
 }
 
 func (l *loopStore) LastSuccessfulRef(context.Context, string) (string, error) { return "", nil }
+
+func (l *loopStore) RequeueRun(_ context.Context, runID string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.requeued = append(l.requeued, runID)
+	return nil
+}
+
+func (l *loopStore) Sweep(context.Context, time.Duration, time.Duration) (int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sweeps++
+	return 1, nil
+}
 
 func (l *loopStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) {
 	l.mu.Lock()
@@ -416,5 +433,74 @@ func TestSourceSpecRejectsForbiddenRemoteURL(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "public address") {
 		t.Errorf("loopback remote accepted: spec=%+v err=%v", spec, err)
+	}
+}
+
+func TestInterruptedRunIsRequeuedNotFailed(t *testing.T) {
+	st := newLoopStore()
+	// A pinned connector that does not exist makes process error out; with
+	// the run context already canceled, that reads as a drain interruption
+	// and the run must go back to the queue, not into 'failed'.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := &Worker{Store: st}
+	w.process(ctx, &store.QueuedRun{ID: "r1", WorkspaceID: "ws",
+		WorkspaceSlug: "b", Trigger: "webhook", ConnectorID: "missing"})
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.requeued) != 1 || st.requeued[0] != "r1" {
+		t.Errorf("requeued = %v, want [r1]", st.requeued)
+	}
+	if len(st.failed) != 0 {
+		t.Errorf("interrupted run marked failed: %v", st.failed)
+	}
+}
+
+func TestSweepRunsHourlyFromTheLoop(t *testing.T) {
+	st := newLoopStore()
+	w := &Worker{Store: st, Poll: time.Millisecond,
+		SoftDeleteRetention: time.Hour, RunRetention: time.Hour}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_ = w.Run(ctx)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.sweeps != 1 {
+		t.Errorf("sweeps = %d, want exactly 1 (hourly throttle)", st.sweeps)
+	}
+}
+
+func TestDrainGraceDefaultsAboveAgentTimeout(t *testing.T) {
+	if got := (&Worker{}).drainGrace(); got != 15*time.Minute {
+		t.Errorf("default drain grace = %v", got)
+	}
+	if got := (&Worker{DrainGrace: time.Minute}).drainGrace(); got != time.Minute {
+		t.Errorf("configured drain grace = %v", got)
+	}
+}
+
+func TestRunDrainsInFlightRunOnShutdown(t *testing.T) {
+	// One queued run whose processing fails resolution (no connectors), a
+	// context canceled almost immediately: the loop must still process the
+	// claimed run to completion before returning.
+	st := newLoopStore(&store.QueuedRun{ID: "r1", WorkspaceID: "ws",
+		WorkspaceSlug: "b", Trigger: "manual"})
+	w := &Worker{Store: st, Poll: time.Millisecond, DrainGrace: time.Second}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	_ = w.Run(ctx)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.claimed) != 1 {
+		t.Fatalf("claimed = %v", st.claimed)
+	}
+	// The run finished (failed on no-connectors) rather than being abandoned
+	// mid-flight: drain means completion or requeue, never limbo.
+	if len(st.failed) != 1 && len(st.requeued) != 1 {
+		t.Errorf("run left in limbo: failed=%v requeued=%v", st.failed, st.requeued)
 	}
 }

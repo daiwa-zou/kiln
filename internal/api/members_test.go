@@ -20,7 +20,7 @@ func TestMembershipIsOwnerGated(t *testing.T) {
 	}
 
 	// An owner manages membership without any instance-admin bit.
-	src.id = auth.Identity{UserID: owner, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: owner, Scopes: []string{"read", "write", "admin"}}
 	var members []map[string]any
 	if code := send(t, srv, http.MethodGet, "/api/v1/workspaces/demo/members", "kiln_valid", nil, &members); code != http.StatusOK {
 		t.Fatalf("owner lists members = %d", code)
@@ -63,7 +63,7 @@ func TestOwnersReachAdminSurfaces(t *testing.T) {
 		"config": map[string]any{"path": "/srv/repos/demo"},
 	}
 	// The M3 tenancy line: owners shape their own org's connectors...
-	src.id = auth.Identity{UserID: owner, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: owner, Scopes: []string{"read", "write", "admin"}}
 	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/connectors", "kiln_valid", body, nil); code != http.StatusCreated {
 		t.Errorf("owner connector create = %d, want 201", code)
 	}
@@ -77,7 +77,7 @@ func TestOwnersReachAdminSurfaces(t *testing.T) {
 func TestLastOwnerCannotLockOut(t *testing.T) {
 	srv, pool, wsID, src := authedServer(t)
 	owner := addMember(t, pool, wsID, "olive", "owner")
-	src.id = auth.Identity{UserID: owner, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: owner, Scopes: []string{"read", "write", "admin"}}
 
 	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/members/"+owner, "kiln_valid",
 		map[string]string{"role": "member"}, nil); code != http.StatusConflict {
@@ -88,7 +88,7 @@ func TestLastOwnerCannotLockOut(t *testing.T) {
 	}
 
 	// An instance admin may break the glass.
-	src.id = auth.Identity{UserID: owner, Admin: true, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: owner, Admin: true, Scopes: []string{"read", "write", "admin"}}
 	if code := send(t, srv, http.MethodDelete, "/api/v1/workspaces/demo/members/"+owner, "kiln_valid", nil, nil); code != http.StatusOK {
 		t.Errorf("admin removes last owner = %d, want 200", code)
 	}

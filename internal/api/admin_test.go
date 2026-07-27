@@ -29,7 +29,7 @@ func TestConnectorCRUDIsAdminOnly(t *testing.T) {
 	}
 
 	// Admin: full CRUD round trip.
-	src.id = auth.Identity{UserID: member, Admin: true, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: member, Admin: true, Scopes: []string{"read", "write", "admin"}}
 	var created struct {
 		ID string `json:"id"`
 	}
@@ -60,7 +60,7 @@ func TestConnectorCRUDIsAdminOnly(t *testing.T) {
 func TestConnectorConfigPolicyAtWriteTime(t *testing.T) {
 	srv, pool, wsID, src := authedServer(t)
 	admin := addMember(t, pool, wsID, "ada", "member")
-	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write", "admin"}}
 
 	cases := map[string]map[string]any{
 		"http url": {"kind": "git", "name": "c", "config": map[string]any{"url": "http://example.com/x.git"}},
@@ -82,7 +82,7 @@ func TestConnectorConfigPolicyAtWriteTime(t *testing.T) {
 func TestConnectorPatchValidation(t *testing.T) {
 	srv, pool, wsID, src := authedServer(t)
 	admin := addMember(t, pool, wsID, "ada", "member")
-	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write", "admin"}}
 
 	var created struct {
 		ID string `json:"id"`
@@ -126,7 +126,7 @@ func TestConnectorPatchValidation(t *testing.T) {
 func TestConnectorRejectsForeignCredential(t *testing.T) {
 	srv, pool, wsID, src := authedServer(t)
 	admin := addMember(t, pool, wsID, "ada", "member")
-	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write", "admin"}}
 
 	// A credential in a different org: referencing it from this workspace's
 	// connectors must read as absent, never attach.
@@ -180,7 +180,7 @@ func TestConnectorRejectsForeignCredential(t *testing.T) {
 func TestCredentialCreateValidation(t *testing.T) {
 	srv, pool, wsID, src := authedServer(t)
 	admin := addMember(t, pool, wsID, "ada", "member")
-	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write", "admin"}}
 
 	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/credentials", "kiln_valid",
 		map[string]string{"kind": "git_pat", "secret": "   "}, nil); code != http.StatusBadRequest {
@@ -195,7 +195,7 @@ func TestCredentialCreateValidation(t *testing.T) {
 func TestCredentialsAreWriteOnly(t *testing.T) {
 	srv, pool, wsID, src := authedServer(t)
 	admin := addMember(t, pool, wsID, "ada", "member")
-	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write"}}
+	src.id = auth.Identity{UserID: admin, Admin: true, Scopes: []string{"read", "write", "admin"}}
 
 	secret := "ghp_super_secret_token_value"
 	var created struct {

@@ -73,6 +73,8 @@ func applyDefaults(v setter, role Role) {
 	// Poll-triggered sources refresh every 10 minutes; the hash gate makes an
 	// unchanged sweep free, so the cost of polling is one sync, not one build.
 	v.SetDefault("worker.source_poll_interval", 10*time.Minute)
+	// Above agent.timeout so a drain lets the current agent call finish.
+	v.SetDefault("worker.drain_grace", 15*time.Minute)
 	// Comfortably above agent.timeout, so only a genuinely dead worker's run is
 	// requeued, never one still inside a slow model call.
 	v.SetDefault("worker.stale_after", 45*time.Minute)

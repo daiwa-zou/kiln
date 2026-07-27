@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -18,8 +19,72 @@ func newAdminCmd(g *globalFlags) *cobra.Command {
 		Use:   "admin",
 		Short: "Operational commands: migrations, diagnostics, tokens",
 	}
-	cmd.AddCommand(newMigrateCmd(g), newDoctorCmd(g), newTokenCmd(g))
+	cmd.AddCommand(newMigrateCmd(g), newDoctorCmd(g), newTokenCmd(g), newRotateKeyCmd(g))
 	return cmd
+}
+
+func newRotateKeyCmd(g *globalFlags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "rotate-key",
+		Short: "Re-seal every credential under a new master key",
+		Long: `Reads the current master key from KILN_MASTER_KEY and the replacement from
+KILN_NEW_MASTER_KEY, then rewrites every credential in one transaction:
+either all of them move to the new key or none do. Afterwards, restart every
+kiln process with the new key as KILN_MASTER_KEY.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+
+			cfg, err := config.Load(config.Options{File: g.configFile})
+			if err != nil {
+				return err
+			}
+			oldKeyring, err := crypto.NewKeyring(cfg.Secrets.MasterKey)
+			if err != nil {
+				return fmt.Errorf("current master key: %w", err)
+			}
+			newKey, err := readNewMasterKey()
+			if err != nil {
+				return err
+			}
+			newKeyring, err := crypto.NewKeyring(newKey)
+			if err != nil {
+				return fmt.Errorf("new master key: %w", err)
+			}
+
+			db, err := store.Open(ctx, cfg)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			n, err := store.NewWikiStore(db.Pool).ResealCredentials(ctx, oldKeyring.Open, newKeyring.Seal)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "re-sealed %d credential(s) under the new key\n", n)
+			fmt.Fprintln(out, "now restart every kiln process with KILN_MASTER_KEY set to the new key")
+			return nil
+		},
+	}
+}
+
+// readNewMasterKey resolves KILN_NEW_MASTER_KEY with the same _FILE
+// indirection every other secret supports.
+func readNewMasterKey() (string, error) {
+	if path := strings.TrimSpace(os.Getenv("KILN_NEW_MASTER_KEY_FILE")); path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read KILN_NEW_MASTER_KEY_FILE: %w", err)
+		}
+		return strings.TrimRight(string(b), "\r\n"), nil
+	}
+	key := os.Getenv("KILN_NEW_MASTER_KEY")
+	if key == "" {
+		return "", fmt.Errorf("set KILN_NEW_MASTER_KEY (or _FILE) to the replacement key")
+	}
+	return key, nil
 }
 
 func newTokenCmd(g *globalFlags) *cobra.Command {

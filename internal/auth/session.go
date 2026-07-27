@@ -55,7 +55,10 @@ func (s *PGSource) IdentityForSession(ctx context.Context, sessionHash string) (
 	if err != nil {
 		return Identity{}, "", fmt.Errorf("auth: look up session: %w", err)
 	}
-	id.Scopes = []string{"read", "write"}
+	// A browser session acts with the user's full authority, including the
+	// admin surfaces their role permits: scopes narrow automation tokens,
+	// and a human in a browser is not one.
+	id.Scopes = []string{"read", "write", "admin"}
 	return id, csrf, nil
 }
 

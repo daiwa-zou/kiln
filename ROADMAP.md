@@ -40,7 +40,7 @@ completion follows once the content engine deserves the audience.
   posture (resolve-then-connect pinning), graph view, budget warnings at
   80%, per-unit cost attribution.
 
-## M5 — Make Incremental Real (next)
+## M5 — Make Incremental Real ✅ shipped (2026-07-27, PR #12)
 
 *The `internal/diff` router is complete, tested, and never constructed with
 anything but `FullRebuild: true`. A one-file push still maps and hashes every
@@ -74,7 +74,7 @@ cooldown yields one queued run whose `ref_to` is the newest head; force-push
 falls back to FullRebuild cleanly; upload/web document keys are untouched by
 git ranges (the `UploadOrigin`/`WebOrigin` namespace invariant holds).
 
-## M6 — Content Quality & Correctness
+## M6 — Content Quality & Correctness ✅ shipped (2026-07-27, PR #13)
 
 1. **Deletion blind spot** — a disappeared source raises its review even when
    no same-prefix units survive (today the last doc of a kind vanishes
@@ -92,7 +92,12 @@ git ranges (the `UploadOrigin`/`WebOrigin` namespace invariant holds).
    `embed.FS` with the same CSP hashing; a framework frontend stays deferred
    until SaaS onboarding demands it.
 
-## M7 — Lifecycle Hygiene
+## M7 — Lifecycle Hygiene ✅ shipped
+
+*Shipped 2026-07-27. Drain-with-grace requeues interrupted builds, the GC
+sweeper enforces the retention knobs that waited since M0, admin surfaces
+require the new admin scope, and `kiln admin rotate-key` re-seals
+credentials atomically.*
 
 1. **Worker drain** — SIGTERM mid-build requeues the in-flight run after a
    grace window instead of failing it (today: wasted spend, stale bench);

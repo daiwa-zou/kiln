@@ -68,6 +68,9 @@ type Worker struct {
 	// SourcePollInterval is how often trigger_mode='poll' connectors are due
 	// for a refresh. Zero disables the poll scheduler.
 	SourcePollInterval time.Duration `mapstructure:"source_poll_interval"`
+	// DrainGrace is how long an in-flight build may continue after shutdown
+	// is requested before it is interrupted and requeued.
+	DrainGrace time.Duration `mapstructure:"drain_grace"`
 	// PermittedSourceRoots are the only directories a database-configured
 	// connector may read from. Empty means every local path is denied: a
 	// connector config is API-writable data, and an unchecked path would be a

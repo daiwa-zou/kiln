@@ -111,6 +111,65 @@ func (s *WikiStore) CredentialInOrg(ctx context.Context, orgID, id string) (bool
 	return ok, nil
 }
 
+// ResealCredentials rewrites every credential through the supplied functions
+// — open under the old master key, seal under the new — in one transaction,
+// so rotation is atomic: either every credential moves to the new key or
+// none does. This is the only sanctioned path to key rotation; there is
+// deliberately no plaintext export.
+func (s *WikiStore) ResealCredentials(ctx context.Context,
+	open func(ciphertext, nonce []byte) ([]byte, error),
+	seal func(plaintext []byte) (ciphertext, nonce []byte, err error),
+) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin reseal: %w", err)
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	rows, err := tx.Query(ctx, `SELECT id, ciphertext, nonce FROM credentials FOR UPDATE`)
+	if err != nil {
+		return 0, fmt.Errorf("store: list credentials for reseal: %w", err)
+	}
+	type sealed struct {
+		id        string
+		ct, nonce []byte
+	}
+	var all []sealed
+	for rows.Next() {
+		var c sealed
+		if err := rows.Scan(&c.id, &c.ct, &c.nonce); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("store: scan credential: %w", err)
+		}
+		all = append(all, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	for _, c := range all {
+		plaintext, err := open(c.ct, c.nonce)
+		if err != nil {
+			return 0, fmt.Errorf("store: credential %s does not open under the old key: %w", c.id, err)
+		}
+		ct, nonce, err := seal(plaintext)
+		if err != nil {
+			return 0, fmt.Errorf("store: reseal credential %s: %w", c.id, err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE credentials SET ciphertext = $2, nonce = $3, updated_at = now()
+			WHERE id = $1`, c.id, ct, nonce); err != nil {
+			return 0, fmt.Errorf("store: update credential %s: %w", c.id, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(all), nil
+}
+
 // OrgOfWorkspace maps a workspace to its org, which is where credentials live.
 func (s *WikiStore) OrgOfWorkspace(ctx context.Context, workspaceID string) (string, error) {
 	var orgID string
