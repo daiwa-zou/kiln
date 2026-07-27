@@ -240,9 +240,9 @@ function showTokenForm(hadToken) {
       <p class="hint">Sign in with your GitHub account:</p>
       <a class="btn" href="/auth/github/login">Sign in with GitHub</a>
       <p class="hint login-alt">Or use an access token.</p>` : `
-      <p class="hint">This kiln requires an access token. Mint one with
-        <code>kiln admin token create --login you</code> and paste it here.
-        It is stored only in this browser.</p>`}
+      <p class="hint">Sign-in requires an access token. Create one with
+        <code>kiln admin token create --login you</code>.
+        The token is stored only in this browser.</p>`}
     <input id="token-input" type="password" placeholder="kiln_…" aria-label="Access token"
            autocomplete="off" spellcheck="false">
     <button id="token-save" class="btn">Save token</button>`;
@@ -817,9 +817,9 @@ function correctionsPanel(corrections) {
   return `
     <details class="panel" ${corrections.some((c) => c.active) ? "open" : ""}>
       <summary>Corrections (${corrections.filter((c) => c.active).length} active)</summary>
-      <p class="hint">A correction is pinned beside the page and re-injected into
-        every future rebuild. Use it when the wiki states something wrong; the
-        next regeneration will honor it.</p>
+      <p class="hint">Corrections stay attached to this page and are applied to
+        every future rebuild. Pin one when the page states something incorrect;
+        the next regeneration takes it into account.</p>
       ${items}
       <label class="hint" for="correction-body">New correction</label>
       <textarea id="correction-body" rows="3" placeholder="What should the wiki know about this page?"></textarea>
@@ -890,12 +890,12 @@ async function showGaps() {
     const gaps = await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`);
     if (!gaps.length) {
       view.done(`<h1>Gaps</h1><div class="empty">
-        Every wikilink resolves. Nothing is missing.</div>`);
+        No gaps — every link resolves to an existing page.</div>`);
       return;
     }
     view.done(`<h1>Gaps</h1>
-      <p class="hint">Pages the wiki links to but does not have — the most precise
-      signal of what is missing, since the wiki asked for these itself.</p>
+      <p class="hint">Pages that are linked from existing content but have not
+      been written yet.</p>
       ${gaps.map((g) => `<div class="row">
         <span class="mono">${esc(g.slug)}</span>
         <span class="count">wanted by ${esc(g.wantedBy)} page${g.wantedBy === 1 ? "" : "s"}</span>
@@ -919,13 +919,14 @@ async function showReviews(all) {
     if (!reviews.length) {
       view.done(`<h1>Reviews</h1>
         <p class="hint">${toggle}</p>
-        <div class="empty">No ${all ? "" : "open "}reviews. When a build is uncertain
-        about something — or a source disappears — the question lands here.</div>`);
+        <div class="empty">No ${all ? "" : "open "}reviews. Builds file a review
+        here when they need a decision, such as confirming a deletion after a
+        source disappears.</div>`);
       return;
     }
     if (!view.done(`<h1>Reviews</h1>
-      <p class="hint">Questions the wiki cannot answer alone. Resolving one records
-        your judgment; approving a deletion authorizes the next build to act on it.
+      <p class="hint">Decisions that require review. Resolving one records your
+        answer; an approved deletion is applied by the next build.
         ${toggle}</p>
       <div id="review-note" class="hint" role="status"></div>
       ${reviews.map((r) => `
@@ -1436,9 +1437,9 @@ async function showRuns() {
       return parts.join(", ");
     };
     if (!view.done(`<h1>Runs</h1>
-      <p class="hint">Each run syncs this bench's sources and regenerates only what
-      changed; an unchanged bench costs nothing. Runs are built by the worker —
-      one at a time per bench.</p>
+      <p class="hint">A run synchronizes this bench's sources and regenerates only
+      the pages whose sources changed; an unchanged bench incurs no cost. Runs
+      execute one at a time per bench.</p>
       <button class="btn" id="run-now" ${active ? "disabled" : ""}>
         ${active ? "A run is already queued or running" : "Rebuild now"}</button>
       <span class="hint" id="run-note" role="status"></span>
@@ -1521,8 +1522,8 @@ async function showMembers() {
     </select>`;
 
     if (!view.done(`<h1>Members</h1>
-      <p class="hint">Roles: viewers read, members write content, owners manage
-      connectors, credentials, and this list. The last owner cannot be removed.</p>
+      <p class="hint">Viewers can read, members can edit content, and owners manage
+      connectors, credentials, and membership. The last owner cannot be removed.</p>
       <div id="member-note" class="hint" role="status"></div>
       ${members.map((m) => `
         <div class="row">
@@ -1598,9 +1599,9 @@ async function showSteering() {
       schema: "e.g. One entity page per service. Comparisons only for alternatives we actually evaluated.",
     };
     if (!view.done(`<h1>Steering</h1>
-      <p class="hint">These documents are injected into every generation prompt.
-      Edit them to change what future builds emphasize; existing pages update as
-      their sources next change (or with a forced rebuild).</p>
+      <p class="hint">These documents guide every build. Edits apply to future
+      builds; existing pages incorporate them when their sources next change,
+      or on a forced rebuild.</p>
       ${["purpose", "schema"].map((k) => `
         <label class="group-label" for="steering-${k}">${esc(label[k])}</label>
         <textarea id="steering-${k}" rows="8" placeholder="${esc(placeholder[k])}">${esc(docs[k] || "")}</textarea>
