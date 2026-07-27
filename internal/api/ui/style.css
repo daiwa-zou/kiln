@@ -178,7 +178,14 @@
   }
   .signout:hover { color: var(--oxide); }
 
-  main { padding: 34px 40px 80px; max-width: 74ch; }
+  /* Two width tiers, both centered. Prose views keep the 74ch reading
+     measure — a line of body text should not run the width of a monitor —
+     while data views (runs, graph, members, search…) use the room their
+     tables, cards, and canvases actually need instead of squeezing into a
+     left-aligned prose column with half the screen dead. */
+  main { padding: 34px 40px 80px; max-width: 1200px; width: 100%; margin: 0 auto; }
+  main[data-view="page"], main[data-view="overview"],
+  main[data-view="index"], main[data-view="log"] { max-width: calc(74ch + 80px); }
   @media (max-width: 760px) { main { padding: 22px 18px 60px; } }
 
   .page-head { border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 22px; }
@@ -410,3 +417,18 @@
       transition-duration: 0.01ms !important;
     }
   }
+
+  /* Graph interactivity: hover lights the neighborhood, the legend toggles
+     types, dragging gets a grab cursor. Transitions keep it calm. */
+  .graph-node { cursor: pointer; outline: none; }
+  .graph-node:focus-visible circle { stroke: var(--ember); stroke-width: 2; }
+  .graph-node.graph-dim, line.graph-dim { opacity: 0.15; }
+  line.graph-hot { stroke: var(--ember); stroke-width: 1.5; }
+  .graph-node, line { transition: opacity 0.15s ease; }
+  .graph-hidden { display: none; }
+  .graph-legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+  .graph-legend .chip { cursor: pointer; }
+  .graph-legend .chip.graph-off { opacity: 0.4; text-decoration: line-through; }
+
+  /* The graph is a canvas, not a column: give it everything. */
+  main[data-view="graph"] { max-width: none; }
