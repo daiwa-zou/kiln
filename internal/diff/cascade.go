@@ -10,6 +10,10 @@ type SourceRecord struct {
 	InputHash    string
 	FilesWritten []string
 	BlobKeys     []string
+	// ConnectorID names the connector whose sync produced this source, empty
+	// for CLI builds. Written exactly as-is on import — including empty — so
+	// a connector swap or a CLI rebuild never leaves stale attribution.
+	ConnectorID string
 }
 
 // Cascade is the outcome of removing a set of sources.

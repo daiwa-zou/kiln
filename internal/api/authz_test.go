@@ -282,8 +282,8 @@ func (errStore) ListWorkspaces(context.Context, string, bool) ([]store.Workspace
 func (errStore) ResolveWorkspace(context.Context, string, string, bool) (store.WorkspaceRow, error) {
 	return store.WorkspaceRow{}, errLeaky
 }
-func (errStore) Graph(context.Context, string) ([]store.GraphNode, []store.GraphEdge, error) {
-	return nil, nil, errLeaky
+func (errStore) Graph(context.Context, string, int) ([]store.GraphNode, []store.GraphEdge, int, error) {
+	return nil, nil, 0, errLeaky
 }
 func (errStore) LoadPageSummaries(context.Context, string, int, int) ([]store.PageInfo, error) {
 	return nil, errLeaky

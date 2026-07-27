@@ -1,479 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5.5' fill='%23b4530a'/%3E%3Cpath fill='%23faf7f2' fill-rule='evenodd' d='M5,20V11.5Q5,4,12,4Q19,4,19,11.5V20ZM9,20V14.5Q9,11,12,11Q15,11,15,14.5V20Z'/%3E%3C/svg%3E">
-<title>kiln</title>
-<style>
-  /* Fired clay: warm neutrals rather than the cold slate default, because the
-     primary surface here is long-form reading. Serif for prose signals
-     reference work; sans for chrome; mono for paths and shas, which appear
-     constantly and are load-bearing rather than decorative.
-
-     Contrast: every text/background pair here clears WCAG AA 4.5:1 except the
-     dead-wikilink token, which pairs low contrast WITH a dashed underline so
-     "absent" is never conveyed by color alone. --on-ember exists because the
-     dark theme lightens --ember and #fff stops clearing AA on it. */
-  :root {
-    --bg: #faf7f2;        --surface: #f2ece2;   --border: #e0d6c7;
-    --ink: #2b2622;       --ink-dim: #6f6459;   --ink-faint: #7a6d5f;
-    --ember: #b4530a;     --ember-soft: #e8c9a8; --on-ember: #fff;
-    --ash: #5f656c;       --oxide: #a3341f;
-    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    --serif: Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    /* Motion tokens: every transition and animation in this file uses --dur,
-       and the prefers-reduced-motion block at the bottom zeroes it. */
-    --dur: 150ms;
-    --ease: cubic-bezier(0.2, 0, 0.2, 1);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #1a1715;      --surface: #241f1b;   --border: #3a322b;
-      --ink: #ece5db;     --ink-dim: #b0a294;   --ink-faint: #948779;
-      --ember: #e0872f;   --ember-soft: #4a3320; --on-ember: #1a1715;
-      --ash: #8b9198;     --oxide: #d4694f;
-    }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--ink);
-    font-family: var(--sans); font-size: 15px; line-height: 1.5;
-  }
-  a { color: var(--ember); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  code, .mono { font-family: var(--mono); font-size: 0.9em; }
-  :focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
-  main:focus { outline: none; }
-
-  .skip {
-    position: absolute; left: -9999px; z-index: 40;
-    padding: 8px 14px; background: var(--ember); color: var(--on-ember);
-    border-radius: 6px;
-  }
-  .skip:focus { left: 8px; top: 8px; }
-
-  .shell { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; min-height: 100dvh; }
-
-  aside {
-    background: var(--surface); border-right: 1px solid var(--border);
-    padding: 18px 16px; overflow-y: auto;
-    position: sticky; top: 0; height: 100vh; height: 100dvh;
-  }
-  .brand {
-    display: flex; align-items: center; gap: 7px;
-    font-weight: 600; letter-spacing: -0.01em; font-size: 17px; margin-bottom: 2px;
-  }
-  .brand small { color: var(--ink-dim); font-weight: 400; font-size: 12px; }
-  /* The mark's firing mouth is an evenodd hole, not a background-colored fill,
-     so the same symbol sits on --surface (sidebar) and --bg (sign-in) alike. */
-  .logo { width: 20px; height: 20px; fill: var(--ember); flex: none; }
-  .logo-signin { width: 48px; height: 48px; display: block; margin-bottom: 14px; }
-
-  /* Small screens get the same sidebar as a drawer rather than losing it:
-     before this, under 760px there was no way to navigate at all. */
-  .menu-btn {
-    display: none; position: fixed; top: 10px; right: 10px; z-index: 30;
-    padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px;
-    background: var(--surface); color: var(--ink); font-size: 14px; cursor: pointer;
-  }
-  @media (max-width: 760px) {
-    .shell { grid-template-columns: 1fr; }
-    aside { display: none; }
-    .menu-btn { display: block; }
-    body.nav-open { overflow: hidden; }
-    body.nav-open aside {
-      display: block; position: fixed; inset: 0 64px 0 0; z-index: 20;
-      box-shadow: 4px 0 24px rgba(0,0,0,0.25);
-    }
-    /* The strip main leaves visible acts as a backdrop: tap to dismiss. */
-    body.nav-open::before {
-      content: ""; position: fixed; inset: 0; z-index: 15;
-      background: rgba(0,0,0,0.2);
-    }
-    /* Comfortable touch targets where fingers are the pointer. */
-    .tree a { padding: 7px 8px; }
-    .nav a { padding: 6px 12px; }
-    .chip { padding: 5px 10px; }
-  }
-
-  select, input, textarea {
-    width: 100%; padding: 7px 9px; margin: 10px 0;
-    background: var(--bg); color: var(--ink);
-    border: 1px solid var(--border); border-radius: 6px;
-    font-family: var(--sans); font-size: 14px;
-  }
-  textarea { font-family: var(--mono); font-size: 13px; line-height: 1.5; resize: vertical; }
-  input:focus, select:focus, textarea:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
-
-  /* The bench picker is a details/summary accordion rather than a select:
-     a select's open popup overlays whatever sits below it (and is OS-drawn,
-     so it ignores the clay palette), while an open details participates in
-     layout and pushes the sidebar content down instead of covering it. */
-  .bench { margin: 10px 0; }
-  .bench summary {
-    display: block; list-style: none; cursor: pointer; position: relative;
-    padding: 7px 30px 7px 9px; background: var(--bg); color: var(--ink);
-    border: 1px solid var(--border); border-radius: 6px; font-size: 14px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .bench summary::-webkit-details-marker { display: none; }
-  .bench summary::after {
-    content: ""; position: absolute; right: 13px; top: 50%;
-    width: 7px; height: 7px; margin-top: -6px;
-    border-right: 1.5px solid var(--ink-dim); border-bottom: 1.5px solid var(--ink-dim);
-    transform: rotate(45deg); transition: transform var(--dur) var(--ease);
-  }
-  .bench[open] summary { border-radius: 6px 6px 0 0; }
-  .bench[open] summary::after { margin-top: -2px; transform: rotate(-135deg); }
-  .bench-list {
-    padding: 4px; background: var(--bg);
-    border: 1px solid var(--border); border-top: 0; border-radius: 0 0 6px 6px;
-  }
-  .bench-list button {
-    display: block; width: 100%; position: relative; text-align: left;
-    padding: 6px 9px 6px 26px; background: none; border: 0; border-radius: 5px;
-    color: var(--ink); font-family: var(--sans); font-size: 14px; cursor: pointer;
-  }
-  .bench-list button:hover { background: var(--ember-soft); }
-  .bench-list button[aria-current="true"]::before {
-    content: "\2713"; position: absolute; left: 9px; color: var(--ember);
-  }
-
-  .nav { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
-  .nav a {
-    display: flex; align-items: center;
-    padding: 6px 10px; border-radius: 6px;
-    color: var(--ink-dim); font-family: var(--sans); font-size: 13px;
-    transition: background-color var(--dur), color var(--dur);
-  }
-  .badge {
-    display: inline-block; min-width: 16px; padding: 0 4px; margin-left: auto;
-    border-radius: 999px; background: var(--ember); color: var(--on-ember);
-    font-size: 11px; text-align: center;
-  }
-  .nav a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
-  .nav a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
-  .nav a[aria-current="page"] .badge { background: var(--on-ember); color: var(--ember); }
-
-  .group-label {
-    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
-    color: var(--ink-dim); margin: 16px 0 5px;
-  }
-  .tree a {
-    display: block; padding: 3px 7px; border-radius: 5px;
-    color: var(--ink-dim); font-size: 13.5px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    transition: background-color var(--dur), color var(--dur);
-  }
-  .tree-group summary {
-    cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: 6px;
-  }
-  .tree-group summary::-webkit-details-marker { display: none; }
-  .tree-group summary::before {
-    content: "▸"; font-size: 9px; color: var(--ink-faint);
-    transition: transform var(--dur) var(--ease);
-  }
-  .tree-group[open] summary::before { transform: rotate(90deg); }
-  .tree-group .count { color: var(--ink-faint); font-size: 10px; font-weight: 400; }
-  .tree a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
-  .tree a[aria-current="page"] { background: var(--ember-soft); color: var(--ink); }
-  .signout {
-    margin-top: 18px; font-size: 12px; color: var(--ink-faint);
-    background: none; border: none; padding: 2px 0; cursor: pointer;
-    text-decoration: underline; font-family: var(--sans);
-  }
-  .signout:hover { color: var(--oxide); }
-
-  main { padding: 34px 40px 80px; max-width: 74ch; }
-  @media (max-width: 760px) { main { padding: 22px 18px 60px; } }
-
-  .page-head { border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 22px; }
-  h1 { font-family: var(--serif); font-size: 30px; line-height: 1.2; margin: 0 0 8px; font-weight: 600; }
-  .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12.5px; color: var(--ink-dim); }
-  .chip {
-    padding: 2px 8px; border-radius: 999px;
-    background: var(--surface); border: 1px solid var(--border);
-    transition: background-color var(--dur), border-color var(--dur), color var(--dur);
-  }
-
-  /* Freshness as temperature: a page built from current sources reads warm and
-     cools toward ash as it falls behind. The text labels carry the meaning;
-     color reinforces but never carries it alone. */
-  .chip.fresh { border-color: var(--ember); color: var(--ember); }
-  .chip.stale { border-color: var(--ash); color: var(--ash); }
-
-  /* Run states borrow the same temperature language: active runs glow, failure
-     is worth alarm, everything settled reads neutral. Labels carry meaning;
-     color reinforces. */
-  .chip.run-running, .chip.run-queued { border-color: var(--ember); color: var(--ember); }
-  .chip.run-failed, .chip.run-over_budget { border-color: #b3261e; color: #b3261e; }
-
-  .prose { font-family: var(--serif); font-size: 17px; line-height: 1.65; }
-  .prose h1, .prose h2, .prose h3 { font-family: var(--serif); line-height: 1.25; margin: 1.6em 0 0.5em; }
-  .prose h1 { font-size: 25px; } .prose h2 { font-size: 21px; } .prose h3 { font-size: 18px; }
-  .prose p, .prose li { margin: 0.7em 0; }
-  .prose ul, .prose ol { padding-left: 1.4em; }
-  .prose code {
-    background: var(--surface); padding: 1px 5px; border-radius: 4px;
-    border: 1px solid var(--border);
-  }
-  .prose pre {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    padding: 12px 14px; overflow-x: auto;
-  }
-  .prose pre code { background: none; border: none; padding: 0; }
-  .prose blockquote {
-    margin: 1em 0; padding-left: 14px;
-    border-left: 3px solid var(--ember-soft); color: var(--ink-dim);
-  }
-  .prose table {
-    border-collapse: collapse; margin: 1em 0; font-size: 15px;
-    display: block; overflow-x: auto;
-  }
-  .prose th, .prose td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; }
-  .prose th { background: var(--surface); font-weight: 600; }
-  .prose img { max-width: 100%; border-radius: 8px; }
-  .prose hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
-  .wikilink { border-bottom: 1px solid var(--ember-soft); }
-  .wikilink.dead {
-    color: var(--ink-faint); border-bottom: 1px dashed var(--ink-faint); cursor: help;
-  }
-
-  .hint { color: var(--ink-dim); font-size: 14px; }
-  .hint.error { color: var(--oxide); }
-  .empty { padding: 40px 0; color: var(--ink-dim); }
-  .empty code { background: var(--surface); padding: 2px 6px; border-radius: 4px; }
-
-  .row {
-    display: flex; justify-content: space-between; gap: 12px;
-    padding: 9px 0; border-bottom: 1px solid var(--border);
-  }
-  .row .count { color: var(--ink-dim); font-size: 13px; white-space: nowrap; }
-  .hit { padding: 9px 0; border-bottom: 1px solid var(--border); }
-  .hit .snippet { font-size: 13.5px; color: var(--ink-dim); margin-top: 3px; }
-  mark { background: var(--ember-soft); color: var(--ink); border-radius: 3px; padding: 0 2px; }
-  .banner {
-    background: var(--surface); border: 1px solid var(--oxide); color: var(--oxide);
-    padding: 9px 12px; border-radius: 7px; margin-bottom: 18px; font-size: 13.5px;
-  }
-  .banner button {
-    margin-left: 8px; background: none; border: 1px solid var(--oxide);
-    color: var(--oxide); border-radius: 5px; padding: 2px 10px; cursor: pointer;
-    font-size: 12.5px;
-  }
-
-  .btn {
-    padding: 6px 14px; border: 1px solid var(--ember); border-radius: 6px;
-    background: var(--ember); color: var(--on-ember); font-family: var(--sans);
-    font-size: 13px; cursor: pointer;
-    transition: background-color var(--dur), border-color var(--dur), color var(--dur), opacity var(--dur);
-  }
-  .btn.quiet { background: var(--bg); color: var(--ember); }
-  .btn.quiet:hover { background: var(--ember-soft); }
-  .btn.danger { background: var(--oxide); border-color: var(--oxide); color: var(--on-ember); }
-  .btn:disabled { opacity: 0.55; cursor: default; }
-  .btn + .btn { margin-left: 6px; }
-  .linkish {
-    background: none; border: none; padding: 2px 6px; cursor: pointer;
-    color: var(--ink-dim); text-decoration: underline; font-size: 12px;
-    font-family: var(--sans);
-  }
-  .linkish:hover { color: var(--oxide); }
-
-  .review { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
-  .review .detail { font-size: 13.5px; color: var(--ink-dim); margin: 6px 0 10px; white-space: pre-wrap; }
-  .review .meta { margin-bottom: 6px; }
-
-  .correction { border-left: 3px solid var(--ember-soft); padding: 4px 0 4px 12px; margin: 8px 0; }
-  .correction.inactive { border-left-color: var(--border); color: var(--ink-faint); }
-  .correction .body { white-space: pre-wrap; font-size: 14px; }
-  .correction .tools { font-size: 12px; margin-top: 2px; color: var(--ink-dim); }
-  details.panel { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 10px; }
-  details.panel summary { cursor: pointer; color: var(--ink-dim); font-size: 13.5px; }
-
-  /* ---- dynamism: shared ------------------------------------------------ */
-  .sr-only {
-    position: absolute; width: 1px; height: 1px; margin: -1px;
-    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
-  }
-  @keyframes view-in { from { opacity: 0; transform: translateY(4px); } }
-  .view-in { animation: view-in var(--dur) var(--ease); }
-
-  .skel { max-width: 60ch; }
-  .skel-title, .skel-line {
-    border-radius: 6px; margin: 10px 0;
-    background: linear-gradient(90deg, var(--surface) 25%, var(--border) 50%, var(--surface) 75%);
-    background-size: 200% 100%;
-    animation: skel-shimmer 1.2s linear infinite;
-  }
-  .skel-title { height: 32px; width: 60%; margin-bottom: 22px; }
-  .skel-line { height: 14px; }
-  .skel-line.short { width: 70%; }
-  @keyframes skel-shimmer { to { background-position: -200% 0; } }
-
-  .toasts {
-    position: fixed; right: 14px; bottom: 14px; z-index: 35;
-    display: flex; flex-direction: column; gap: 8px; max-width: 340px;
-  }
-  @media (max-width: 760px) { .toasts { left: 14px; right: 14px; max-width: none; } }
-  .toast {
-    display: flex; align-items: center; gap: 10px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    padding: 10px 12px; font-size: 13.5px; box-shadow: 0 4px 18px rgba(0,0,0,0.18);
-    animation: toast-in var(--dur) var(--ease);
-  }
-  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
-  .toast .toast-act {
-    background: none; border: 1px solid var(--ember); color: var(--ember);
-    border-radius: 5px; padding: 3px 10px; cursor: pointer; font-size: 12.5px;
-    white-space: nowrap;
-  }
-  .toast .toast-x {
-    background: none; border: none; color: var(--ink-faint); cursor: pointer;
-    font-size: 14px; padding: 2px 4px;
-  }
-
-  /* ---- dynamism: palette ----------------------------------------------- */
-  .palette {
-    position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,0.3);
-  }
-  .palette-panel {
-    margin: 18vh auto 0; max-width: 560px; width: calc(100% - 32px);
-    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
-    box-shadow: 0 12px 40px rgba(0,0,0,0.3); overflow: hidden;
-    animation: view-in var(--dur) var(--ease);
-  }
-  .palette-panel input {
-    margin: 0; border: none; border-bottom: 1px solid var(--border); border-radius: 0;
-    padding: 13px 16px; font-size: 15px;
-  }
-  .palette-panel input:focus { outline: none; }
-  #palette-list {
-    list-style: none; margin: 0; padding: 6px; max-height: 320px; overflow-y: auto;
-  }
-  #palette-list li {
-    display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
-    padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 14px;
-  }
-  #palette-list li .kind { color: var(--ink-faint); font-size: 12px; white-space: nowrap; }
-  #palette-list li.active { background: var(--ember-soft); }
-  #palette-list .pal-empty { color: var(--ink-dim); cursor: default; }
-
-  /* ---- dynamism: reading ----------------------------------------------- */
-  .toc { margin: 0 0 18px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
-  .toc summary { cursor: pointer; color: var(--ink-dim); font-size: 13px; }
-  .toc ul { list-style: none; margin: 6px 0 2px; padding: 0; }
-  .toc li.h3 { padding-left: 16px; }
-  .toc-link {
-    background: none; border: none; padding: 3px 8px; border-radius: 5px;
-    color: var(--ink-dim); font-size: 13px; cursor: pointer; text-align: left;
-    font-family: var(--sans); width: 100%; display: block;
-    transition: background-color var(--dur), color var(--dur);
-  }
-  .toc-link:hover { color: var(--ink); background: var(--surface); }
-  .toc-link.active { color: var(--ember); background: var(--ember-soft); }
-
-  .pager {
-    display: flex; justify-content: space-between; gap: 16px;
-    margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border);
-    font-size: 14px;
-  }
-  .pager a { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-  .preview-card {
-    position: fixed; z-index: 45; max-width: 340px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    padding: 10px 12px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,0.2);
-    animation: view-in var(--dur) var(--ease); pointer-events: none;
-  }
-  .preview-card .pv-title { font-weight: 600; font-size: 14px; margin-bottom: 2px; }
-  .preview-card .pv-type { color: var(--ink-faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; }
-  .preview-card .pv-body { color: var(--ink-dim); margin-top: 5px; line-height: 1.45; }
-
-  .to-top {
-    position: fixed; left: 14px; bottom: 14px; z-index: 34;
-    width: 38px; height: 38px; border-radius: 999px;
-    background: var(--surface); border: 1px solid var(--border); color: var(--ink-dim);
-    cursor: pointer; font-size: 16px;
-    opacity: 1; transition: opacity var(--dur), background-color var(--dur);
-  }
-  .to-top:hover { background: var(--ember-soft); color: var(--ink); }
-  .to-top[hidden] { display: none; }
-
-  @media print {
-    aside, .menu-btn, .skip, details.panel, .toasts, .to-top, .toc, .pager { display: none !important; }
-    .shell { display: block; }
-    main { max-width: none; padding: 0; }
-  }
-
-  /* Motion arrives with its off-switch, in the same stylesheet: --dur drives
-     every transition and animation above, so zeroing it stills the page. */
-  @media (prefers-reduced-motion: reduce) {
-    :root { --dur: 0.01ms; }
-    *, *::before, *::after {
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
-      transition-duration: 0.01ms !important;
-    }
-  }
-</style>
-</head>
-<body>
-<svg width="0" height="0" aria-hidden="true">
-  <symbol id="logo-mark" viewBox="0 0 24 24">
-    <path fill-rule="evenodd" d="M3 22 L3 12 Q3 2 12 2 Q21 2 21 12 L21 22 Z
-      M8 22 L8 15 Q8 10 12 10 Q16 10 16 15 L16 22 Z
-      M9.8 18.5 a2.2 2.2 0 1 0 4.4 0 a2.2 2.2 0 1 0 -4.4 0 Z"/>
-  </symbol>
-</svg>
-<a class="skip" href="#main">Skip to content</a>
-<button class="menu-btn" id="menu" aria-label="Navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
-<div id="palette" class="palette" hidden>
-  <div class="palette-panel" role="dialog" aria-modal="true" aria-label="Go to page">
-    <input id="palette-input" type="text" role="combobox" aria-expanded="true"
-           aria-controls="palette-list" aria-autocomplete="list" autocomplete="off"
-           spellcheck="false" placeholder="Go to page, view, or tag…">
-    <ul id="palette-list" role="listbox"></ul>
-  </div>
-</div>
-<div class="shell">
-  <aside id="sidebar" aria-label="Sidebar">
-    <div class="brand"><svg class="logo" aria-hidden="true"><use href="#logo-mark"/></svg>kiln <small id="version"></small></div>
-    <details class="bench" id="bench">
-      <summary id="bench-name" aria-label="Bench"></summary>
-      <div class="bench-list" id="bench-list"></div>
-    </details>
-    <div role="search">
-      <input id="search" type="search" placeholder="Full-text search…" aria-label="Full-text search"
-             enterkeyhint="search" autocomplete="off">
-    </div>
-    <nav class="nav" aria-label="Views">
-      <a href="#/overview" data-view="overview">Overview</a>
-      <a href="#/index" data-view="index">Index</a>
-      <a href="#/graph" data-view="graph">Graph</a>
-      <a href="#/gaps" data-view="gaps">Gaps</a>
-      <a href="#/reviews" data-view="reviews">Reviews <span class="badge" id="reviews-badge" hidden></span></a>
-      <a href="#/runs" data-view="runs">Runs</a>
-      <a href="#/members" data-view="members">Members</a>
-      <a href="#/log" data-view="log">Log</a>
-      <a href="#/steering" data-view="steering">Steering</a>
-    </nav>
-    <input id="tree-filter" type="search" placeholder="Filter pages…  ( / )" aria-label="Filter pages"
-           autocomplete="off" spellcheck="false">
-    <span class="sr-only" id="filter-status" role="status"></span>
-    <nav class="tree" id="tree" aria-label="Pages"></nav>
-    <button class="signout" id="signout" hidden>Sign out of this kiln</button>
-  </aside>
-  <main id="main" tabindex="-1"><div class="empty">Loading…</div></main>
-</div>
-<div id="toasts" class="toasts" aria-live="polite" role="status"></div>
-<div id="preview" class="preview-card" role="tooltip" hidden></div>
-<button id="to-top" class="to-top" hidden aria-label="Back to top">↑</button>
-
-<script>
 "use strict";
 const $ = (id) => document.getElementById(id);
 const state = { workspace: null, benches: [], pages: [], slugs: new Set(), view: "overview" };
@@ -1460,7 +984,7 @@ async function showReviews(all) {
 async function showGraph() {
   const view = beginView("Graph", "graph");
   try {
-    const { nodes, edges } = await api(`/workspaces/${encodeURIComponent(state.workspace)}/graph`);
+    const { nodes, edges, totalPages } = await api(`/workspaces/${encodeURIComponent(state.workspace)}/graph`);
     if (!nodes.length) {
       view.done(`<h1>Graph</h1><div class="empty">No pages yet.</div>`);
       return;
@@ -1478,8 +1002,7 @@ async function showGraph() {
       .map((e) => [bySlug.get(e.from), bySlug.get(e.to)])
       .filter(([a, b]) => a !== undefined && b !== undefined && a !== b);
 
-    for (let tick = 0; tick < 260; tick++) {
-      const k = 1 - tick / 300; // cooling
+    const tick = (k) => {
       for (let i = 0; i < pts.length; i++) {
         for (let j = i + 1; j < pts.length; j++) {
           let dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
@@ -1507,17 +1030,13 @@ async function showGraph() {
         p.x = Math.max(20, Math.min(W - 20, p.x));
         p.y = Math.max(20, Math.min(H - 20, p.y));
       }
-    }
+    };
 
     const hue = { entity: "var(--ember)", synthesis: "#7c5cbf", source: "#3f7d5d",
                   concept: "#b3762e", query: "#5b7fa6", comparison: "#a65b6b" };
     const r = (n) => 5 + Math.min(9, Math.sqrt(n.links || 0) * 2.2);
 
-    view.done(`<h1>Graph</h1>
-      <p class="hint">${nodes.length} pages, ${links.length} links. Node size is
-      inbound links; color is page type. Click a node to open its page.</p>
-      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img"
-           aria-label="Page link graph">
+    const svg = () => `
         ${links.map(([a, b]) => `<line x1="${pts[a].x.toFixed(1)}" y1="${pts[a].y.toFixed(1)}"
             x2="${pts[b].x.toFixed(1)}" y2="${pts[b].y.toFixed(1)}"
             stroke="var(--border)" stroke-width="1"/>`).join("")}
@@ -1528,8 +1047,30 @@ async function showGraph() {
           </circle>
           ${(n.links >= 2 || nodes.length <= 30) ? `<text x="${(pts[i].x + r(n) + 3).toFixed(1)}"
               y="${(pts[i].y + 3).toFixed(1)}" font-size="10" fill="var(--ink-dim)">${esc(n.slug)}</text>` : ""}
-        </a>`).join("")}
-      </svg>`);
+        </a>`).join("")}`;
+
+    const truncated = totalPages > nodes.length
+      ? ` Showing the ${nodes.length} best-connected of ${totalPages} pages.` : "";
+    if (!view.done(`<h1>Graph</h1>
+      <p class="hint">${nodes.length} pages, ${links.length} links. Node size is
+      inbound links; color is page type. Click a node to open its page.${esc(truncated)}</p>
+      <svg id="graph-svg" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img"
+           aria-label="Page link graph">${svg()}</svg>`)) return;
+
+    // The layout settles across animation frames rather than blocking the
+    // main thread: a handful of ticks per frame, painting as it goes, so a
+    // 300-node graph never freezes the page. Navigation stops it via the
+    // view token.
+    let frame = 0;
+    const settle = () => {
+      if (!view.current() || frame >= 26) return;
+      for (let i = 0; i < 10; i++) tick(1 - (frame * 10 + i) / 300);
+      frame++;
+      const el = $("graph-svg");
+      if (el) el.innerHTML = svg();
+      requestAnimationFrame(settle);
+    };
+    requestAnimationFrame(settle);
   } catch (err) {
     if (!err.handled) view.done(banner(err));
   }
@@ -2052,6 +1593,3 @@ async function boot() {
 }
 
 boot();
-</script>
-</body>
-</html>

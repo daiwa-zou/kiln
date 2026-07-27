@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5.5' fill='%23b4530a'/%3E%3Cpath fill='%23faf7f2' fill-rule='evenodd' d='M5,20V11.5Q5,4,12,4Q19,4,19,11.5V20ZM9,20V14.5Q9,11,12,11Q15,11,15,14.5V20Z'/%3E%3C/svg%3E">
+<title>kiln</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<svg width="0" height="0" aria-hidden="true">
+  <symbol id="logo-mark" viewBox="0 0 24 24">
+    <path fill-rule="evenodd" d="M3 22 L3 12 Q3 2 12 2 Q21 2 21 12 L21 22 Z
+      M8 22 L8 15 Q8 10 12 10 Q16 10 16 15 L16 22 Z
+      M9.8 18.5 a2.2 2.2 0 1 0 4.4 0 a2.2 2.2 0 1 0 -4.4 0 Z"/>
+  </symbol>
+</svg>
+<a class="skip" href="#main">Skip to content</a>
+<button class="menu-btn" id="menu" aria-label="Navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
+<div id="palette" class="palette" hidden>
+  <div class="palette-panel" role="dialog" aria-modal="true" aria-label="Go to page">
+    <input id="palette-input" type="text" role="combobox" aria-expanded="true"
+           aria-controls="palette-list" aria-autocomplete="list" autocomplete="off"
+           spellcheck="false" placeholder="Go to page, view, or tag…">
+    <ul id="palette-list" role="listbox"></ul>
+  </div>
+</div>
+<div class="shell">
+  <aside id="sidebar" aria-label="Sidebar">
+    <div class="brand"><svg class="logo" aria-hidden="true"><use href="#logo-mark"/></svg>kiln <small id="version"></small></div>
+    <details class="bench" id="bench">
+      <summary id="bench-name" aria-label="Bench"></summary>
+      <div class="bench-list" id="bench-list"></div>
+    </details>
+    <div role="search">
+      <input id="search" type="search" placeholder="Full-text search…" aria-label="Full-text search"
+             enterkeyhint="search" autocomplete="off">
+    </div>
+    <nav class="nav" aria-label="Views">
+      <a href="#/overview" data-view="overview">Overview</a>
+      <a href="#/index" data-view="index">Index</a>
+      <a href="#/graph" data-view="graph">Graph</a>
+      <a href="#/gaps" data-view="gaps">Gaps</a>
+      <a href="#/reviews" data-view="reviews">Reviews <span class="badge" id="reviews-badge" hidden></span></a>
+      <a href="#/runs" data-view="runs">Runs</a>
+      <a href="#/members" data-view="members">Members</a>
+      <a href="#/log" data-view="log">Log</a>
+      <a href="#/steering" data-view="steering">Steering</a>
+    </nav>
+    <input id="tree-filter" type="search" placeholder="Filter pages…  ( / )" aria-label="Filter pages"
+           autocomplete="off" spellcheck="false">
+    <span class="sr-only" id="filter-status" role="status"></span>
+    <nav class="tree" id="tree" aria-label="Pages"></nav>
+    <button class="signout" id="signout" hidden>Sign out of this kiln</button>
+  </aside>
+  <main id="main" tabindex="-1"><div class="empty">Loading…</div></main>
+</div>
+<div id="toasts" class="toasts" aria-live="polite" role="status"></div>
+<div id="preview" class="preview-card" role="tooltip" hidden></div>
+<button id="to-top" class="to-top" hidden aria-label="Back to top">↑</button>
+
+<script src="/ui/app.js" defer></script>
+</body>
+</html>

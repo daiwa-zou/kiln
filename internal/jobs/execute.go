@@ -20,6 +20,25 @@ import (
 	"github.com/daiwa-zou/kiln/internal/mapper/repomap"
 )
 
+// SourceConnectors maps each sync source to the connector row that supplied
+// it, for per-source attribution on import.
+type SourceConnectors struct {
+	Git    string
+	Upload string
+	Web    string
+}
+
+// For returns the connector id owning a unit key's namespace.
+func (c SourceConnectors) For(key diff.Key) string {
+	switch diff.Namespace(key) {
+	case "doc:upload":
+		return c.Upload
+	case "doc:web":
+		return c.Web
+	}
+	return c.Git
+}
+
 // SourceSpec names the material one build consumes.
 type SourceSpec struct {
 	// Path is the repository directory the git connector scans.
@@ -41,10 +60,9 @@ type ExecuteRequest struct {
 	Trigger     string
 	Source      SourceSpec
 
-	// ConnectorID, when set, attributes this run's source records to the
-	// connector that produced them (the workspace's git connector for
-	// server-side builds; empty for CLI builds, which have no connector row).
-	ConnectorID string
+	// Connectors attributes each synced namespace's source records to the
+	// connector that produced them; zero for CLI builds.
+	Connectors SourceConnectors
 
 	// BaseRef, when set, requests incremental routing: changes are derived
 	// from `git diff BaseRef..HEAD` and only the affected units are routed.
@@ -162,18 +180,30 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		}
 	}
 
+	// Which namespaces this run synced decides which disappearances are
+	// deletions: git always covers modules, entries, arch, and repo docs;
+	// uploads and web pages only when their sources were actually consulted.
+	syncedNS := []string{"module", "entry", "arch", "doc"}
+	if req.Source.DocsDir != "" {
+		syncedNS = append(syncedNS, "doc:upload")
+	}
+	if len(req.Source.WebURLs) > 0 {
+		syncedNS = append(syncedNS, "doc:web")
+	}
+
 	breq := BuildRequest{
-		RunID:       req.RunID,
-		WorkspaceID: req.WorkspaceID,
-		Trigger:     req.Trigger,
-		ConnectorID: req.ConnectorID,
-		Ref:         gitRef(rm),
-		SourceDir:   req.Source.Path,
-		Map:         wm,
-		Router:      router,
-		Changes:     changes,
-		Force:       req.Force,
-		DryRun:      req.DryRun,
+		RunID:            req.RunID,
+		WorkspaceID:      req.WorkspaceID,
+		Trigger:          req.Trigger,
+		Connectors:       req.Connectors,
+		SyncedNamespaces: syncedNS,
+		Ref:              gitRef(rm),
+		SourceDir:        req.Source.Path,
+		Map:              wm,
+		Router:           router,
+		Changes:          changes,
+		Force:            req.Force,
+		DryRun:           req.DryRun,
 	}
 	// The API runner returns pages as data, so a scratch directory is only
 	// created for the CLI runner that writes files.

@@ -52,9 +52,17 @@ type BuildRequest struct {
 	WorkspaceID string
 	Trigger     string
 	Ref         string
-	// ConnectorID attributes this run's source records to a connector, when
-	// the run came through one. Empty for CLI builds.
-	ConnectorID string
+	// Connectors attributes each source record to the connector whose sync
+	// produced it, by namespace. Zero value for CLI builds, which have no
+	// connector rows.
+	Connectors SourceConnectors
+
+	// SyncedNamespaces lists the source namespaces this run actually synced
+	// (see diff.Namespace). Deletion candidates are only raised inside them:
+	// a build without --docs must not read uploaded documents as deleted,
+	// while a synced-but-empty namespace is exactly a deletion. Nil infers
+	// from surviving units, the pre-M6 behavior.
+	SyncedNamespaces []string
 
 	// SourceDir is the materialized tree the agent reads. It is never written
 	// to; validation re-checks it afterwards to prove that held.
@@ -138,7 +146,14 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	// place until a human answers it. Filed before the no-changes early return,
 	// because a vanished source is often the *only* thing that changed.
 	if !req.DryRun {
-		cands := deletionCandidates(sources, req.Map, req.ApprovedDeletions)
+		var synced map[string]bool
+		if req.SyncedNamespaces != nil {
+			synced = make(map[string]bool, len(req.SyncedNamespaces))
+			for _, ns := range req.SyncedNamespaces {
+				synced[ns] = true
+			}
+		}
+		cands := deletionCandidates(sources, req.Map, req.ApprovedDeletions, synced)
 		if len(cands) > 0 {
 			if err := p.Store.EnsureDeletionReviews(ctx, req.WorkspaceID, cands); err != nil {
 				return nil, fmt.Errorf("jobs: file deletion reviews: %w", err)
@@ -218,6 +233,10 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		existingCreated[pg.Slug] = pg.Meta.Created
 	}
 
+	// writtenBy tracks which unit produced each page path this run, for the
+	// cross-unit collision check.
+	writtenBy := map[string]diff.Key{}
+
 	var (
 		written    []wiki.Page
 		newSources []diff.SourceRecord
@@ -266,6 +285,22 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		item.Turns = out.Turns
 		res.Summary.Tokens += out.Tokens
 
+		// Two units claiming one path in the same run is silent data loss:
+		// the second import overwrites the first with no violation, because
+		// per-unit validation cannot see across units. The run-level check
+		// can, and treats it like any other validation failure — the later
+		// unit fails and retries next run, the earlier one keeps its page.
+		if out.Err == nil && len(out.Violations) == 0 {
+			for _, pg := range out.Pages {
+				if owner, taken := writtenBy[pg.Path]; taken {
+					out.Violations = append(out.Violations, wiki.Violation{
+						Path:   pg.Path,
+						Reason: fmt.Sprintf("already written by unit %s in this run; two units must not claim one page", owner),
+					})
+				}
+			}
+		}
+
 		switch {
 		case out.Err != nil:
 			item.Status = StatusFailed
@@ -280,6 +315,9 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 			item.Status = StatusSucceeded
 			written = append(written, out.Pages...)
 			findings = append(findings, out.Findings...)
+			for _, pg := range out.Pages {
+				writtenBy[pg.Path] = key
+			}
 
 			// Review flags ride the run summary and are persisted with it.
 			// Only successful units contribute: a failed unit retries next run
@@ -303,6 +341,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 				Key:          key,
 				InputHash:    hash,
 				FilesWritten: pagePaths(out.Pages),
+				ConnectorID:  req.Connectors.For(key),
 			})
 			for _, pg := range out.Pages {
 				known[pg.Slug] = true
@@ -348,7 +387,6 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	if err := p.Store.Import(importCtx, ImportRequest{
 		WorkspaceID:     req.WorkspaceID,
 		RunID:           req.RunID,
-		ConnectorID:     req.ConnectorID,
 		UpsertPages:     written,
 		SoftDeletePages: cascade.DeletePages,
 		UpsertSources:   newSources,

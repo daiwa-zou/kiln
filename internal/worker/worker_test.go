@@ -62,7 +62,7 @@ func TestSourceSpecResolvesGitAndUpload(t *testing.T) {
 		PermittedSourceRoots: []string{repo, docs},
 	}
 
-	spec, gitID, _, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, ids, _, err := w.sourceSpec(context.Background(), run("ws1"))
 	if err != nil {
 		t.Fatalf("sourceSpec: %v", err)
 	}
@@ -72,8 +72,8 @@ func TestSourceSpecResolvesGitAndUpload(t *testing.T) {
 	if spec.Slug != "bench" {
 		t.Errorf("slug = %q, want workspace slug", spec.Slug)
 	}
-	if gitID != "c1" {
-		t.Errorf("git connector id = %q, want c1", gitID)
+	if ids.Git != "c1" || ids.Upload != "c2" {
+		t.Errorf("connector ids = %+v, want git c1 + upload c2", ids)
 	}
 }
 
@@ -163,11 +163,11 @@ func TestSourceSpecPinnedConnector(t *testing.T) {
 
 	r := run("ws1")
 	r.ConnectorID = "pin"
-	spec, gitID, _, err := w.sourceSpec(context.Background(), r)
+	spec, ids, _, err := w.sourceSpec(context.Background(), r)
 	if err != nil {
 		t.Fatalf("pinned sourceSpec: %v", err)
 	}
-	if gitID != "pin" || spec.Path == "" {
-		t.Errorf("pinned resolution: id=%q spec=%+v", gitID, spec)
+	if ids.Git != "pin" || spec.Path == "" {
+		t.Errorf("pinned resolution: ids=%+v spec=%+v", ids, spec)
 	}
 }
