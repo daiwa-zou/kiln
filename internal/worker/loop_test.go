@@ -471,3 +471,36 @@ func TestSweepRunsHourlyFromTheLoop(t *testing.T) {
 		t.Errorf("sweeps = %d, want exactly 1 (hourly throttle)", st.sweeps)
 	}
 }
+
+func TestDrainGraceDefaultsAboveAgentTimeout(t *testing.T) {
+	if got := (&Worker{}).drainGrace(); got != 15*time.Minute {
+		t.Errorf("default drain grace = %v", got)
+	}
+	if got := (&Worker{DrainGrace: time.Minute}).drainGrace(); got != time.Minute {
+		t.Errorf("configured drain grace = %v", got)
+	}
+}
+
+func TestRunDrainsInFlightRunOnShutdown(t *testing.T) {
+	// One queued run whose processing fails resolution (no connectors), a
+	// context canceled almost immediately: the loop must still process the
+	// claimed run to completion before returning.
+	st := newLoopStore(&store.QueuedRun{ID: "r1", WorkspaceID: "ws",
+		WorkspaceSlug: "b", Trigger: "manual"})
+	w := &Worker{Store: st, Poll: time.Millisecond, DrainGrace: time.Second}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	_ = w.Run(ctx)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.claimed) != 1 {
+		t.Fatalf("claimed = %v", st.claimed)
+	}
+	// The run finished (failed on no-connectors) rather than being abandoned
+	// mid-flight: drain means completion or requeue, never limbo.
+	if len(st.failed) != 1 && len(st.requeued) != 1 {
+		t.Errorf("run left in limbo: failed=%v requeued=%v", st.failed, st.requeued)
+	}
+}
