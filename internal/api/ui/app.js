@@ -239,7 +239,7 @@ function showTokenForm(hadToken) {
     ${state.githubSignIn ? `
       <p class="hint">Sign in with your GitHub account:</p>
       <a class="btn" href="/auth/github/login">Sign in with GitHub</a>
-      <p class="hint" style="margin-top:20px">Or use an access token.</p>` : `
+      <p class="hint login-alt">Or use an access token.</p>` : `
       <p class="hint">This kiln requires an access token. Mint one with
         <code>kiln admin token create --login you</code> and paste it here.
         It is stored only in this browser.</p>`}
@@ -782,13 +782,13 @@ async function showPage(slug) {
       </div>
       <div class="prose">${renderMarkdown(p.body)}</div>
       ${pagerFor(p)}
-      ${backlinks === null ? "" : `<div class="page-head" style="margin-top:32px;border-bottom:none">
+      ${backlinks === null ? "" : `<div class="page-foot">
         <div class="group-label">Linked from</div>
         ${backlinks.length ? `<div class="meta">${backlinks.map((b) =>
           `<a class="chip" href="#/page/${encodeURIComponent(b.slug)}">${esc(b.title || b.slug)}</a>`).join("")}</div>`
         : `<div class="hint">No pages link here yet.</div>`}
       </div>`}
-      ${(p.sources || []).length ? `<div class="page-head" style="margin-top:16px;border-bottom:none">
+      ${(p.sources || []).length ? `<div class="page-foot tight">
         <div class="group-label">Derived from</div>
         <div class="meta">${p.sources.map((s) => `<span class="chip mono">${esc(s)}</span>`).join("")}</div>
       </div>` : ""}
@@ -1057,18 +1057,19 @@ async function showGraph() {
       scroll to zoom, drag the background to pan; click opens the page.${esc(truncated)}</p>
       <div class="graph-legend" role="group" aria-label="Filter by page type">
         ${Object.entries(typeCounts).map(([t, c]) =>
-          `<button class="chip" data-type="${esc(t)}" aria-pressed="true"
-             style="border-color:${hue[t] || "var(--border)"}">${esc(t)} ${c}</button>`).join("")}
+          `<button class="chip" data-type="${esc(t)}" aria-pressed="true">${esc(t)} ${c}</button>`).join("")}
         <button class="chip quiet" id="graph-reset">reset view</button>
       </div>
-      <svg id="graph-svg" style="width:100%;touch-action:none;display:block"
-           role="img" aria-label="Page link graph"></svg>`)) return;
+      <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>`)) return;
 
     const svg = $("graph-svg");
     {
       const rect = svg.getBoundingClientRect();
       W = Math.max(700, Math.round(rect.width));
-      H = Math.max(520, Math.round(window.innerHeight - rect.top - 28));
+      // Cap the aspect: a portrait window would otherwise make a canvas far
+      // taller than a roughly-round layout can fill.
+      H = Math.max(520, Math.min(Math.round(window.innerHeight - rect.top - 28),
+                                 Math.round(W * 1.2)));
       svg.style.height = H + "px";
       const scale = Math.min(W, H) / 640;
       repulse = 2600 * scale * scale;
@@ -1155,24 +1156,50 @@ async function showGraph() {
     const vb = { x: 0, y: 0, w: W, h: H };
     const applyVB = () => svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
     applyVB();
-    // fitView frames the visible nodes (labels included, roughly) with some
-    // air, so the layout always fills the canvas it was given.
-    const fitView = () => {
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    // fitView fills the canvas by spreading the layout, never by zooming the
+    // camera: nodes move apart while circles and labels keep their natural
+    // size. Zooming in to fill made 19 nodes look like beach balls; leaving
+    // the settled cluster alone left 80% of a big screen empty.
+    const bounds = () => {
+      let m = null;
       pts.forEach((p, i) => {
         if (nodeEls[i].classList.contains("graph-hidden")) return;
-        minX = Math.min(minX, p.x - 20); maxX = Math.max(maxX, p.x + 150);
-        minY = Math.min(minY, p.y - 20); maxY = Math.max(maxY, p.y + 20);
+        if (!m) m = { x0: p.x, x1: p.x, y0: p.y, y1: p.y };
+        m.x0 = Math.min(m.x0, p.x); m.x1 = Math.max(m.x1, p.x);
+        m.y0 = Math.min(m.y0, p.y); m.y1 = Math.max(m.y1, p.y);
       });
-      if (minX === Infinity) return;
-      const bw = maxX - minX, bh = maxY - minY;
+      return m;
+    };
+    const fitView = () => {
+      let m = bounds();
+      if (!m) return;
+      // 150px of right margin leaves room for the labels hanging off nodes;
+      // the growth cap keeps a near-degenerate layout from being flung to
+      // the corners.
+      const s = Math.min(6,
+        (W - 60 - 150) / Math.max(1, m.x1 - m.x0),
+        (H - 60) / Math.max(1, m.y1 - m.y0));
+      const grow = s > 1.02 ? s : 1;
+      const cx = (m.x0 + m.x1) / 2, cy = (m.y0 + m.y1) / 2;
+      for (const p of pts) {
+        p.x = W / 2 + (p.x - cx) * grow;
+        p.y = H / 2 + (p.y - cy) * grow;
+      }
+      if (grow > 1) {
+        // Keep the physics in equilibrium at the new spacing, or the next
+        // drag's reheat would pull the layout back into a cluster.
+        repulse *= grow * grow;
+        springLen *= grow;
+      }
+      position();
+      m = bounds();
+      const bx = m.x0 - 20, by = m.y0 - 20;
+      const bw = m.x1 - m.x0 + 170, bh = m.y1 - m.y0 + 40;
       if (bw <= W && bh <= H) {
-        // Content fits at natural scale: center it, never magnify it.
-        vb.x = minX + bw / 2 - W / 2;
-        vb.y = minY + bh / 2 - H / 2;
-        vb.w = W; vb.h = H;
+        vb.x = 0; vb.y = 0; vb.w = W; vb.h = H;
       } else {
-        vb.x = minX; vb.y = minY;
+        // Oversized layout (grow stayed 1): shrink the camera to frame it.
+        vb.x = bx; vb.y = by;
         vb.w = Math.max(320, bw);
         vb.h = Math.max(240, bh);
       }
@@ -1267,6 +1294,9 @@ async function showGraph() {
     // --- legend: toggle types on and off ----------------------------------
     const hidden = new Set();
     for (const b of document.querySelectorAll(".graph-legend [data-type]")) {
+      // CSSOM, not a style attribute: the CSP (style-src 'self') refuses
+      // inline style attributes.
+      b.style.borderColor = hue[b.dataset.type] || "var(--border)";
       b.addEventListener("click", () => {
         const t = b.dataset.type;
         hidden.has(t) ? hidden.delete(t) : hidden.add(t);

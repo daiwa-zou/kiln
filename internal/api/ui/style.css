@@ -189,6 +189,9 @@
   @media (max-width: 760px) { main { padding: 22px 18px 60px; } }
 
   .page-head { border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 22px; }
+  .page-foot { margin-top: 32px; padding-bottom: 14px; }
+  .page-foot.tight { margin-top: 16px; }
+  .login-alt { margin-top: 20px; }
   h1 { font-family: var(--serif); font-size: 30px; line-height: 1.2; margin: 0 0 8px; font-weight: 600; }
   .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12.5px; color: var(--ink-dim); }
   .chip {
@@ -430,5 +433,7 @@
   .graph-legend .chip { cursor: pointer; }
   .graph-legend .chip.graph-off { opacity: 0.4; text-decoration: line-through; }
 
-  /* The graph is a canvas, not a column: give it everything. */
+  /* The graph is a canvas, not a column: give it everything. The svg must
+     be styled here, not via a style attribute — the CSP refuses those. */
   main[data-view="graph"] { max-width: none; }
+  #graph-svg { width: 100%; display: block; touch-action: none; }
