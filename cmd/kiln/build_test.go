@@ -87,7 +87,7 @@ func TestCommandTreeShape(t *testing.T) {
 	// required. Losing one in a refactor should fail a test, not a user.
 	for _, path := range [][]string{
 		{"version"}, {"build"}, {"serve"}, {"worker"},
-		{"admin", "migrate"}, {"admin", "doctor"},
+		{"admin", "migrate"}, {"admin", "doctor"}, {"admin", "rotate-key"},
 		{"admin", "token", "create"}, {"admin", "token", "revoke"},
 	} {
 		cmd, _, err := root.Find(path)

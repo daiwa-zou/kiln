@@ -63,6 +63,14 @@ func (s *Server) guardAdmin(w http.ResponseWriter, r *http.Request) (store.Works
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": errNotAdmin})
 			return store.WorkspaceRow{}, false
 		}
+		// The admin scope is required in addition to the role: a token minted
+		// for the human-loop write API (steering, corrections) must not be
+		// able to seal credentials or reshape connectors. Browser sessions
+		// carry every scope; automation tokens opt in at mint time.
+		if !id.HasScope("admin") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "token lacks the admin scope"})
+			return store.WorkspaceRow{}, false
+		}
 		if !id.Admin {
 			role, err := s.Writes.WorkspaceRole(r.Context(), ws.ID, id.UserID)
 			if err != nil {

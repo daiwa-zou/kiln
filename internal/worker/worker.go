@@ -39,6 +39,8 @@ type Store interface {
 	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
 	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
 	FileReview(ctx context.Context, workspaceID, kind, title, detail string) error
+	RequeueRun(ctx context.Context, runID string) error
+	Sweep(ctx context.Context, softDeleteRetention, runRetention time.Duration) (int64, error)
 }
 
 // Worker is one claim-and-build loop.
@@ -65,6 +67,16 @@ type Worker struct {
 	// each run, spend at or past 80% of budget_usd files a warning review,
 	// so the pause the API enforces at 100% never arrives unannounced.
 	BudgetWindow time.Duration
+
+	// DrainGrace is how long an in-flight run may continue after shutdown is
+	// requested before it is interrupted and requeued. Zero takes a default
+	// comfortably above one agent call.
+	DrainGrace time.Duration
+
+	// Retention drives the hourly GC sweep; zero values disable each part.
+	SoftDeleteRetention time.Duration
+	RunRetention        time.Duration
+	lastSweep           time.Time
 
 	// lastSourcePoll throttles the scheduler to roughly one sweep per
 	// interval regardless of how fast the claim loop spins.
@@ -101,6 +113,9 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 		StaleAfter:           cfg.Worker.StaleAfter,
 		SourcePollInterval:   cfg.Worker.SourcePollInterval,
 		BudgetWindow:         cfg.Agent.BudgetWindow,
+		DrainGrace:           cfg.Worker.DrainGrace,
+		SoftDeleteRetention:  cfg.Storage.SoftDeleteRetention,
+		RunRetention:         cfg.Storage.RunArtifactRetention,
 		PermittedSourceRoots: cfg.Worker.PermittedSourceRoots,
 		MasterKey:            cfg.Secrets.MasterKey,
 		GitHub: &github.Client{
@@ -116,6 +131,12 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 // always ctx.Err(): queue and build failures are recorded on their runs and
 // logged, never allowed to kill the loop, because one poisoned run must not
 // take the worker down with it.
+//
+// Shutdown drains: cancellation stops claiming immediately, but the run in
+// flight keeps a detached context for DrainGrace so paid-for agent work can
+// land. Only past the grace window is the build interrupted — and then it is
+// requeued, not failed: a rolling deploy must never turn an in-flight build
+// into a permanent failure plus wasted spend.
 func (w *Worker) Run(ctx context.Context) error {
 	log := w.logger().With("worker", w.ID)
 	log.Info("worker started", "poll", w.poll().String())
@@ -128,6 +149,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 		w.requeueStale(ctx, log)
 		w.pollSources(ctx, log)
+		w.sweep(ctx, log)
 
 		run, err := w.Store.ClaimNextRun(ctx, w.ID)
 		if err != nil {
@@ -142,7 +164,26 @@ func (w *Worker) Run(ctx context.Context) error {
 			continue
 		}
 
-		w.process(ctx, run)
+		// The run outlives the shutdown signal by up to DrainGrace.
+		runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		graceDone := make(chan struct{})
+		go func() {
+			defer close(graceDone)
+			select {
+			case <-ctx.Done():
+				select {
+				case <-runCtx.Done(): // process finished first
+				case <-time.After(w.drainGrace()):
+					log.Warn("drain grace expired; interrupting the in-flight run")
+					cancel()
+				}
+			case <-runCtx.Done():
+			}
+		}()
+
+		w.process(runCtx, run)
+		cancel()
+		<-graceDone
 	}
 }
 
@@ -173,6 +214,14 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		defer cleanup()
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			// Interrupted while resolving, not misconfigured: requeue.
+			log.Warn("resolution interrupted by shutdown; requeuing")
+			if rerr := w.Store.RequeueRun(context.WithoutCancel(ctx), run.ID); rerr != nil {
+				log.Error("requeue after interruption failed", "error", rerr)
+			}
+			return
+		}
 		log.Error("run not executable", "error", err)
 		w.failRun(ctx, run.ID, err, log)
 		// A run pinned to one connector can attribute the failure to it;
@@ -209,11 +258,20 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	})
 
 	syncErr := ""
-	if err != nil {
+	switch {
+	case err != nil && ctx.Err() != nil:
+		// Interrupted by the drain deadline, not broken: back to the queue,
+		// where this or another worker picks it up cleanly.
+		syncErr = "interrupted by shutdown; requeued"
+		log.Warn("build interrupted by shutdown; requeuing")
+		if rerr := w.Store.RequeueRun(context.WithoutCancel(ctx), run.ID); rerr != nil {
+			log.Error("requeue after interruption failed", "error", rerr)
+		}
+	case err != nil:
 		syncErr = err.Error()
 		log.Error("build failed", "error", err)
 		w.failRun(ctx, run.ID, err, log)
-	} else {
+	default:
 		log.Info("build finished", "status", res.Summary.Status,
 			"cost_usd", res.Summary.CostUSD,
 			"created", res.Summary.Created, "updated", res.Summary.Updated)
@@ -505,6 +563,31 @@ func (w *Worker) poll() time.Duration {
 		return w.Poll
 	}
 	return 5 * time.Second
+}
+
+func (w *Worker) drainGrace() time.Duration {
+	if w.DrainGrace > 0 {
+		return w.DrainGrace
+	}
+	return 15 * time.Minute // above one agent call's timeout
+}
+
+// sweep enforces retention roughly hourly: soft-deleted pages past their
+// window, expired sessions, dead tokens, and finished runs past theirs. The
+// knobs and the purge index have existed since M0; this is the purger.
+func (w *Worker) sweep(ctx context.Context, log *slog.Logger) {
+	if time.Since(w.lastSweep) < time.Hour {
+		return
+	}
+	w.lastSweep = time.Now()
+	swept, err := w.Store.Sweep(ctx, w.SoftDeleteRetention, w.RunRetention)
+	if err != nil {
+		log.Error("gc sweep failed", "error", err)
+		return
+	}
+	if swept > 0 {
+		log.Info("gc sweep removed expired rows", "rows", swept)
+	}
 }
 
 func (w *Worker) logger() *slog.Logger {
