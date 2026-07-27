@@ -42,6 +42,7 @@ func (f *fakeStore) EnqueueRun(context.Context, string, string, string) (string,
 	return "", false, nil
 }
 func (f *fakeStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) { return nil, nil }
+func (f *fakeStore) LastSuccessfulRef(context.Context, string) (string, error)    { return "", nil }
 func (f *fakeStore) SpendInWindow(context.Context, string, time.Duration) (float64, error) {
 	return 0, nil
 }

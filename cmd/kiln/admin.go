@@ -179,8 +179,9 @@ func newDoctorCmd(g *globalFlags) *cobra.Command {
 		Use:   "doctor",
 		Short: "Validate configuration and dependencies",
 		Long: `Checks the whole configuration surface in one pass rather than failing one
-problem per restart: database reachability and schema version, object storage,
-the master key, and the claude binary.`,
+problem per restart: database reachability, schema version, and the master key.
+Further checks (object storage, GitHub App credentials, the claude binary)
+land as their subsystems do.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()

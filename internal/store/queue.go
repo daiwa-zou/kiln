@@ -18,12 +18,25 @@ import (
 // QueuedRun is one claimed unit of work, joined with the workspace fields the
 // worker needs to build without a second round trip.
 type QueuedRun struct {
-	ID            string
-	WorkspaceID   string
-	ConnectorID   string // empty when the run is not pinned to one connector
-	Trigger       string
+	ID          string
+	WorkspaceID string
+	ConnectorID string // empty when the run is not pinned to one connector
+	Trigger     string
+	// RefTo is the pushed head this run should build toward, when the
+	// trigger knew one. The base of the range is not stored anywhere: the
+	// worker derives it from the last successful build.
+	RefTo         string
 	WorkspaceSlug string
 	OrgSlug       string
+}
+
+// EnqueueOptions carries the optional incremental-build fields.
+type EnqueueOptions struct {
+	// RefTo is the head the triggering event pushed, empty when unknown.
+	RefTo string
+	// NotBefore delays claiming, which is how the webhook completion
+	// cooldown is expressed without dropping events.
+	NotBefore time.Time
 }
 
 // EnqueueRun files a build request for a workspace. When the workspace already
@@ -31,16 +44,29 @@ type QueuedRun struct {
 // false: the partial unique index makes double-submission and webhook storms
 // collapse into the one run already waiting.
 func (s *WikiStore) EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (runID string, created bool, err error) {
+	return s.EnqueueRunOpts(ctx, workspaceID, trigger, connectorID, EnqueueOptions{})
+}
+
+// EnqueueRunOpts is EnqueueRun with the incremental fields. A debounced
+// enqueue advances the waiting run's ref_to to the newest head, so a push
+// storm's final state is what gets built; a run already claimed cannot be
+// updated, and loses nothing — the range base always derives from the last
+// successful build, so the next enqueue covers the gap.
+func (s *WikiStore) EnqueueRunOpts(ctx context.Context, workspaceID, trigger, connectorID string, opts EnqueueOptions) (runID string, created bool, err error) {
+	var notBefore any
+	if !opts.NotBefore.IsZero() {
+		notBefore = opts.NotBefore
+	}
 	// Bounded: each pass can lose one insert/finish race (the active run
 	// finishes between our conflicting insert and the read-back), and losing
 	// it repeatedly means something is wrong enough to surface.
 	for attempt := 0; attempt < 3; attempt++ {
 		err = s.pool.QueryRow(ctx, `
-			INSERT INTO runs (workspace_id, connector_id, trigger, status)
-			VALUES ($1, $2, $3, 'queued')
+			INSERT INTO runs (workspace_id, connector_id, trigger, status, ref_to, not_before)
+			VALUES ($1, $2, $3, 'queued', $4, $5)
 			ON CONFLICT (workspace_id) WHERE status IN ('queued','running') DO NOTHING
 			RETURNING id`,
-			workspaceID, nullable(connectorID), trigger).Scan(&runID)
+			workspaceID, nullable(connectorID), trigger, nullable(opts.RefTo), notBefore).Scan(&runID)
 		if err == nil {
 			return runID, true, nil
 		}
@@ -48,7 +74,17 @@ func (s *WikiStore) EnqueueRun(ctx context.Context, workspaceID, trigger, connec
 			return "", false, fmt.Errorf("store: enqueue run: %w", err)
 		}
 
-		// Conflict path: surface the active run so the caller can report it.
+		// Conflict path: advance the waiting run's target head, then surface
+		// the active run so the caller can report it. A running (claimed)
+		// run is left alone.
+		if opts.RefTo != "" {
+			if _, err := s.pool.Exec(ctx, `
+				UPDATE runs SET ref_to = $2
+				WHERE workspace_id = $1 AND status = 'queued'`,
+				workspaceID, opts.RefTo); err != nil {
+				return "", false, fmt.Errorf("store: advance ref_to: %w", err)
+			}
+		}
 		err = s.pool.QueryRow(ctx, `
 			SELECT id FROM runs
 			WHERE workspace_id = $1 AND status IN ('queued','running')
@@ -73,6 +109,7 @@ func (s *WikiStore) ClaimNextRun(ctx context.Context, workerID string) (*QueuedR
 		run       QueuedRun
 		connector *string
 	)
+	var refTo *string
 	err := s.pool.QueryRow(ctx, `
 		UPDATE runs r
 		SET status = 'running', claimed_by = $1, claimed_at = now(), started_at = now()
@@ -80,13 +117,14 @@ func (s *WikiStore) ClaimNextRun(ctx context.Context, workerID string) (*QueuedR
 		WHERE r.id = (
 		    SELECT id FROM runs
 		    WHERE status = 'queued'
+		      AND (not_before IS NULL OR not_before <= now())
 		    ORDER BY created_at
 		    FOR UPDATE SKIP LOCKED
 		    LIMIT 1)
 		  AND w.id = r.workspace_id
-		RETURNING r.id, r.workspace_id, r.connector_id, r.trigger, w.slug, o.slug`,
+		RETURNING r.id, r.workspace_id, r.connector_id, r.trigger, r.ref_to, w.slug, o.slug`,
 		workerID).Scan(&run.ID, &run.WorkspaceID, &connector, &run.Trigger,
-		&run.WorkspaceSlug, &run.OrgSlug)
+		&refTo, &run.WorkspaceSlug, &run.OrgSlug)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -96,7 +134,32 @@ func (s *WikiStore) ClaimNextRun(ctx context.Context, workerID string) (*QueuedR
 	if connector != nil {
 		run.ConnectorID = *connector
 	}
+	if refTo != nil {
+		run.RefTo = *refTo
+	}
 	return &run, nil
+}
+
+// LastSuccessfulRef returns the ref the workspace's newest completed build
+// recorded, or "" when none has. This is the base of every incremental
+// range: deriving it here rather than trusting the webhook's "before" means
+// debounced or dropped pushes can never leave a hole in the diff.
+func (s *WikiStore) LastSuccessfulRef(ctx context.Context, workspaceID string) (string, error) {
+	var ref *string
+	err := s.pool.QueryRow(ctx, `
+		SELECT ref FROM runs
+		WHERE workspace_id = $1
+		  AND status IN ('succeeded', 'partial')
+		  AND ref IS NOT NULL
+		ORDER BY finished_at DESC NULLS LAST
+		LIMIT 1`, workspaceID).Scan(&ref)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && ref == nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: last successful ref: %w", err)
+	}
+	return *ref, nil
 }
 
 // FailRun finishes a claimed run that never reached the pipeline -- a sync or
