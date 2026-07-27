@@ -35,6 +35,12 @@ func (f *fakeStore) ConnectorByID(_ context.Context, id string) (*store.Connecto
 func (f *fakeStore) LoadSealedCredential(_ context.Context, id string) (*store.SealedCredential, error) {
 	return nil, store.ErrNotFound
 }
+func (f *fakeStore) PollDueConnectors(context.Context, time.Duration) ([]store.ConnectorRow, error) {
+	return nil, nil
+}
+func (f *fakeStore) EnqueueRun(context.Context, string, string, string) (string, bool, error) {
+	return "", false, nil
+}
 
 func run(ws string) *store.QueuedRun {
 	return &store.QueuedRun{ID: "r1", WorkspaceID: ws, WorkspaceSlug: "bench", Trigger: "manual"}

@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -11,6 +13,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/crypto"
+	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -46,6 +49,17 @@ processes separately so builds scale independently of the API.`,
 				cfg.HTTPAddr = addr
 			}
 
+			// With auth disabled every caller is an admin. On loopback that
+			// is a personal-machine convenience; on any reachable interface
+			// it hands the whole instance to the network. Refusing to start
+			// is the only honest behavior.
+			if cfg.Auth.Mode == config.AuthNone && !loopbackAddr(cfg.HTTPAddr) {
+				return fmt.Errorf(
+					"refusing to serve %s with auth.mode = \"none\": every caller would be an admin.\n"+
+						"Bind a loopback address (e.g. 127.0.0.1:8080) or enable token auth",
+					cfg.HTTPAddr)
+			}
+
 			log := observability.NewLogger(firstNonEmpty(g.logLevel, cfg.LogLevel))
 
 			db, err := store.Open(ctx, cfg)
@@ -66,6 +80,7 @@ processes separately so builds scale independently of the API.`,
 				Writes:       ws,
 				Runs:         ws,
 				Admin:        ws,
+				Members:      ws,
 				BudgetWindow: cfg.Agent.BudgetWindow,
 				DB:           db,
 				Log:          log,
@@ -80,10 +95,39 @@ processes separately so builds scale independently of the API.`,
 				}
 				srv.Keyring = keyring
 			}
+			gh := &github.Client{
+				ClientID:     cfg.GitHub.ClientID,
+				ClientSecret: cfg.Secrets.GitHubClientSecret,
+				AppID:        cfg.GitHub.AppID,
+				PrivateKey:   []byte(cfg.Secrets.GitHubPrivateKey),
+				BaseURL:      cfg.GitHub.BaseURL,
+				APIBaseURL:   cfg.GitHub.APIBaseURL,
+			}
+			if gh.SignInConfigured() {
+				srv.GitHub = gh
+				srv.Users = ws
+				srv.SessionPool = db.Pool
+				srv.SessionTTL = cfg.GitHub.SessionTTL
+				fmt.Fprintln(cmd.OutOrStdout(), "  GitHub sign-in enabled")
+			}
+			if cfg.Secrets.GitHubWebhookSecret != "" {
+				srv.Hooks = ws
+				srv.WebhookSecret = []byte(cfg.Secrets.GitHubWebhookSecret)
+				srv.WebhookCooldown = cfg.GitHub.WebhookCooldown
+				fmt.Fprintln(cmd.OutOrStdout(), "  GitHub webhook ingress enabled at /hooks/github")
+			}
+
 			if cfg.Auth.Mode == config.AuthNone {
 				log.Warn("API authentication is disabled (auth.mode = none); every bench is readable by anyone who can reach this port")
 			} else {
-				srv.Auth = &auth.Middleware{Source: &auth.PGSource{Pool: db.Pool}, Log: log}
+				source := &auth.PGSource{Pool: db.Pool}
+				m := &auth.Middleware{Source: source, Log: log}
+				if gh.SignInConfigured() {
+					// Cookie sessions ride the same identity pipeline as
+					// bearer tokens; CSRF is enforced inside the middleware.
+					m.Sessions = source
+				}
+				srv.Auth = m
 			}
 
 			out := cmd.OutOrStdout()
@@ -106,4 +150,19 @@ processes separately so builds scale independently of the API.`,
 	cmd.Flags().BoolVar(&withWorker, "with-worker", false, "also run a build worker in this process")
 
 	return cmd
+}
+
+// loopbackAddr reports whether a listen address can only be reached from
+// this machine. An empty host (":8080") binds every interface and is not
+// loopback.
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

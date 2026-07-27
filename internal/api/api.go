@@ -20,8 +20,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/daiwa-zou/kiln/internal/auth"
+	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
 	"github.com/daiwa-zou/kiln/internal/wiki"
@@ -81,9 +83,28 @@ type Server struct {
 	// Admin backs the connector and credential CRUD. Nil leaves those routes
 	// unmounted.
 	Admin AdminStore
+	// Members backs org membership management. Nil leaves it unmounted.
+	Members MemberStore
 	// Keyring seals credentials at write time. Nil (no master key configured)
 	// keeps connector CRUD working but answers credential writes with 503.
 	Keyring *Keyring
+
+	// GitHub, Users, SessionPool, and SessionTTL enable browser sign-in. The
+	// /auth routes mount only when the GitHub client has OAuth credentials.
+	GitHub      *github.Client
+	Users       UserStore
+	SessionPool *pgxpool.Pool
+	SessionTTL  time.Duration
+
+	// Hooks and WebhookSecret enable /hooks/github; the route mounts only
+	// when both are present. WebhookCooldown is the quiet period after a
+	// finished run during which pushes do not start another.
+	Hooks           HookStore
+	WebhookSecret   []byte
+	WebhookCooldown time.Duration
+
+	// hookLimit buckets webhook deliveries per remote host; created by Router().
+	hookLimit *limiter
 
 	// writeLimit buckets mutating requests per caller; created by Router().
 	writeLimit *limiter
@@ -120,6 +141,23 @@ func (s *Server) Router() http.Handler {
 	})
 	r.Get("/readyz", s.handleReady)
 
+	// Sign-in lives outside the API auth wrap by nature: its whole job is to
+	// create the credentials the wrap checks.
+	if s.GitHub.SignInConfigured() && s.Users != nil && s.SessionPool != nil {
+		r.Get("/auth/github/login", s.handleGitHubLogin)
+		r.Get("/auth/github/callback", s.handleGitHubCallback)
+		r.Post("/auth/logout", s.handleLogout)
+	}
+
+	// Webhook ingress: GitHub cannot carry a kiln token, so this sits outside
+	// auth.Wrap behind its own HMAC check, size cap, and rate limit.
+	if s.Hooks != nil && len(s.WebhookSecret) > 0 {
+		if s.hookLimit == nil {
+			s.hookLimit = newLimiter()
+		}
+		r.With(writeLimiter(s.hookLimit)).Post("/hooks/github", s.handleGitHubWebhook)
+	}
+
 	r.Route("/api/v1", func(r chi.Router) {
 		// Version stays outside auth so the UI can render a sensible sign-in
 		// state; it discloses nothing about content.
@@ -128,6 +166,9 @@ func (s *Server) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			if s.Auth != nil {
 				r.Use(s.Auth.Wrap)
+			}
+			if s.Users != nil {
+				r.Get("/me", s.handleMe)
 			}
 			r.Get("/workspaces", s.handleWorkspaces)
 
@@ -164,6 +205,17 @@ func (s *Server) Router() http.Handler {
 						r.Get("/credentials", s.handleCredentialsList)
 						r.Post("/credentials", s.handleCredentialCreate)
 						r.Delete("/credentials/{id}", s.handleCredentialDelete)
+					})
+				}
+
+				if s.Members != nil {
+					// Membership: the same owner/admin gate as connectors.
+					r.Group(func(r chi.Router) {
+						r.Use(writeLimiter(s.writeLimit))
+						r.Get("/members", s.handleMembersList)
+						r.Post("/members", s.handleMemberAdd)
+						r.Patch("/members/{userID}", s.handleMemberPatch)
+						r.Delete("/members/{userID}", s.handleMemberRemove)
 					})
 				}
 
@@ -236,10 +288,12 @@ func (s *Server) scope(r *http.Request) (userID string, admin bool) {
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	// The UI compares this to its own build so a skewed pair is visible rather
-	// than mysterious.
+	// than mysterious. githubSignIn tells the sign-in form whether to offer
+	// the OAuth button; it discloses only that the deployment configured it.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":       observability.Version,
 		"schemaVersion": store.SchemaVersion,
+		"githubSignIn":  s.GitHub.SignInConfigured(),
 	})
 }
 

@@ -32,7 +32,30 @@ type Config struct {
 	Agent    Agent    `mapstructure:"agent"`
 	Auth     Auth     `mapstructure:"auth"`
 	Worker   Worker   `mapstructure:"worker"`
+	GitHub   GitHub   `mapstructure:"github"`
 	Secrets  Secrets  `mapstructure:"-"`
+}
+
+// GitHub configures the GitHub App integration: OAuth sign-in and
+// installation tokens for clones. Everything here is public identity; the
+// client secret, webhook secret, and private key travel through Secrets.
+type GitHub struct {
+	// ClientID is the App's OAuth client id. Empty disables sign-in.
+	ClientID string `mapstructure:"client_id"`
+	// AppID is the numeric App id, for installation tokens.
+	AppID int64 `mapstructure:"app_id"`
+	// AppSlug names the App's public install page.
+	AppSlug string `mapstructure:"app_slug"`
+	// BaseURL and APIBaseURL override github.com, for GitHub Enterprise and
+	// for tests.
+	BaseURL    string `mapstructure:"base_url"`
+	APIBaseURL string `mapstructure:"api_base_url"`
+	// SessionTTL is how long a browser session lives.
+	SessionTTL time.Duration `mapstructure:"session_ttl"`
+	// WebhookCooldown is the quiet period after a finished run during which
+	// further pushes do not enqueue another, so a push storm costs one
+	// rebuild. Zero disables the cooldown.
+	WebhookCooldown time.Duration `mapstructure:"webhook_cooldown"`
 }
 
 // Worker holds settings for the build worker loop.
@@ -42,6 +65,9 @@ type Worker struct {
 	// StaleAfter is how long a claimed run may hold 'running' before it is
 	// assumed orphaned by a dead worker and returned to the queue.
 	StaleAfter time.Duration `mapstructure:"stale_after"`
+	// SourcePollInterval is how often trigger_mode='poll' connectors are due
+	// for a refresh. Zero disables the poll scheduler.
+	SourcePollInterval time.Duration `mapstructure:"source_poll_interval"`
 	// PermittedSourceRoots are the only directories a database-configured
 	// connector may read from. Empty means every local path is denied: a
 	// connector config is API-writable data, and an unchecked path would be a
@@ -182,6 +208,7 @@ type Secrets struct {
 	MasterKey           string
 	AnthropicAPIKey     string
 	SessionSecret       string
+	GitHubClientSecret  string
 	GitHubPrivateKey    string
 	GitHubWebhookSecret string
 	StorageSecretKey    string

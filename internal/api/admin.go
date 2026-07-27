@@ -40,14 +40,16 @@ var (
 	connectorKinds    = []string{"git", "upload"}
 	credentialKinds   = []string{"git_pat"}
 	triggerModes      = []string{"manual", "webhook", "poll"}
-	errNotAdmin       = "admin token required"
+	errNotAdmin       = "requires an instance admin or an owner of this bench's org"
 	errNoKeyring      = "credentials are unavailable: no master key is configured (set KILN_MASTER_KEY and restart)"
 	errUnknownKind    = "unknown kind"
 	errUnknownTrigger = "unknown trigger mode"
 )
 
-// guardAdmin resolves the workspace and requires an admin caller. Editors and
-// viewers get 403; the workspace resolution before it keeps 404-vs-403
+// guardAdmin resolves the workspace and requires an instance admin or an
+// owner of the workspace's org. Owners shape their own org — connectors,
+// credentials, membership — which is the tenancy line M3 draws: editors and
+// viewers get 403, and the workspace resolution before it keeps 404-vs-403
 // behavior consistent with the rest of the API.
 func (s *Server) guardAdmin(w http.ResponseWriter, r *http.Request) (store.WorkspaceRow, bool) {
 	ws, ok := s.resolve(w, r)
@@ -56,9 +58,20 @@ func (s *Server) guardAdmin(w http.ResponseWriter, r *http.Request) (store.Works
 	}
 	if s.Auth != nil {
 		id, found := auth.FromContext(r.Context())
-		if !found || !id.Admin {
+		if !found {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": errNotAdmin})
 			return store.WorkspaceRow{}, false
+		}
+		if !id.Admin {
+			role, err := s.Writes.WorkspaceRole(r.Context(), ws.ID, id.UserID)
+			if err != nil {
+				s.fail(w, err)
+				return store.WorkspaceRow{}, false
+			}
+			if role != "owner" {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": errNotAdmin})
+				return store.WorkspaceRow{}, false
+			}
 		}
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAdminBodyBytes)

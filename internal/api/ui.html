@@ -456,6 +456,7 @@
       <a href="#/gaps" data-view="gaps">Gaps</a>
       <a href="#/reviews" data-view="reviews">Reviews <span class="badge" id="reviews-badge" hidden></span></a>
       <a href="#/runs" data-view="runs">Runs</a>
+      <a href="#/members" data-view="members">Members</a>
       <a href="#/log" data-view="log">Log</a>
       <a href="#/steering" data-view="steering">Steering</a>
     </nav>
@@ -650,11 +651,20 @@ function matchPages(q) {
   return out.sort((a, b) => b.score - a.score);
 }
 
+// csrfToken reads the double-submit cookie a GitHub session sets. Its
+// presence is also the "signed in with a session" signal, since the session
+// cookie itself is HttpOnly.
+const csrfToken = () =>
+  document.cookie.split("; ").find((c) => c.startsWith("kiln_csrf="))?.slice(10) || "";
+
 const api = async (path, opts = {}) => {
   const method = opts.method || "GET";
   const headers = {};
   const token = localStorage.getItem(TOKEN_KEY);
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  // Cookie-authenticated mutations must echo the CSRF cookie in a header;
+  // harmless to send alongside a bearer token, which ignores it.
+  if (method !== "GET" && csrfToken()) headers["X-CSRF-Token"] = csrfToken();
 
   let body;
   if (opts.body !== undefined) {
@@ -701,9 +711,13 @@ function showTokenForm(hadToken) {
     ${hadToken ? `<div class="banner" role="alert">That token was rejected. It may be revoked or expired.</div>` : ""}
     <svg class="logo logo-signin" aria-hidden="true"><use href="#logo-mark"/></svg>
     <h1>Sign in</h1>
-    <p class="hint">This kiln requires an access token. Mint one with
-      <code>kiln admin token create --login you</code> and paste it here.
-      It is stored only in this browser.</p>
+    ${state.githubSignIn ? `
+      <p class="hint">Sign in with your GitHub account:</p>
+      <a class="btn" href="/auth/github/login">Sign in with GitHub</a>
+      <p class="hint" style="margin-top:20px">Or use an access token.</p>` : `
+      <p class="hint">This kiln requires an access token. Mint one with
+        <code>kiln admin token create --login you</code> and paste it here.
+        It is stored only in this browser.</p>`}
     <input id="token-input" type="password" placeholder="kiln_…" aria-label="Access token"
            autocomplete="off" spellcheck="false">
     <button id="token-save" class="btn">Save token</button>`;
@@ -1496,6 +1510,90 @@ async function showRuns() {
   }
 }
 
+// showMembers manages the org behind this bench: who belongs, with what
+// role. Owners and instance admins only; everyone else sees the explanation
+// rather than a broken form.
+async function showMembers() {
+  const view = beginView("Members", "members");
+  try {
+    let members;
+    try {
+      members = await api(`/workspaces/${encodeURIComponent(state.workspace)}/members`);
+    } catch (err) {
+      if (err.handled) return;
+      view.done(`<h1>Members</h1><div class="empty">${esc(err.message)}</div>`);
+      return;
+    }
+    const roleSelect = (m) => `<select data-member="${esc(m.userId)}" aria-label="Role for ${esc(m.login)}">
+      ${["viewer", "member", "owner"].map((r) =>
+        `<option value="${r}" ${m.role === r ? "selected" : ""}>${r}</option>`).join("")}
+    </select>`;
+
+    if (!view.done(`<h1>Members</h1>
+      <p class="hint">Roles: viewers read, members write content, owners manage
+      connectors, credentials, and this list. The last owner cannot be removed.</p>
+      <div id="member-note" class="hint" role="status"></div>
+      ${members.map((m) => `
+        <div class="row">
+          <span><strong>${esc(m.login)}</strong>${m.name ? ` <span class="count">${esc(m.name)}</span>` : ""}</span>
+          <span>${roleSelect(m)}
+            <button class="btn quiet" data-remove="${esc(m.userId)}">remove</button></span>
+        </div>`).join("")}
+      <label class="group-label" for="member-login">Add a member</label>
+      <div class="row">
+        <input id="member-login" placeholder="github login" autocomplete="off" spellcheck="false">
+        <span>
+          <select id="member-role" aria-label="Role for new member">
+            <option>viewer</option><option selected>member</option><option>owner</option>
+          </select>
+          <button class="btn" id="member-add">Add</button>
+        </span>
+      </div>`)) return;
+
+    const note = (msg, isError) => {
+      const n = $("member-note");
+      if (n) { n.textContent = msg; n.classList.toggle("error", Boolean(isError)); }
+    };
+    for (const sel of document.querySelectorAll("select[data-member]")) {
+      sel.addEventListener("change", async () => {
+        try {
+          await api(`/workspaces/${encodeURIComponent(state.workspace)}/members/${encodeURIComponent(sel.dataset.member)}`,
+            { method: "PATCH", body: { role: sel.value } });
+          toast("Role updated");
+        } catch (err) {
+          if (!err.handled) { note(err.message, true); showMembers(); }
+        }
+      });
+    }
+    for (const b of document.querySelectorAll("[data-remove]")) {
+      once(b, async () => {
+        try {
+          await api(`/workspaces/${encodeURIComponent(state.workspace)}/members/${encodeURIComponent(b.dataset.remove)}`,
+            { method: "DELETE" });
+          toast("Member removed");
+          showMembers();
+        } catch (err) {
+          if (!err.handled) note(err.message, true);
+        }
+      });
+    }
+    once($("member-add"), async () => {
+      const login = $("member-login").value.trim();
+      if (!login) return;
+      try {
+        await api(`/workspaces/${encodeURIComponent(state.workspace)}/members`,
+          { method: "POST", body: { login, role: $("member-role").value } });
+        toast(`Added ${login}`);
+        showMembers();
+      } catch (err) {
+        if (!err.handled) note(err.message, true);
+      }
+    });
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
+}
+
 // showSteering edits the purpose and schema documents: the main lever for
 // changing a wiki's character, injected into every prompt from the next run.
 async function showSteering() {
@@ -1604,6 +1702,7 @@ function route() {
   if (hash === "reviews") return showReviews(false);
   if (hash === "reviews/all") return showReviews(true);
   if (hash === "runs") return showRuns();
+  if (hash === "members") return showMembers();
   if (hash === "steering") return showSteering();
   return showArtifact("overview");
 }
@@ -1622,7 +1721,7 @@ function setDrawer(open) {
 const VIEW_COMMANDS = [
   { title: "Overview", hash: "#/overview" }, { title: "Index", hash: "#/index" },
   { title: "Gaps", hash: "#/gaps" }, { title: "Reviews", hash: "#/reviews" },
-  { title: "Runs", hash: "#/runs" },
+  { title: "Runs", hash: "#/runs" }, { title: "Members", hash: "#/members" },
   { title: "Log", hash: "#/log" }, { title: "Steering", hash: "#/steering" },
 ];
 let closePalette = null, palRows = [], palSelection = 0;
@@ -1783,8 +1882,9 @@ async function boot() {
   });
 
   try {
-    const { version } = await api("/version");
+    const { version, githubSignIn } = await api("/version");
     $("version").textContent = version;
+    state.githubSignIn = Boolean(githubSignIn);
 
     const workspaces = await api("/workspaces");
     if (!workspaces.length) {
@@ -1814,11 +1914,19 @@ async function boot() {
         location.hash = "#/search/" + encodeURIComponent(e.target.value.trim());
       }
     });
-    if (localStorage.getItem(TOKEN_KEY)) {
+    if (localStorage.getItem(TOKEN_KEY) || csrfToken()) {
       const so = $("signout");
       so.hidden = false;
-      so.addEventListener("click", () => {
+      so.addEventListener("click", async () => {
         localStorage.removeItem(TOKEN_KEY);
+        // A GitHub session is server-side: revoke it, not just the cookie.
+        if (csrfToken()) {
+          try {
+            await fetch("/auth/logout", {
+              method: "POST", headers: { "X-CSRF-Token": csrfToken() },
+            });
+          } catch { /* the reload lands on the sign-in form either way */ }
+        }
         location.reload();
       });
     }

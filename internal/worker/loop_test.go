@@ -27,6 +27,9 @@ type loopStore struct {
 	// pinned is what ConnectorByID returns when set, for scripting a run
 	// pinned to one connector.
 	pinned *store.ConnectorRow
+	// pollDue and enqueued script and record the poll scheduler.
+	pollDue  []store.ConnectorRow
+	enqueued []string
 
 	claimErr   error
 	requeueErr error
@@ -100,6 +103,19 @@ func (l *loopStore) LoadSealedCredential(_ context.Context, id string) (*store.S
 		return c, nil
 	}
 	return nil, store.ErrNotFound
+}
+
+func (l *loopStore) PollDueConnectors(context.Context, time.Duration) ([]store.ConnectorRow, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.pollDue, nil
+}
+
+func (l *loopStore) EnqueueRun(_ context.Context, workspaceID, trigger, connectorID string) (string, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.enqueued = append(l.enqueued, trigger+":"+connectorID)
+	return "run-" + connectorID, true, nil
 }
 
 func TestNewWiresConfigAndIdentity(t *testing.T) {
@@ -203,6 +219,46 @@ func TestRequeueStaleRunsThroughTheLoop(t *testing.T) {
 	defer st.mu.Unlock()
 	if st.requeue == 0 {
 		t.Error("stale requeue never ran")
+	}
+}
+
+func TestPollSchedulerEnqueuesDueConnectors(t *testing.T) {
+	st := newLoopStore()
+	st.pollDue = []store.ConnectorRow{
+		{ID: "c1", WorkspaceID: "ws1", Name: "repo-a", TriggerMode: "poll"},
+		{ID: "c2", WorkspaceID: "ws2", Name: "repo-b", TriggerMode: "poll"},
+	}
+	w := &Worker{Store: st, Poll: time.Millisecond, SourcePollInterval: 10 * time.Minute}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = w.Run(ctx)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.enqueued) != 2 {
+		t.Fatalf("enqueued = %v, want both due connectors", st.enqueued)
+	}
+	for _, e := range st.enqueued {
+		if !strings.HasPrefix(e, "poll:") {
+			t.Errorf("enqueue %q not tagged with the poll trigger", e)
+		}
+	}
+}
+
+func TestPollSchedulerDisabledByZeroInterval(t *testing.T) {
+	st := newLoopStore()
+	st.pollDue = []store.ConnectorRow{{ID: "c1", WorkspaceID: "ws1", TriggerMode: "poll"}}
+	w := &Worker{Store: st, Poll: time.Millisecond} // SourcePollInterval zero
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_ = w.Run(ctx)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.enqueued) != 0 {
+		t.Errorf("scheduler ran despite being disabled: %v", st.enqueued)
 	}
 }
 

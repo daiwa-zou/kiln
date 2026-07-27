@@ -41,43 +41,89 @@ func FromContext(ctx context.Context) (Identity, bool) {
 	return id, ok
 }
 
-// Middleware authenticates every request with a bearer token.
+// Middleware authenticates every request with a bearer token or, when
+// Sessions is set, a browser session cookie.
 type Middleware struct {
 	Source Source
-	Log    *slog.Logger
+	// Sessions enables cookie authentication. Nil keeps the middleware
+	// token-only, which is the correct posture for deployments that never
+	// turned sign-in on.
+	Sessions SessionSource
+	Log      *slog.Logger
 }
 
 // Wrap enforces authentication and the read scope on the wrapped handler.
 // Write scopes are checked here too, so future mutating routes are covered the
 // day they are added rather than the day someone remembers.
+//
+// An Authorization header always wins over a cookie: API clients keep exact
+// token semantics even from a browser that also carries a session. Cookie
+// authentication additionally enforces the CSRF double-submit on mutations —
+// cookies are ambient authority, sent by the browser on an attacker's behalf,
+// which is precisely what bearer tokens are immune to and cookies are not.
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		plain, ok := bearerToken(r)
-		if !ok || !looksLikeToken(plain) {
-			deny(w, http.StatusUnauthorized, "missing or malformed bearer token")
-			return
-		}
-
-		id, err := m.Source.IdentityForToken(r.Context(), HashToken(plain))
-		switch {
-		case errors.Is(err, ErrUnauthenticated):
-			deny(w, http.StatusUnauthorized, "invalid or expired token")
-			return
-		case err != nil:
-			if m.Log != nil {
-				m.Log.Error("auth lookup failed", "err", err)
+		if plain, ok := bearerToken(r); ok {
+			if !looksLikeToken(plain) {
+				deny(w, http.StatusUnauthorized, "missing or malformed bearer token")
+				return
 			}
-			deny(w, http.StatusInternalServerError, "internal error")
+			id, err := m.Source.IdentityForToken(r.Context(), HashToken(plain))
+			if !m.handled(w, err, id, r) {
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, id)))
 			return
 		}
 
-		if !id.HasScope(requiredScope(r.Method)) {
-			deny(w, http.StatusForbidden, "token lacks the required scope")
-			return
+		if m.Sessions != nil {
+			if c, err := r.Cookie(SessionCookie); err == nil && c.Value != "" {
+				id, csrf, err := m.Sessions.IdentityForSession(r.Context(), HashToken(c.Value))
+				if !m.handled(w, err, id, r) {
+					return
+				}
+				// A session without a stored CSRF token never mutates: the
+				// empty string must not compare equal to an absent header.
+				if mutating(r.Method) && (csrf == "" || r.Header.Get(CSRFHeader) != csrf) {
+					deny(w, http.StatusForbidden, "missing or mismatched CSRF token")
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, id)))
+				return
+			}
 		}
 
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, id)))
+		deny(w, http.StatusUnauthorized, "missing or malformed bearer token")
 	})
+}
+
+// handled writes the failure response for a lookup, returning true when the
+// request may proceed.
+func (m *Middleware) handled(w http.ResponseWriter, err error, id Identity, r *http.Request) bool {
+	switch {
+	case errors.Is(err, ErrUnauthenticated):
+		deny(w, http.StatusUnauthorized, "invalid or expired credentials")
+		return false
+	case err != nil:
+		if m.Log != nil {
+			m.Log.Error("auth lookup failed", "err", err)
+		}
+		deny(w, http.StatusInternalServerError, "internal error")
+		return false
+	}
+	if !id.HasScope(requiredScope(r.Method)) {
+		deny(w, http.StatusForbidden, "token lacks the required scope")
+		return false
+	}
+	return true
+}
+
+func mutating(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return true
 }
 
 func requiredScope(method string) string {

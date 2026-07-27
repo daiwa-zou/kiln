@@ -17,6 +17,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/config"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 	"github.com/daiwa-zou/kiln/internal/crypto"
+	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -31,6 +32,8 @@ type Store interface {
 	ConnectorByID(ctx context.Context, id string) (*store.ConnectorRow, error)
 	MarkConnectorSync(ctx context.Context, id, syncErr string) error
 	LoadSealedCredential(ctx context.Context, id string) (*store.SealedCredential, error)
+	PollDueConnectors(ctx context.Context, olderThan time.Duration) ([]store.ConnectorRow, error)
+	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error)
 }
 
 // Worker is one claim-and-build loop.
@@ -48,6 +51,15 @@ type Worker struct {
 	Poll       time.Duration
 	StaleAfter time.Duration
 
+	// SourcePollInterval is how often trigger_mode='poll' connectors are due
+	// for a refresh, for origins with no useful webhook. Zero disables the
+	// scheduler.
+	SourcePollInterval time.Duration
+
+	// lastSourcePoll throttles the scheduler to roughly one sweep per
+	// interval regardless of how fast the claim loop spins.
+	lastSourcePoll time.Time
+
 	// PermittedSourceRoots is the local-path allowlist for database-configured
 	// connectors. Empty denies every local path: connector configs are
 	// API-writable data, and an unchecked path is a local-file-inclusion
@@ -57,6 +69,11 @@ type Worker struct {
 	// MasterKey opens sealed credentials, here and nowhere else: the worker
 	// at sync time is the single place plaintext secrets are reconstructed.
 	MasterKey string
+
+	// GitHub mints installation tokens for clones when a connector names a
+	// github installation. Short-lived and repo-scoped, these supersede
+	// stored PATs wherever the App is installed.
+	GitHub *github.Client
 }
 
 // New assembles a worker from resolved configuration.
@@ -72,8 +89,15 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 		ID:                   fmt.Sprintf("%s-%d", host, os.Getpid()),
 		Poll:                 cfg.Worker.PollInterval,
 		StaleAfter:           cfg.Worker.StaleAfter,
+		SourcePollInterval:   cfg.Worker.SourcePollInterval,
 		PermittedSourceRoots: cfg.Worker.PermittedSourceRoots,
 		MasterKey:            cfg.Secrets.MasterKey,
+		GitHub: &github.Client{
+			AppID:      cfg.GitHub.AppID,
+			PrivateKey: []byte(cfg.Secrets.GitHubPrivateKey),
+			BaseURL:    cfg.GitHub.BaseURL,
+			APIBaseURL: cfg.GitHub.APIBaseURL,
+		},
 	}
 }
 
@@ -92,6 +116,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 
 		w.requeueStale(ctx, log)
+		w.pollSources(ctx, log)
 
 		run, err := w.Store.ClaimNextRun(ctx, w.ID)
 		if err != nil {
@@ -253,12 +278,25 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 	return spec, gitConnectorID, cleanup, nil
 }
 
-// cloneRemote materializes a shallow clone of a connector's https remote,
-// decrypting its credential just-in-time. The plaintext token lives only in
-// this frame and the clone subprocess's environment.
+// cloneRemote materializes a shallow clone of a connector's https remote.
+// Authentication prefers an App installation token (short-lived, repo-scoped,
+// nothing durable to leak) and falls back to a sealed credential decrypted
+// just-in-time. Either way the plaintext lives only in this frame and the
+// clone subprocess's environment.
 func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteURL string) (dir string, cleanup func(), err error) {
 	token := ""
-	if c.CredentialID != "" {
+	switch {
+	case installationID(c.Config) != 0:
+		if !w.GitHub.AppConfigured() {
+			return "", nil, fmt.Errorf(
+				"connector names github installation %d, but no GitHub App is configured (set github.app_id and KILN_GITHUB_PRIVATE_KEY)",
+				installationID(c.Config))
+		}
+		token, _, err = w.GitHub.InstallationToken(ctx, installationID(c.Config))
+		if err != nil {
+			return "", nil, err
+		}
+	case c.CredentialID != "":
 		token, err = w.openCredential(ctx, c.CredentialID)
 		if err != nil {
 			return "", nil, err
@@ -277,6 +315,20 @@ func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteUR
 		return "", cleanup, err
 	}
 	return staging, cleanup, nil
+}
+
+// installationID reads a connector's github installation reference. JSON
+// numbers decode as float64; ids fit comfortably below the 2^53 boundary.
+func installationID(cfg map[string]any) int64 {
+	switch v := cfg["installation_id"].(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	}
+	return 0
 }
 
 // openCredential loads and opens a sealed credential. This is the only call
@@ -305,6 +357,31 @@ func (w *Worker) failRun(ctx context.Context, runID string, cause error, log *sl
 	// gone, or the workspace stays blocked until the stale deadline.
 	if err := w.Store.FailRun(context.WithoutCancel(ctx), runID, cause.Error()); err != nil {
 		log.Error("recording run failure failed", "error", err)
+	}
+}
+
+// pollSources enqueues runs for poll-triggered connectors that are due. The
+// sweep runs at most once per minute: due-ness itself is measured against
+// each connector's last sync, so sweeping faster buys nothing.
+func (w *Worker) pollSources(ctx context.Context, log *slog.Logger) {
+	if w.SourcePollInterval <= 0 || time.Since(w.lastSourcePoll) < time.Minute {
+		return
+	}
+	w.lastSourcePoll = time.Now()
+
+	due, err := w.Store.PollDueConnectors(ctx, w.SourcePollInterval)
+	if err != nil {
+		log.Error("poll scheduler query failed", "error", err)
+		return
+	}
+	for _, c := range due {
+		// The active-run index makes this idempotent: a connector already
+		// building debounces onto its waiting run.
+		if _, created, err := w.Store.EnqueueRun(ctx, c.WorkspaceID, "poll", c.ID); err != nil {
+			log.Error("poll enqueue failed", "connector", c.Name, "error", err)
+		} else if created {
+			log.Info("poll enqueued run", "connector", c.Name, "workspace", c.WorkspaceID)
+		}
 	}
 }
 
