@@ -41,6 +41,11 @@ func (f *fakeStore) PollDueConnectors(context.Context, time.Duration) ([]store.C
 func (f *fakeStore) EnqueueRun(context.Context, string, string, string) (string, bool, error) {
 	return "", false, nil
 }
+func (f *fakeStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) { return nil, nil }
+func (f *fakeStore) SpendInWindow(context.Context, string, time.Duration) (float64, error) {
+	return 0, nil
+}
+func (f *fakeStore) FileReview(context.Context, string, string, string, string) error { return nil }
 
 func run(ws string) *store.QueuedRun {
 	return &store.QueuedRun{ID: "r1", WorkspaceID: ws, WorkspaceSlug: "bench", Trigger: "manual"}

@@ -20,6 +20,7 @@ import (
 type buildFlags struct {
 	path      string
 	docs      string
+	web       []string
 	workspace string
 	org       string
 	dryRun    bool
@@ -52,6 +53,7 @@ before anything is spent.`,
 	fl := cmd.Flags()
 	fl.StringVar(&f.path, "path", "", "directory to scan (defaults to the positional argument)")
 	fl.StringVar(&f.docs, "docs", "", "also ingest documents from this directory into the same wiki")
+	fl.StringArrayVar(&f.web, "web", nil, "also ingest this https URL into the same wiki (repeatable)")
 	fl.StringVar(&f.workspace, "bench", "", "bench slug (defaults to the directory name)")
 	fl.StringVar(&f.workspace, "workspace", "", "deprecated alias for --bench")
 	_ = fl.MarkDeprecated("workspace", "use --bench")
@@ -123,7 +125,7 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		RunID:       jobs.NewRunID(),
 		WorkspaceID: workspaceID,
 		Trigger:     "manual",
-		Source:      jobs.SourceSpec{Path: absPath, DocsDir: f.docs, Slug: slug},
+		Source:      jobs.SourceSpec{Path: absPath, DocsDir: f.docs, WebURLs: f.web, Slug: slug},
 		Force:       f.full,
 		DryRun:      f.dryRun,
 		Progress:    out,

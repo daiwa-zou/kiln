@@ -19,9 +19,9 @@ nothing changes, a run costs nothing.
 
 ## Status
 
-Early development. See [ROADMAP.md](ROADMAP.md) for the milestone plan — M1 (the human loop and
-reader upgrades) and M2 (server-side builds: the worker, the run queue and dashboard, DB-driven
-connectors with sealed credentials) have shipped; M3 (multi-tenant SaaS shell) is next.
+All four roadmap milestones have shipped — the human loop and reader (M1), server-side builds
+(M2), the multi-tenant SaaS shell with GitHub sign-in and webhooks (M3), and the web connector,
+graph view, and cost attribution (M4). See [ROADMAP.md](ROADMAP.md) for what each contains.
 
 ## How it works
 

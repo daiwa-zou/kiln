@@ -109,6 +109,44 @@ func (s *WikiStore) TrailingUnitCost(ctx context.Context, workspaceID string) (f
 	return avg, nil
 }
 
+// RunItemRow is one unit's outcome within a run, for cost attribution.
+type RunItemRow struct {
+	Key        string
+	Kind       string
+	Status     string
+	CostUSD    float64
+	EstCostUSD *float64
+	Turns      int
+	Error      string
+}
+
+// ListRunItems returns a run's per-unit outcomes, costliest first, scoped to
+// the workspace so a run id from another tenant reads as absent.
+func (s *WikiStore) ListRunItems(ctx context.Context, workspaceID, runID string) ([]RunItemRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT ri.cache_key, ri.kind, ri.status, ri.cost_usd, ri.est_cost_usd,
+		       ri.turns, coalesce(ri.error, '')
+		FROM run_items ri
+		JOIN runs r ON r.id = ri.run_id
+		WHERE r.id = $1 AND r.workspace_id = $2
+		ORDER BY ri.cost_usd DESC, ri.cache_key`, runID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list run items: %w", err)
+	}
+	defer rows.Close()
+
+	out := []RunItemRow{}
+	for rows.Next() {
+		var it RunItemRow
+		if err := rows.Scan(&it.Key, &it.Kind, &it.Status, &it.CostUSD,
+			&it.EstCostUSD, &it.Turns, &it.Error); err != nil {
+			return nil, fmt.Errorf("store: scan run item: %w", err)
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
 // FileReview inserts an open review item, deduplicated against open items with
 // the same kind and title, mirroring how agent-raised flags are recorded: a
 // condition that persists across attempts asks its question once.

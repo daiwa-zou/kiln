@@ -39,8 +39,10 @@ func DocKey(id string) Key { return Key(PrefixDoc + ":" + id) }
 // through here.
 func UploadOrigin(rel string) string { return "upload:" + rel }
 
-// EntryKey builds the key for an entry point.
-func EntryKey(name string) Key { return Key(PrefixEntry + ":" + name) }
+// WebOrigin namespaces a fetched URL the same way UploadOrigin namespaces
+// uploaded paths, keeping the three document sources (repo, upload, web)
+// collision-free in the cache and the router.
+func WebOrigin(url string) string { return "web:" + url }
 
 // Prefix returns the namespace of a key.
 func (k Key) Prefix() string {

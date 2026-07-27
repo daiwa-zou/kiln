@@ -39,6 +39,7 @@ type Store interface {
 	Search(ctx context.Context, workspaceID, query string, limit, offset int) ([]store.SearchHit, error)
 	Gaps(ctx context.Context, workspaceID string, limit, offset int) ([]store.Gap, error)
 	LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error)
+	Graph(ctx context.Context, workspaceID string) ([]store.GraphNode, []store.GraphEdge, error)
 }
 
 // WriteStore is the human-loop surface: steering, corrections, the review
@@ -181,12 +182,14 @@ func (s *Server) Router() http.Handler {
 				r.Get("/log", s.handleArtifact("log"))
 				r.Get("/search", s.handleSearch)
 				r.Get("/gaps", s.handleGaps)
+				r.Get("/graph", s.handleGraph)
 
 				if s.Runs != nil && s.Writes != nil {
 					// The run queue: listing is a read; enqueueing shares the
 					// write limiter and role gate, because a rebuild spends
 					// real money.
 					r.Get("/runs", s.handleRunsList)
+					r.Get("/runs/{id}/items", s.handleRunItems)
 					r.Group(func(r chi.Router) {
 						r.Use(writeLimiter(s.writeLimit))
 						r.Post("/runs", s.handleRunCreate)
@@ -454,6 +457,32 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleGraph returns the page graph: live pages and the resolved links
+// between them. ETag'd on the wiki revision like every content read — links
+// only change on import.
+func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
+	ws, ok := s.resolve(w, r)
+	if !ok || notModified(w, r, ws) {
+		return
+	}
+	nodes, edges, err := s.Store.Graph(r.Context(), ws.ID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	outNodes := make([]map[string]any, 0, len(nodes))
+	for _, n := range nodes {
+		outNodes = append(outNodes, map[string]any{
+			"slug": n.Slug, "title": n.Title, "type": n.Type, "links": n.Links,
+		})
+	}
+	outEdges := make([]map[string]string, 0, len(edges))
+	for _, e := range edges {
+		outEdges = append(outEdges, map[string]string{"from": e.From, "to": e.To})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": outNodes, "edges": outEdges})
 }
 
 // handleGaps lists pages the wiki has declared it wants and does not have.

@@ -13,6 +13,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/connector"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 	"github.com/daiwa-zou/kiln/internal/connector/upload"
+	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/mapper"
 	"github.com/daiwa-zou/kiln/internal/mapper/docmap"
@@ -26,6 +27,9 @@ type SourceSpec struct {
 	// DocsDir optionally merges a documents directory into the same wiki
 	// through the upload connector.
 	DocsDir string
+	// WebURLs optionally merges fetched pages into the same wiki through
+	// the web connector.
+	WebURLs []string
 	// Slug names the bench, for the git connector's cache keys.
 	Slug string
 }
@@ -111,6 +115,29 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		// Section units have no path of their own; register them under their
 		// parent so routing a document also routes its chapters.
 		router.DocSections = sectionsByParent(docMap)
+	}
+
+	// Web pages merge the same way: a third source kind, one wiki.
+	if len(req.Source.WebURLs) > 0 {
+		webMap, webRouter, staging, err := syncWeb(ctx, out, req.Source.WebURLs)
+		if staging != "" {
+			defer os.RemoveAll(staging)
+		}
+		if err != nil {
+			return nil, err
+		}
+		merged, err := mapper.Merge(req.Source.Path, wm, webMap)
+		if err != nil {
+			return nil, err
+		}
+		wm = merged
+		maps.Copy(router.DocPaths, webRouter)
+		for parent, sections := range sectionsByParent(webMap) {
+			if router.DocSections == nil {
+				router.DocSections = map[diff.Key][]diff.Key{}
+			}
+			router.DocSections[parent] = sections
+		}
 	}
 
 	breq := BuildRequest{
@@ -200,6 +227,48 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (_ *mapper.Workspa
 	routes := map[string]diff.Key{}
 	for _, d := range payload.Docs {
 		routes[diff.UploadOrigin(d.Origin)] = diff.Key(d.Key)
+	}
+	return wm, routes, staging, nil
+}
+
+// syncWeb ingests fetched pages through the web connector, mirroring
+// syncDocs: the staging directory holds the extracted text the unit inputs
+// point at and must outlive the build.
+func syncWeb(ctx context.Context, out io.Writer, urls []string) (_ *mapper.WorkspaceMap, _ map[string]diff.Key, staging string, err error) {
+	conn, err := connector.Get("web")
+	if err != nil {
+		return nil, nil, "", err
+	}
+	fmt.Fprintf(out, "syncing via %s connector: %d url(s)\n", conn.Kind(), len(urls))
+
+	staging, err = os.MkdirTemp("", "kiln-web-")
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	set, err := conn.Sync(ctx, connector.Config{"urls": urls}, staging)
+	if err != nil {
+		return nil, nil, staging, err
+	}
+	payload := webconn.PayloadOf(set)
+	if payload == nil {
+		return nil, nil, staging, fmt.Errorf("web connector returned no documents payload")
+	}
+
+	dm := &docmap.Mapper{}
+	wm, err := dm.MapDocs(ctx, staging, payload.Docs)
+	if err != nil {
+		return nil, nil, staging, err
+	}
+
+	fmt.Fprintf(out, "  %d page(s), %d units\n", len(payload.Docs), len(wm.Units))
+	for _, s := range payload.Skipped {
+		fmt.Fprintf(out, "  skipped %s: %s\n", s.URL, s.Reason)
+	}
+
+	routes := map[string]diff.Key{}
+	for _, d := range payload.Docs {
+		routes[diff.WebOrigin(d.Origin)] = diff.Key(d.Key)
 	}
 	return wm, routes, staging, nil
 }

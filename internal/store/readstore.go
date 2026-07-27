@@ -209,6 +209,72 @@ func (s *WikiStore) Search(ctx context.Context, workspaceID, query string, limit
 	return out, rows.Err()
 }
 
+// GraphNode is one live page as the graph view renders it.
+type GraphNode struct {
+	Slug  string
+	Title string
+	Type  string
+	// Links counts inbound resolved links, so the view can size hubs.
+	Links int
+}
+
+// GraphEdge is one resolved wikilink.
+type GraphEdge struct {
+	From string
+	To   string
+}
+
+// Graph returns the live pages and the resolved links between them. The
+// page_links table has been materialized since the first import precisely so
+// this is two indexed queries rather than a markdown re-parse.
+func (s *WikiStore) Graph(ctx context.Context, workspaceID string) ([]GraphNode, []GraphEdge, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT p.slug, p.title, p.type,
+		       (SELECT count(*) FROM page_links l WHERE l.to_page_id = p.id) AS inbound
+		FROM pages p
+		JOIN wikis w ON w.id = p.wiki_id
+		WHERE w.workspace_id = $1 AND p.deleted_at IS NULL
+		ORDER BY p.slug`, workspaceID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: graph nodes: %w", err)
+	}
+	defer rows.Close()
+
+	nodes := []GraphNode{}
+	for rows.Next() {
+		var n GraphNode
+		if err := rows.Scan(&n.Slug, &n.Title, &n.Type, &n.Links); err != nil {
+			return nil, nil, fmt.Errorf("store: scan graph node: %w", err)
+		}
+		nodes = append(nodes, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	links, err := s.pool.Query(ctx, `
+		SELECT f.slug, t.slug
+		FROM page_links l
+		JOIN pages f ON f.id = l.from_page_id AND f.deleted_at IS NULL
+		JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL
+		JOIN wikis w ON w.id = f.wiki_id
+		WHERE w.workspace_id = $1 AND l.resolved`, workspaceID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: graph edges: %w", err)
+	}
+	defer links.Close()
+
+	edges := []GraphEdge{}
+	for links.Next() {
+		var e GraphEdge
+		if err := links.Scan(&e.From, &e.To); err != nil {
+			return nil, nil, fmt.Errorf("store: scan graph edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+	return nodes, edges, links.Err()
+}
+
 // Gaps lists unresolved wikilink targets: pages the wiki has declared it wants
 // and does not have, the cheapest and most precise missing-page signal there is.
 func (s *WikiStore) Gaps(ctx context.Context, workspaceID string, limit, offset int) ([]Gap, error) {

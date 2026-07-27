@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/daiwa-zou/kiln/internal/store"
 )
 
@@ -15,6 +17,7 @@ import (
 // tests can leave it nil, which unmounts the routes.
 type RunStore interface {
 	ListRuns(ctx context.Context, workspaceID string, limit, offset int) ([]store.RunRow, error)
+	ListRunItems(ctx context.Context, workspaceID, runID string) ([]store.RunItemRow, error)
 	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (runID string, created bool, err error)
 	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
 	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
@@ -67,6 +70,36 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 			Started:  timeOrEmpty(run.StartedAt),
 			Finished: timeOrEmpty(run.FinishedAt),
 		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRunItems returns one run's per-unit outcomes, costliest first: the
+// dashboard's cost-attribution drill-down. Workspace scoping happens in the
+// query, so a run id from another tenant reads as an empty list.
+func (s *Server) handleRunItems(w http.ResponseWriter, r *http.Request) {
+	ws, ok := s.resolve(w, r)
+	if !ok {
+		return
+	}
+	items, err := s.Runs.ListRunItems(r.Context(), ws.ID, chi.URLParam(r, "id"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		row := map[string]any{
+			"key": it.Key, "kind": it.Kind, "status": it.Status,
+			"costUsd": it.CostUSD, "turns": it.Turns,
+		}
+		if it.EstCostUSD != nil {
+			row["estCostUsd"] = *it.EstCostUSD
+		}
+		if it.Error != "" {
+			row["error"] = it.Error
+		}
+		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

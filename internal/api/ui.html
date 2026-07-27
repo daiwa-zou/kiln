@@ -453,6 +453,7 @@
     <nav class="nav" aria-label="Views">
       <a href="#/overview" data-view="overview">Overview</a>
       <a href="#/index" data-view="index">Index</a>
+      <a href="#/graph" data-view="graph">Graph</a>
       <a href="#/gaps" data-view="gaps">Gaps</a>
       <a href="#/reviews" data-view="reviews">Reviews <span class="badge" id="reviews-badge" hidden></span></a>
       <a href="#/runs" data-view="runs">Runs</a>
@@ -1452,6 +1453,88 @@ async function showReviews(all) {
   }
 }
 
+// showGraph renders the page graph from the materialized links: every live
+// page, every resolved wikilink. A tiny force simulation, no libraries —
+// repulsion, springs along edges, gravity to the center — run to rest before
+// first paint so the layout is stable, not a spinning mobile.
+async function showGraph() {
+  const view = beginView("Graph", "graph");
+  try {
+    const { nodes, edges } = await api(`/workspaces/${encodeURIComponent(state.workspace)}/graph`);
+    if (!nodes.length) {
+      view.done(`<h1>Graph</h1><div class="empty">No pages yet.</div>`);
+      return;
+    }
+
+    const W = 900, H = 640;
+    const bySlug = new Map(nodes.map((n, i) => [n.slug, i]));
+    const pts = nodes.map((_, i) => ({
+      // Deterministic golden-angle disc seeding: same graph, same picture.
+      x: W / 2 + Math.sqrt(i + 1) * 22 * Math.cos(i * 2.39996),
+      y: H / 2 + Math.sqrt(i + 1) * 22 * Math.sin(i * 2.39996),
+      vx: 0, vy: 0,
+    }));
+    const links = edges
+      .map((e) => [bySlug.get(e.from), bySlug.get(e.to)])
+      .filter(([a, b]) => a !== undefined && b !== undefined && a !== b);
+
+    for (let tick = 0; tick < 260; tick++) {
+      const k = 1 - tick / 300; // cooling
+      for (let i = 0; i < pts.length; i++) {
+        for (let j = i + 1; j < pts.length; j++) {
+          let dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+          const d2 = Math.max(64, dx * dx + dy * dy);
+          const f = (2600 / d2) * k;
+          const d = Math.sqrt(d2);
+          dx /= d; dy /= d;
+          pts[i].vx += dx * f; pts[i].vy += dy * f;
+          pts[j].vx -= dx * f; pts[j].vy -= dy * f;
+        }
+      }
+      for (const [a, b] of links) {
+        const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
+        const d = Math.max(1, Math.hypot(dx, dy));
+        const f = (d - 90) * 0.015 * k;
+        pts[a].vx += (dx / d) * f; pts[a].vy += (dy / d) * f;
+        pts[b].vx -= (dx / d) * f; pts[b].vy -= (dy / d) * f;
+      }
+      for (const p of pts) {
+        p.vx += (W / 2 - p.x) * 0.004 * k;
+        p.vy += (H / 2 - p.y) * 0.004 * k;
+        p.x += Math.max(-8, Math.min(8, p.vx));
+        p.y += Math.max(-8, Math.min(8, p.vy));
+        p.vx *= 0.55; p.vy *= 0.55;
+        p.x = Math.max(20, Math.min(W - 20, p.x));
+        p.y = Math.max(20, Math.min(H - 20, p.y));
+      }
+    }
+
+    const hue = { entity: "var(--ember)", synthesis: "#7c5cbf", source: "#3f7d5d",
+                  concept: "#b3762e", query: "#5b7fa6", comparison: "#a65b6b" };
+    const r = (n) => 5 + Math.min(9, Math.sqrt(n.links || 0) * 2.2);
+
+    view.done(`<h1>Graph</h1>
+      <p class="hint">${nodes.length} pages, ${links.length} links. Node size is
+      inbound links; color is page type. Click a node to open its page.</p>
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img"
+           aria-label="Page link graph">
+        ${links.map(([a, b]) => `<line x1="${pts[a].x.toFixed(1)}" y1="${pts[a].y.toFixed(1)}"
+            x2="${pts[b].x.toFixed(1)}" y2="${pts[b].y.toFixed(1)}"
+            stroke="var(--border)" stroke-width="1"/>`).join("")}
+        ${nodes.map((n, i) => `<a href="#/page/${encodeURIComponent(n.slug)}">
+          <circle cx="${pts[i].x.toFixed(1)}" cy="${pts[i].y.toFixed(1)}" r="${r(n)}"
+                  fill="${hue[n.type] || "var(--ink-dim)"}" opacity="0.85">
+            <title>${esc(n.title || n.slug)} (${esc(n.type)}, ${n.links} inbound)</title>
+          </circle>
+          ${(n.links >= 2 || nodes.length <= 30) ? `<text x="${(pts[i].x + r(n) + 3).toFixed(1)}"
+              y="${(pts[i].y + 3).toFixed(1)}" font-size="10" fill="var(--ink-dim)">${esc(n.slug)}</text>` : ""}
+        </a>`).join("")}
+      </svg>`);
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
+}
+
 // showRuns renders the build dashboard: what the queue is doing and what each
 // run cost, with the rebuild button that feeds it.
 async function showRuns() {
@@ -1485,8 +1568,31 @@ async function showRuns() {
           <strong>${money(r.costUsd)}</strong>
           <span class="count">${pages(r) || (r.status === "no_changes" ? "nothing changed — no cost" : "")}</span>
           ${r.error ? `<div class="detail">${esc(r.error)}</div>` : ""}
+          ${r.costUsd > 0 ? `<details class="panel" data-run-items="${esc(r.id)}">
+            <summary>cost by unit</summary>
+            <div class="detail">loading…</div>
+          </details>` : ""}
         </div>`).join("") || `<div class="empty">No runs yet. Rebuild now, or push
           a build from the CLI with <span class="mono">kiln build</span>.</div>`}`)) return;
+
+    // Per-unit cost attribution, fetched lazily on first expand: where the
+    // money went, costliest unit first, estimate beside actual.
+    for (const d of document.querySelectorAll("[data-run-items]")) {
+      d.addEventListener("toggle", async () => {
+        if (!d.open || d.dataset.loaded) return;
+        d.dataset.loaded = "true";
+        const box = d.querySelector(".detail");
+        try {
+          const items = await api(`/workspaces/${encodeURIComponent(state.workspace)}/runs/${encodeURIComponent(d.dataset.runItems)}/items`);
+          box.innerHTML = items.map((it) => `<div class="row">
+              <span class="mono">${esc(it.key)}${it.status !== "succeeded" ? ` <span class="chip run-failed">${esc(it.status)}</span>` : ""}</span>
+              <span class="count">${money(it.costUsd)}${it.estCostUsd ? ` (est ${money(it.estCostUsd)})` : ""}</span>
+            </div>`).join("") || "no unit records";
+        } catch (err) {
+          if (!err.handled) box.textContent = err.message;
+        }
+      });
+    }
 
     const btn = $("run-now");
     if (btn && !btn.disabled) once(btn, async () => {
@@ -1699,6 +1805,7 @@ function route() {
   if (hash.startsWith("search/")) return showSearch(decodeURIComponent(hash.slice(7)));
   if (["index", "overview", "log"].includes(hash)) return showArtifact(hash);
   if (hash === "gaps") return showGaps();
+  if (hash === "graph") return showGraph();
   if (hash === "reviews") return showReviews(false);
   if (hash === "reviews/all") return showReviews(true);
   if (hash === "runs") return showRuns();
@@ -1720,6 +1827,7 @@ function setDrawer(open) {
 // the palette's last row hands off to it.
 const VIEW_COMMANDS = [
   { title: "Overview", hash: "#/overview" }, { title: "Index", hash: "#/index" },
+  { title: "Graph", hash: "#/graph" },
   { title: "Gaps", hash: "#/gaps" }, { title: "Reviews", hash: "#/reviews" },
   { title: "Runs", hash: "#/runs" }, { title: "Members", hash: "#/members" },
   { title: "Log", hash: "#/log" }, { title: "Steering", hash: "#/steering" },
