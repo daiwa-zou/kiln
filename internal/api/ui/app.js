@@ -996,11 +996,13 @@ async function showGraph() {
       // Deterministic golden-angle disc seeding: same graph, same picture.
       x: W / 2 + Math.sqrt(i + 1) * 22 * Math.cos(i * 2.39996),
       y: H / 2 + Math.sqrt(i + 1) * 22 * Math.sin(i * 2.39996),
-      vx: 0, vy: 0,
+      vx: 0, vy: 0, pinned: false,
     }));
     const links = edges
       .map((e) => [bySlug.get(e.from), bySlug.get(e.to)])
       .filter(([a, b]) => a !== undefined && b !== undefined && a !== b);
+    const neighbors = nodes.map(() => new Set());
+    for (const [a, b] of links) { neighbors[a].add(b); neighbors[b].add(a); }
 
     const tick = (k) => {
       for (let i = 0; i < pts.length; i++) {
@@ -1022,6 +1024,7 @@ async function showGraph() {
         pts[b].vx -= (dx / d) * f; pts[b].vy -= (dy / d) * f;
       }
       for (const p of pts) {
+        if (p.pinned) { p.vx = 0; p.vy = 0; continue; }
         p.vx += (W / 2 - p.x) * 0.004 * k;
         p.vy += (H / 2 - p.y) * 0.004 * k;
         p.x += Math.max(-8, Math.min(8, p.vx));
@@ -1036,41 +1039,201 @@ async function showGraph() {
                   concept: "#b3762e", query: "#5b7fa6", comparison: "#a65b6b" };
     const r = (n) => 5 + Math.min(9, Math.sqrt(n.links || 0) * 2.2);
 
-    const svg = () => `
-        ${links.map(([a, b]) => `<line x1="${pts[a].x.toFixed(1)}" y1="${pts[a].y.toFixed(1)}"
-            x2="${pts[b].x.toFixed(1)}" y2="${pts[b].y.toFixed(1)}"
-            stroke="var(--border)" stroke-width="1"/>`).join("")}
-        ${nodes.map((n, i) => `<a href="#/page/${encodeURIComponent(n.slug)}">
-          <circle cx="${pts[i].x.toFixed(1)}" cy="${pts[i].y.toFixed(1)}" r="${r(n)}"
-                  fill="${hue[n.type] || "var(--ink-dim)"}" opacity="0.85">
-            <title>${esc(n.title || n.slug)} (${esc(n.type)}, ${n.links} inbound)</title>
-          </circle>
-          ${(n.links >= 2 || nodes.length <= 30) ? `<text x="${(pts[i].x + r(n) + 3).toFixed(1)}"
-              y="${(pts[i].y + 3).toFixed(1)}" font-size="10" fill="var(--ink-dim)">${esc(n.slug)}</text>` : ""}
-        </a>`).join("")}`;
-
+    const typeCounts = {};
+    for (const n of nodes) typeCounts[n.type] = (typeCounts[n.type] || 0) + 1;
     const truncated = totalPages > nodes.length
       ? ` Showing the ${nodes.length} best-connected of ${totalPages} pages.` : "";
+
     if (!view.done(`<h1>Graph</h1>
-      <p class="hint">${nodes.length} pages, ${links.length} links. Node size is
-      inbound links; color is page type. Click a node to open its page.${esc(truncated)}</p>
-      <svg id="graph-svg" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img"
-           aria-label="Page link graph">${svg()}</svg>`)) return;
+      <p class="hint">${nodes.length} pages, ${links.length} links. Drag nodes,
+      scroll to zoom, drag the background to pan; click opens the page.${esc(truncated)}</p>
+      <div class="graph-legend" role="group" aria-label="Filter by page type">
+        ${Object.entries(typeCounts).map(([t, c]) =>
+          `<button class="chip" data-type="${esc(t)}" aria-pressed="true"
+             style="border-color:${hue[t] || "var(--border)"}">${esc(t)} ${c}</button>`).join("")}
+        <button class="chip quiet" id="graph-reset">reset view</button>
+      </div>
+      <svg id="graph-svg" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;touch-action:none"
+           role="img" aria-label="Page link graph"></svg>`)) return;
+
+    // Retained DOM instead of per-frame innerHTML: interaction needs stable
+    // elements to drag, hover, and filter, and attribute updates are cheaper
+    // than reparsing the world anyway.
+    const SVGNS = "http://www.w3.org/2000/svg";
+    const svg = $("graph-svg");
+    const mk = (tag, attrs) => {
+      const el = document.createElementNS(SVGNS, tag);
+      for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+      return el;
+    };
+    const edgeEls = links.map(([a, b]) => {
+      const el = mk("line", { stroke: "var(--border)", "stroke-width": "1" });
+      el._a = a; el._b = b;
+      svg.appendChild(el);
+      return el;
+    });
+    const nodeEls = nodes.map((n, i) => {
+      const g = mk("g", { class: "graph-node", "data-i": i, tabindex: "0" });
+      g.setAttribute("aria-label", `${n.title || n.slug} (${n.type})`);
+      const c = mk("circle", { r: r(n), fill: hue[n.type] || "var(--ink-dim)", opacity: "0.85" });
+      const title = mk("title", {});
+      title.textContent = `${n.title || n.slug} (${n.type}, ${n.links} inbound)`;
+      c.appendChild(title);
+      g.appendChild(c);
+      if (n.links >= 2 || nodes.length <= 30) {
+        const t = mk("text", { "font-size": "10", fill: "var(--ink-dim)" });
+        t.textContent = n.slug;
+        g.appendChild(t);
+      }
+      svg.appendChild(g);
+      return g;
+    });
+
+    const position = () => {
+      for (const el of edgeEls) {
+        el.setAttribute("x1", pts[el._a].x.toFixed(1));
+        el.setAttribute("y1", pts[el._a].y.toFixed(1));
+        el.setAttribute("x2", pts[el._b].x.toFixed(1));
+        el.setAttribute("y2", pts[el._b].y.toFixed(1));
+      }
+      nodeEls.forEach((g, i) => {
+        const c = g.firstChild;
+        c.setAttribute("cx", pts[i].x.toFixed(1));
+        c.setAttribute("cy", pts[i].y.toFixed(1));
+        const t = g.querySelector("text");
+        if (t) {
+          t.setAttribute("x", (pts[i].x + r(nodes[i]) + 3).toFixed(1));
+          t.setAttribute("y", (pts[i].y + 3).toFixed(1));
+        }
+      });
+    };
+    position();
 
     // The layout settles across animation frames rather than blocking the
-    // main thread: a handful of ticks per frame, painting as it goes, so a
-    // 300-node graph never freezes the page. Navigation stops it via the
-    // view token.
-    let frame = 0;
+    // main thread; interactions can re-arm it so the graph keeps breathing
+    // after a drag.
+    let budget = 260;
+    let settling = false;
     const settle = () => {
-      if (!view.current() || frame >= 26) return;
-      for (let i = 0; i < 10; i++) tick(1 - (frame * 10 + i) / 300);
-      frame++;
-      const el = $("graph-svg");
-      if (el) el.innerHTML = svg();
+      if (!view.current() || budget <= 0) { settling = false; return; }
+      for (let i = 0; i < 10 && budget > 0; i++, budget--) tick(Math.max(0.15, budget / 300));
+      position();
       requestAnimationFrame(settle);
     };
-    requestAnimationFrame(settle);
+    const reheat = (amount) => {
+      budget = Math.max(budget, amount);
+      if (!settling) { settling = true; requestAnimationFrame(settle); }
+    };
+    reheat(260);
+
+    // --- pan & zoom -------------------------------------------------------
+    const vb = { x: 0, y: 0, w: W, h: H };
+    const applyVB = () => svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    const toSVG = (e) => {
+      const rect = svg.getBoundingClientRect();
+      return {
+        x: vb.x + ((e.clientX - rect.left) / rect.width) * vb.w,
+        y: vb.y + ((e.clientY - rect.top) / rect.height) * vb.h,
+      };
+    };
+    svg.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const scale = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+      const next = Math.min(W * 3, Math.max(W / 8, vb.w * scale));
+      const f = next / vb.w;
+      const p = toSVG(e);
+      vb.x = p.x - (p.x - vb.x) * f;
+      vb.y = p.y - (p.y - vb.y) * f;
+      vb.w *= f; vb.h *= f;
+      applyVB();
+    }, { passive: false });
+    $("graph-reset").addEventListener("click", () => {
+      vb.x = 0; vb.y = 0; vb.w = W; vb.h = H;
+      applyVB();
+    });
+
+    // --- drag (nodes) and pan (background) --------------------------------
+    // One pointer state machine; a press that never travels is a click and
+    // opens the page, so navigation survives the drag handlers.
+    let drag = null;
+    svg.addEventListener("pointerdown", (e) => {
+      const g = e.target.closest("g.graph-node");
+      const p = toSVG(e);
+      drag = g
+        ? { i: Number(g.dataset.i), moved: 0 }
+        : { pan: { x: vb.x, y: vb.y }, from: { cx: e.clientX, cy: e.clientY }, moved: 0 };
+      if (g) pts[drag.i].pinned = true;
+      svg.setPointerCapture(e.pointerId);
+      drag.last = p;
+    });
+    svg.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const p = toSVG(e);
+      if (drag.i !== undefined) {
+        drag.moved += Math.hypot(p.x - drag.last.x, p.y - drag.last.y);
+        pts[drag.i].x = p.x;
+        pts[drag.i].y = p.y;
+        drag.last = p;
+        position();
+        reheat(40); // neighbors follow the dragged node
+      } else {
+        const rect = svg.getBoundingClientRect();
+        vb.x = drag.pan.x - ((e.clientX - drag.from.cx) / rect.width) * vb.w;
+        vb.y = drag.pan.y - ((e.clientY - drag.from.cy) / rect.height) * vb.h;
+        drag.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
+        applyVB();
+      }
+    });
+    const endDrag = (e) => {
+      if (!drag) return;
+      if (drag.i !== undefined) {
+        pts[drag.i].pinned = false;
+        if (drag.moved < 3) location.hash = "#/page/" + encodeURIComponent(nodes[drag.i].slug);
+      }
+      drag = null;
+    };
+    svg.addEventListener("pointerup", endDrag);
+    svg.addEventListener("pointercancel", endDrag);
+    for (const g of nodeEls) {
+      g.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") location.hash = "#/page/" + encodeURIComponent(nodes[g.dataset.i].slug);
+      });
+    }
+
+    // --- hover: light the neighborhood, dim the rest ----------------------
+    svg.addEventListener("pointerover", (e) => {
+      const g = e.target.closest("g.graph-node");
+      if (!g) return;
+      const i = Number(g.dataset.i);
+      nodeEls.forEach((el, j) =>
+        el.classList.toggle("graph-dim", j !== i && !neighbors[i].has(j)));
+      for (const el of edgeEls) {
+        const hot = el._a === i || el._b === i;
+        el.classList.toggle("graph-dim", !hot);
+        el.classList.toggle("graph-hot", hot);
+      }
+    });
+    svg.addEventListener("pointerout", (e) => {
+      if (!e.target.closest("g.graph-node")) return;
+      for (const el of [...nodeEls, ...edgeEls]) el.classList.remove("graph-dim", "graph-hot");
+    });
+
+    // --- legend: toggle types on and off ----------------------------------
+    const hidden = new Set();
+    for (const b of document.querySelectorAll(".graph-legend [data-type]")) {
+      b.addEventListener("click", () => {
+        const t = b.dataset.type;
+        hidden.has(t) ? hidden.delete(t) : hidden.add(t);
+        b.setAttribute("aria-pressed", String(!hidden.has(t)));
+        b.classList.toggle("graph-off", hidden.has(t));
+        nodeEls.forEach((el, i) =>
+          el.classList.toggle("graph-hidden", hidden.has(nodes[i].type)));
+        for (const el of edgeEls) {
+          el.classList.toggle("graph-hidden",
+            hidden.has(nodes[el._a].type) || hidden.has(nodes[el._b].type));
+        }
+      });
+    }
   } catch (err) {
     if (!err.handled) view.done(banner(err));
   }
