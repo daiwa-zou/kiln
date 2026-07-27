@@ -25,7 +25,7 @@ import (
 type HookStore interface {
 	WebhookConnectors(ctx context.Context) ([]store.ConnectorRow, error)
 	LastRunFinishedAt(ctx context.Context, workspaceID string) (time.Time, error)
-	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error)
+	EnqueueRunOpts(ctx context.Context, workspaceID, trigger, connectorID string, opts store.EnqueueOptions) (string, bool, error)
 	UpsertGitHubInstallationEvent(ctx context.Context, installationID int64, accountLogin, accountType string, suspended bool) error
 	RemoveGitHubInstallation(ctx context.Context, installationID int64) error
 }
@@ -88,6 +88,7 @@ func validSignature(secret []byte, body []byte, header string) bool {
 
 func (s *Server) handlePushEvent(w http.ResponseWriter, ctx context.Context, body []byte) {
 	var push struct {
+		After      string `json:"after"`
 		Repository struct {
 			FullName string `json:"full_name"`
 		} `json:"repository"`
@@ -110,11 +111,13 @@ func (s *Server) handlePushEvent(w http.ResponseWriter, ctx context.Context, bod
 			continue
 		}
 
-		// Completion cooldown: the active-run index already collapses a push
-		// storm into one queued run, but a workspace whose run just finished
-		// would start another immediately on the next push of the burst. A
-		// short quiet period lets the storm pass and costs one rebuild at
-		// most that much freshness.
+		// Completion cooldown, expressed as scheduling rather than skipping:
+		// the push always enqueues (the active-run index collapses storms),
+		// but a run created inside the cooldown carries not_before so it
+		// waits out the quiet period. Nothing is dropped — a debounced push
+		// advances the waiting run's ref_to, and the range base derives from
+		// the last build, so late pushes cannot punch holes in the diff.
+		opts := store.EnqueueOptions{RefTo: push.After}
 		if s.WebhookCooldown > 0 {
 			finished, err := s.Hooks.LastRunFinishedAt(ctx, c.WorkspaceID)
 			if err != nil {
@@ -122,11 +125,11 @@ func (s *Server) handlePushEvent(w http.ResponseWriter, ctx context.Context, bod
 				return
 			}
 			if !finished.IsZero() && time.Since(finished) < s.WebhookCooldown {
-				continue
+				opts.NotBefore = finished.Add(s.WebhookCooldown)
 			}
 		}
 
-		if _, _, err := s.Hooks.EnqueueRun(ctx, c.WorkspaceID, "webhook", c.ID); err != nil {
+		if _, _, err := s.Hooks.EnqueueRunOpts(ctx, c.WorkspaceID, "webhook", c.ID, opts); err != nil {
 			s.fail(w, err)
 			return
 		}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/crypto"
+	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
 
@@ -121,6 +122,8 @@ func (l *loopStore) EnqueueRun(_ context.Context, workspaceID, trigger, connecto
 	l.enqueued = append(l.enqueued, trigger+":"+connectorID)
 	return "run-" + connectorID, true, nil
 }
+
+func (l *loopStore) LastSuccessfulRef(context.Context, string) (string, error) { return "", nil }
 
 func (l *loopStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) {
 	l.mu.Lock()
@@ -282,6 +285,42 @@ func TestPollSchedulerDisabledByZeroInterval(t *testing.T) {
 	defer st.mu.Unlock()
 	if len(st.enqueued) != 0 {
 		t.Errorf("scheduler ran despite being disabled: %v", st.enqueued)
+	}
+}
+
+func TestContinuationRuns(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   string
+		deferred int
+		trigger  string
+		want     int
+	}{
+		{"deferred always continues", jobs.StatusSucceeded, 3, "continuation", 1},
+		{"partial retries once", jobs.StatusPartial, 0, "webhook", 1},
+		{"partial continuation stops", jobs.StatusPartial, 0, "continuation", 0},
+		{"clean run stops", jobs.StatusSucceeded, 0, "webhook", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newLoopStore()
+			w := &Worker{Store: st}
+			run := &store.QueuedRun{ID: "r1", WorkspaceID: "ws", WorkspaceSlug: "b",
+				Trigger: tc.trigger, ConnectorID: "c1"}
+			res := &jobs.BuildResult{Deferred: tc.deferred}
+			res.Summary.Status = tc.status
+
+			w.enqueueContinuation(context.Background(), run, res, w.logger())
+
+			st.mu.Lock()
+			defer st.mu.Unlock()
+			if len(st.enqueued) != tc.want {
+				t.Errorf("enqueued = %v, want %d", st.enqueued, tc.want)
+			}
+			if tc.want == 1 && st.enqueued[0] != "continuation:c1" {
+				t.Errorf("continuation = %q", st.enqueued[0])
+			}
+		})
 	}
 }
 

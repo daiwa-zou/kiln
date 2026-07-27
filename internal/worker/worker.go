@@ -35,6 +35,7 @@ type Store interface {
 	LoadSealedCredential(ctx context.Context, id string) (*store.SealedCredential, error)
 	PollDueConnectors(ctx context.Context, olderThan time.Duration) ([]store.ConnectorRow, error)
 	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error)
+	LastSuccessfulRef(ctx context.Context, workspaceID string) (string, error)
 	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
 	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
 	FileReview(ctx context.Context, workspaceID, kind, title, detail string) error
@@ -184,12 +185,27 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		return
 	}
 
+	// A run that arrived through a push carries the head it should build
+	// toward, which makes it incremental-eligible: the base is always the
+	// workspace's own last successful build, never the webhook's claim, so
+	// debounced pushes cannot leave a hole in the range. Manual and poll
+	// runs stay full (hash-gated) rebuilds.
+	baseRef := ""
+	if run.RefTo != "" {
+		if ref, err := w.Store.LastSuccessfulRef(ctx, run.WorkspaceID); err != nil {
+			log.Error("last-ref lookup failed; building full", "error", err)
+		} else {
+			baseRef = ref
+		}
+	}
+
 	res, err := w.Pipeline.Execute(ctx, jobs.ExecuteRequest{
 		RunID:       run.ID,
 		WorkspaceID: run.WorkspaceID,
 		Trigger:     run.Trigger,
 		Source:      spec,
 		ConnectorID: connectorID,
+		BaseRef:     baseRef,
 	})
 
 	syncErr := ""
@@ -202,6 +218,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 			"cost_usd", res.Summary.CostUSD,
 			"created", res.Summary.Created, "updated", res.Summary.Updated)
 		w.warnNearBudget(ctx, run.WorkspaceID, log)
+		w.enqueueContinuation(ctx, run, res, log)
 	}
 	if connectorID != "" {
 		if merr := w.Store.MarkConnectorSync(ctx, connectorID, syncErr); merr != nil {
@@ -387,6 +404,25 @@ func (w *Worker) failRun(ctx context.Context, runID string, cause error, log *sl
 	// gone, or the workspace stays blocked until the stale deadline.
 	if err := w.Store.FailRun(context.WithoutCancel(ctx), runID, cause.Error()); err != nil {
 		log.Error("recording run failure failed", "error", err)
+	}
+}
+
+// enqueueContinuation keeps a bench converging without operator attention.
+// Two cases: units deferred by the per-run page cap always get a follow-up
+// (the deferral strictly shrinks each round, so the chain terminates), and a
+// partial run gets exactly one retry — a continuation that goes partial
+// again stops, because retrying a persistent failure in a loop is a bill,
+// not a fix. Continuations carry no ref: the full hash-gated route is what
+// rescues units an incremental range would no longer visit.
+func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, res *jobs.BuildResult, log *slog.Logger) {
+	retryPartial := res.Summary.Status == jobs.StatusPartial && run.Trigger != "continuation"
+	if res.Deferred == 0 && !retryPartial {
+		return
+	}
+	if _, created, err := w.Store.EnqueueRun(ctx, run.WorkspaceID, "continuation", run.ConnectorID); err != nil {
+		log.Error("continuation enqueue failed", "error", err)
+	} else if created {
+		log.Info("continuation enqueued", "deferred", res.Deferred, "retry_partial", retryPartial)
 	}
 }
 

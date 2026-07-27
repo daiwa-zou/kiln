@@ -229,6 +229,87 @@ func TestRecordRunStillInsertsForCLIRunIDs(t *testing.T) {
 	}
 }
 
+func TestEnqueueRunOptsSchedulingAndRanges(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	freshSchema(t, pool)
+	s := NewWikiStore(pool)
+
+	ws, err := s.EnsureWorkspace(ctx, "local", "bench", "bench")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A run scheduled for the future is invisible to the claim query.
+	runID, created, err := s.EnqueueRunOpts(ctx, ws, "webhook", "", EnqueueOptions{
+		RefTo: "aaa111", NotBefore: time.Now().Add(time.Hour),
+	})
+	if err != nil || !created {
+		t.Fatalf("enqueue: created=%v err=%v", created, err)
+	}
+	if run, err := s.ClaimNextRun(ctx, "w1"); err != nil || run != nil {
+		t.Fatalf("claimed a not-yet-due run: %+v err=%v", run, err)
+	}
+
+	// A debounced push advances the waiting run's target head.
+	same, created, err := s.EnqueueRunOpts(ctx, ws, "webhook", "", EnqueueOptions{RefTo: "bbb222"})
+	if err != nil || created || same != runID {
+		t.Fatalf("debounce: id=%q created=%v err=%v", same, created, err)
+	}
+
+	// Once due, the claim carries the newest head.
+	if _, err := pool.Exec(ctx,
+		`UPDATE runs SET not_before = now() - interval '1 second' WHERE id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.ClaimNextRun(ctx, "w1")
+	if err != nil || run == nil {
+		t.Fatalf("claim: %+v err=%v", run, err)
+	}
+	if run.RefTo != "bbb222" {
+		t.Errorf("refTo = %q, want the debounced push's head", run.RefTo)
+	}
+}
+
+func TestLastSuccessfulRef(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	freshSchema(t, pool)
+	s := NewWikiStore(pool)
+
+	ws, err := s.EnsureWorkspace(ctx, "local", "bench", "bench")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No history yet: empty, not an error — the caller full-rebuilds.
+	if ref, err := s.LastSuccessfulRef(ctx, ws); err != nil || ref != "" {
+		t.Fatalf("empty history: %q %v", ref, err)
+	}
+
+	record := func(status, ref string) {
+		t.Helper()
+		if err := s.RecordRun(ctx, jobs.RunSummary{
+			RunID: jobs.NewRunID(), WorkspaceID: ws, Trigger: "manual",
+			Status: status, Ref: ref,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record(jobs.StatusSucceeded, "abc1234")
+	record(jobs.StatusFailed, "eee9999")  // failures contribute no baseline
+	record(jobs.StatusPartial, "def5678") // partials do: their ref was built
+	record(jobs.StatusNoChanges, "")      // no ref recorded
+
+	ref, err := s.LastSuccessfulRef(ctx, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "def5678" {
+		t.Errorf("last successful ref = %q, want the partial's def5678", ref)
+	}
+}
+
 func TestFailRunAndRequeueStale(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()

@@ -46,6 +46,12 @@ type ExecuteRequest struct {
 	// server-side builds; empty for CLI builds, which have no connector row).
 	ConnectorID string
 
+	// BaseRef, when set, requests incremental routing: changes are derived
+	// from `git diff BaseRef..HEAD` and only the affected units are routed.
+	// Any failure to use the range falls back to a full (hash-gated) rebuild
+	// — ranges are an optimization, never a correctness dependency.
+	BaseRef string
+
 	// Force skips the content-hash gate so every routed unit regenerates.
 	Force bool
 	// DryRun plans and estimates without invoking the agent.
@@ -140,6 +146,22 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		}
 	}
 
+	// Without a base ref, every unit is a candidate and the pipeline's hash
+	// gate decides — a repeat build still costs nothing. With one (webhook
+	// runs, or build --since), the router narrows the plan to the units the
+	// commit range actually touched, which is what suppresses cosmetic churn
+	// and keeps plan previews honest on big repositories.
+	changes := diff.ChangeSet{FullRebuild: true}
+	if req.BaseRef != "" {
+		head := gitconn.HeadRef(ctx, req.Source.Path)
+		if list, ok := gitconn.DiffRange(ctx, req.Source.Path, req.BaseRef, head); ok && head != "" {
+			changes = diff.ChangeSet{FromRef: req.BaseRef, ToRef: head, Changes: list}
+			fmt.Fprintf(out, "  incremental: %d changed path(s) since %s\n", len(list), req.BaseRef)
+		} else {
+			fmt.Fprintf(out, "  range %s..HEAD unusable; falling back to a full hash-gated rebuild\n", req.BaseRef)
+		}
+	}
+
 	breq := BuildRequest{
 		RunID:       req.RunID,
 		WorkspaceID: req.WorkspaceID,
@@ -149,15 +171,9 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		SourceDir:   req.Source.Path,
 		Map:         wm,
 		Router:      router,
-		// Every unit is a candidate; the pipeline's hash gate is what actually
-		// decides. A local path has no commit range to diff against, and the
-		// gate is both cheaper and more precise than a filesystem comparison --
-		// it compares each unit's content hash (and the map hash, for the
-		// architecture synthesis) to what the last run recorded, so a repeat
-		// build still costs nothing.
-		Changes: diff.ChangeSet{FullRebuild: true},
-		Force:   req.Force,
-		DryRun:  req.DryRun,
+		Changes:     changes,
+		Force:       req.Force,
+		DryRun:      req.DryRun,
 	}
 	// The API runner returns pages as data, so a scratch directory is only
 	// created for the CLI runner that writes files.

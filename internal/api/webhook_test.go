@@ -21,6 +21,7 @@ type fakeHooks struct {
 	connectors []store.ConnectorRow
 	finished   map[string]time.Time
 	enqueued   []string
+	opts       []store.EnqueueOptions
 	installs   map[int64]string // id -> last action applied
 }
 
@@ -34,10 +35,11 @@ func (f *fakeHooks) WebhookConnectors(context.Context) ([]store.ConnectorRow, er
 func (f *fakeHooks) LastRunFinishedAt(_ context.Context, ws string) (time.Time, error) {
 	return f.finished[ws], nil
 }
-func (f *fakeHooks) EnqueueRun(_ context.Context, ws, trigger, connectorID string) (string, bool, error) {
+func (f *fakeHooks) EnqueueRunOpts(_ context.Context, ws, trigger, connectorID string, opts store.EnqueueOptions) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.enqueued = append(f.enqueued, ws+"/"+trigger)
+	f.opts = append(f.opts, opts)
 	return "r1", true, nil
 }
 func (f *fakeHooks) UpsertGitHubInstallationEvent(_ context.Context, id int64, _, _ string, suspended bool) error {
@@ -147,29 +149,40 @@ func TestWebhookPushMapsRepoToConnector(t *testing.T) {
 	}
 }
 
-func TestWebhookCompletionCooldown(t *testing.T) {
+func TestWebhookCooldownSchedulesInsteadOfDropping(t *testing.T) {
 	hooks := newFakeHooks()
 	hooks.connectors = []store.ConnectorRow{
 		gitConnector("ws-kiln", "https://github.com/daiwa-zou/kiln"),
 	}
-	hooks.finished["ws-kiln"] = time.Now().Add(-10 * time.Second)
+	finished := time.Now().Add(-10 * time.Second)
+	hooks.finished["ws-kiln"] = finished
 	srv := hookServer(t, hooks, time.Minute)
 
-	body := []byte(`{"repository":{"full_name":"daiwa-zou/kiln"}}`)
-	if code := deliver(t, srv, "push", body, true); code != http.StatusAccepted {
-		t.Fatalf("push = %d", code)
-	}
-	if len(hooks.enqueued) != 0 {
-		t.Errorf("push inside cooldown enqueued %v", hooks.enqueued)
-	}
-
-	// Outside the cooldown the same push builds.
-	hooks.finished["ws-kiln"] = time.Now().Add(-2 * time.Minute)
+	// A push inside the cooldown still enqueues — nothing is dropped — but
+	// carries not_before so the claim waits out the quiet period, and the
+	// pushed head rides along for incremental routing.
+	body := []byte(`{"after":"abc123","repository":{"full_name":"daiwa-zou/kiln"}}`)
 	if code := deliver(t, srv, "push", body, true); code != http.StatusAccepted {
 		t.Fatalf("push = %d", code)
 	}
 	if len(hooks.enqueued) != 1 {
-		t.Errorf("push outside cooldown enqueued %v, want 1", hooks.enqueued)
+		t.Fatalf("push inside cooldown enqueued %v, want 1 scheduled run", hooks.enqueued)
+	}
+	got := hooks.opts[0]
+	if got.RefTo != "abc123" {
+		t.Errorf("refTo = %q, want the pushed head", got.RefTo)
+	}
+	if want := finished.Add(time.Minute); !got.NotBefore.Equal(want) {
+		t.Errorf("notBefore = %v, want finished+cooldown %v", got.NotBefore, want)
+	}
+
+	// Outside the cooldown the push is claimable immediately.
+	hooks.finished["ws-kiln"] = time.Now().Add(-2 * time.Minute)
+	if code := deliver(t, srv, "push", body, true); code != http.StatusAccepted {
+		t.Fatalf("push = %d", code)
+	}
+	if len(hooks.enqueued) != 2 || !hooks.opts[1].NotBefore.IsZero() {
+		t.Errorf("push outside cooldown: enqueued=%v opts=%+v", hooks.enqueued, hooks.opts)
 	}
 }
 
