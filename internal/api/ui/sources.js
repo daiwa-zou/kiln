@@ -487,7 +487,8 @@ async function showSources() {
 
     if (!view.done(`<h1>Sources</h1>
       <p class="hint">What this bench reads: a repository, web pages, and uploaded
-      documents all fire into one wiki.</p>
+      documents all fire into one wiki. Pausing a source skips it without touching
+      the pages it already produced.</p>
       <div class="meta sources-actions">
         ${canAdmin ? `<button class="btn" id="sources-add">+ Add source</button>` : ""}
         <button class="btn ${canAdmin ? "quiet" : ""}" id="sources-build" ${buildActive ? "disabled" : ""}>
@@ -496,15 +497,16 @@ async function showSources() {
       </div>
       <p class="hint" id="next-build">${esc(nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0))}</p>
 
-      <label class="group-label">Repositories &amp; web pages</label>
-      <p class="hint">Each one is read on ingest. Pausing a source skips it
-      without touching the pages it already produced.</p>
       <div id="connector-note" class="hint" role="status"></div>
       ${canAdmin
-        ? (connectors.filter((c) => c.kind !== "upload").map(connectorRow).join("") ||
-           `<div class="empty">No repositories or web pages connected yet. Add one
-            with + Add source.</div>`)
-        : `<div class="empty">Managing sources needs an org owner or an instance
+        ? `<label class="group-label">Repositories</label>
+           ${connectors.filter((c) => c.kind === "git").map(connectorRow).join("") ||
+             `<div class="empty">No repository connected yet. Add one with + Add source.</div>`}
+           <label class="group-label">Web pages</label>
+           ${connectors.filter((c) => c.kind === "web").map(connectorRow).join("") ||
+             `<div class="empty">No web pages connected yet. Add some with + Add source.</div>`}`
+        : `<label class="group-label">Repositories &amp; web pages</label>
+           <div class="empty">Managing sources needs an org owner or an instance
             admin. You can still add documents below if your role allows.</div>`}
 
       <label class="group-label">Documents</label>
