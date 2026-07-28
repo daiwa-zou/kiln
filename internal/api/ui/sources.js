@@ -466,8 +466,7 @@ async function showSources() {
         </div>
         <strong>${esc(c.name)}</strong>
         <span class="count mono">${esc(connectorSummary(c))}</span>
-        <div class="detail">${esc(triggerPhrase[c.triggerMode] || c.triggerMode)};
-          ${c.lastSynced ? `last read ${esc(relTime(c.lastSynced))}` : "not read yet"}.</div>
+        <div class="detail">${esc(triggerPhrase[c.triggerMode] || c.triggerMode)}; ${c.lastSynced ? `last read ${esc(relTime(c.lastSynced))}` : "not read yet"}.</div>
         ${c.lastError ? `<div class="detail hint error">${esc(c.lastError)}</div>` : ""}
         <div class="meta">
           <button class="btn quiet" data-conn-toggle="${esc(c.id)}" data-enabled="${c.enabled}">
