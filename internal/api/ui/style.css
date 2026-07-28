@@ -146,6 +146,13 @@
     font-size: 11px; text-align: center;
   }
   .nav a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
+  /* Hairline between the nav's workflow clusters: reading the wiki, working
+     on it, administering it. */
+  .nav a.nav-sep { margin-top: 9px; position: relative; }
+  .nav a.nav-sep::before {
+    content: ""; position: absolute; top: -5px; left: 10px; right: 10px;
+    border-top: 1px solid var(--border);
+  }
   .nav a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
   .nav a[aria-current="page"] .badge { background: var(--on-ember); color: var(--ember); }
 
