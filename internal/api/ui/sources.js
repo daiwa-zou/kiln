@@ -87,7 +87,7 @@ function nextBuildLine(runs, connectors, pollSeconds) {
   }
   if (hooks.length) return `Builds start automatically ${hooks.join(", and ")}.`;
 
-  return "Builds run when you press Build now.";
+  return "Sources are ingested when you press Ingest now.";
 }
 
 // armButton is the shared two-step destructive confirm: first click arms,
@@ -194,9 +194,13 @@ function openSourceWizard(ctx) {
 
   const stepShell = (crumb, inner) => {
     body.innerHTML = `
-      <div class="wizard-steps">${esc(crumb)}</div>
+      <div class="wizard-head">
+        <span class="wizard-steps">${esc(crumb)}</span>
+        <button class="wizard-x" id="wizard-x" aria-label="Close">×</button>
+      </div>
       ${inner}
       <span class="hint" id="wizard-note" role="status"></span>`;
+    $("wizard-x").addEventListener("click", finish);
   };
 
   const KINDS = [
@@ -255,7 +259,7 @@ function openSourceWizard(ctx) {
                autocomplete="off" spellcheck="false">
         <label class="hint" for="wiz-git-trigger">When should it build?</label>
         <select id="wiz-git-trigger" aria-label="Trigger mode">
-          <option value="manual" selected>only when I press Build now</option>
+          <option value="manual" selected>only when I press Ingest now</option>
           <option value="webhook">automatically on pushes (GitHub webhook)</option>
           <option value="poll">on a regular poll schedule</option>
         </select>
@@ -290,7 +294,7 @@ function openSourceWizard(ctx) {
         if (await submitConnector({
           kind: "git", name, config, credentialId,
           triggerMode: $("wiz-git-trigger").value,
-        })) stepDone(`Repository “${name}” added.`);
+        })) stepDone("Source added", `Repository “${name}” added.`);
       });
       return;
     }
@@ -304,7 +308,7 @@ function openSourceWizard(ctx) {
         <label class="hint" for="wiz-web-trigger">How should they stay fresh?</label>
         <select id="wiz-web-trigger" aria-label="Trigger mode">
           <option value="poll" selected>re-fetch on a regular poll schedule</option>
-          <option value="manual">only when I press Build now</option>
+          <option value="manual">only when I press Ingest now</option>
         </select>
         <div class="wizard-actions">
           ${backLink}
@@ -321,16 +325,16 @@ function openSourceWizard(ctx) {
         if (await submitConnector({
           kind: "web", name, config: { urls },
           triggerMode: $("wiz-web-trigger").value,
-        })) stepDone(`Web source “${name}” added.`);
+        })) stepDone("Source added", `Web source “${name}” added.`);
       });
       return;
     }
 
     // Documents: enable the upload source if the bench lacks one, then land
-    // on the upload step, which carries its own dropzone -- files can be
-    // added without ever leaving the flow.
+    // on the staging step -- files collect locally and nothing leaves the
+    // browser until Upload is pressed.
     if (ctx.hasUpload) {
-      stepDone("Add documents", "Drop files below; they join this bench's uploaded documents.", true);
+      stepDocuments();
       return;
     }
     stepShell("Enable document uploads", `
@@ -345,40 +349,71 @@ function openSourceWizard(ctx) {
     once($("wiz-upload-enable"), async () => {
       if (await submitConnector({ kind: "upload", name: "documents", config: {} })) {
         ctx.hasUpload = true;
-        stepDone("Add documents", "Document uploads enabled. Drop files below.", true);
+        stepDocuments();
       }
     });
   };
 
-  const stepDone = (crumb, msg, withDropzone = false) => {
+  // stepDocuments stages dropped files locally and uploads only on the
+  // explicit button press, so a stray drop is reversible and a batch goes up
+  // as one deliberate action.
+  const stepDocuments = () => {
+    let staged = [];
+    stepShell("Add documents", `
+      <p>Gather files below, then press Upload.</p>
+      ${dropzoneHTML("-wizard")}
+      <div id="wizard-staged"></div>
+      <div class="wizard-actions">
+        ${backLink}
+        <button class="btn" id="wizard-upload" disabled>Upload</button>
+      </div>`);
+    wireBack();
+
+    const renderStaged = () => {
+      const box = $("wizard-staged");
+      box.innerHTML = staged.map((f, i) => `
+        <div class="row">
+          <span class="mono">${esc(f.name)}</span>
+          <span>
+            <span class="count">${esc(humanBytes(f.size))}</span>
+            <button class="btn quiet" data-unstage="${i}">remove</button>
+          </span>
+        </div>`).join("");
+      for (const b of box.querySelectorAll("[data-unstage]")) {
+        b.addEventListener("click", () => {
+          staged.splice(Number(b.dataset.unstage), 1);
+          renderStaged();
+        });
+      }
+      $("wizard-upload").disabled = staged.length === 0;
+    };
+
+    wireDropzone($("dropzone-wizard"), $("file-input-wizard"), (files) => {
+      staged.push(...files);
+      renderStaged();
+    });
+
+    once($("wizard-upload"), async () => {
+      const batch = staged;
+      await uploadWorkspaceFiles(ctx.ws, batch, $("upload-progress-wizard"), () => {
+        changed = true;
+        staged = [];
+        renderStaged();
+        // The page behind the overlay catches up immediately; the wizard
+        // stays open for another batch, or the X closes it.
+        ctx.refresh();
+      });
+    });
+  };
+
+  const stepDone = (crumb, msg) => {
     stepShell(crumb, `
       <p>${esc(msg)}</p>
-      ${withDropzone ? dropzoneHTML("-wizard") + `<div id="wizard-uploaded"></div>` : ""}
       <div class="wizard-actions">
         <button class="btn quiet" id="wizard-back">Back</button>
         <button class="btn" id="wizard-done">Done</button>
       </div>`);
     wireBack();
-    if (withDropzone) {
-      wireDropzone($("dropzone-wizard"), $("file-input-wizard"), (files) => {
-        const names = [...files].map((f) => f.name);
-        uploadWorkspaceFiles(ctx.ws, files, $("upload-progress-wizard"), () => {
-          changed = true;
-          // Show what landed right here, and let the page behind the overlay
-          // catch up immediately rather than waiting for the wizard to close.
-          const box = $("wizard-uploaded");
-          if (box) {
-            for (const n of names) {
-              const row = document.createElement("div");
-              row.className = "hint";
-              row.textContent = `✓ ${n}`;
-              box.append(row);
-            }
-          }
-          ctx.refresh();
-        });
-      });
-    }
     $("wizard-done").addEventListener("click", finish);
   };
 
@@ -415,20 +450,28 @@ async function showSources() {
     const runs = runsRes.status === "fulfilled" ? [...runsRes.value] : [];
     const buildActive = runs.some((r) => r.status === "queued" || r.status === "running");
 
+    // Each source reads as a sentence, not a row of internals: what it is,
+    // where it points, when it ingests, and when it was last read.
+    const kindLabel = { git: "repository", web: "web pages", upload: "documents" };
+    const triggerPhrase = {
+      manual: "ingests when you press Ingest now",
+      webhook: "ingests automatically on pushes",
+      poll: "re-checked on a schedule",
+    };
     const connectorRow = (c) => `
       <div class="review" data-connector-row="${esc(c.id)}">
         <div class="meta">
-          <span class="chip kind-${esc(c.kind)}">${esc(c.kind)}</span>
-          ${c.enabled ? "" : `<span class="chip">disabled</span>`}
-          <span class="chip">${esc(c.triggerMode)}</span>
-          ${c.lastSynced ? timeTag(c.lastSynced, "synced ") : `<span class="count">never synced</span>`}
+          <span class="chip kind-${esc(c.kind)}">${esc(kindLabel[c.kind] || c.kind)}</span>
+          ${c.enabled ? "" : `<span class="chip">paused</span>`}
         </div>
         <strong>${esc(c.name)}</strong>
         <span class="count mono">${esc(connectorSummary(c))}</span>
+        <div class="detail">${esc(triggerPhrase[c.triggerMode] || c.triggerMode)};
+          ${c.lastSynced ? `last read ${esc(relTime(c.lastSynced))}` : "not read yet"}.</div>
         ${c.lastError ? `<div class="detail hint error">${esc(c.lastError)}</div>` : ""}
         <div class="meta">
           <button class="btn quiet" data-conn-toggle="${esc(c.id)}" data-enabled="${c.enabled}">
-            ${c.enabled ? "disable" : "enable"}</button>
+            ${c.enabled ? "pause" : "resume"}</button>
           <button class="btn quiet" data-conn-delete="${esc(c.id)}">delete</button>
         </div>
       </div>`;
@@ -449,12 +492,14 @@ async function showSources() {
       <div class="meta sources-actions">
         ${canAdmin ? `<button class="btn" id="sources-add">+ Add source</button>` : ""}
         <button class="btn ${canAdmin ? "quiet" : ""}" id="sources-build" ${buildActive ? "disabled" : ""}>
-          ${buildActive ? "A build is queued or running" : "Build now"}</button>
+          ${buildActive ? "Ingestion is queued or running" : "Ingest now"}</button>
         <span class="hint" id="sources-build-note" role="status"></span>
       </div>
       <p class="hint" id="next-build">${esc(nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0))}</p>
 
-      <label class="group-label">Connected sources</label>
+      <label class="group-label">Repositories &amp; web pages</label>
+      <p class="hint">Each one is read on ingest. Pausing a source skips it
+      without touching the pages it already produced.</p>
       <div id="connector-note" class="hint" role="status"></div>
       ${canAdmin
         ? (connectors.filter((c) => c.kind !== "upload").map(connectorRow).join("") ||
