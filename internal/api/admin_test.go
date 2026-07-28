@@ -68,13 +68,24 @@ func TestConnectorConfigPolicyAtWriteTime(t *testing.T) {
 			"config": map[string]any{"url": "https://user:pat@example.com/x.git"}},
 		"loopback url": {"kind": "git", "name": "c",
 			"config": map[string]any{"url": "https://127.0.0.1/x.git"}},
-		"git without source":  {"kind": "git", "name": "c", "config": map[string]any{}},
-		"upload without path": {"kind": "upload", "name": "d", "config": map[string]any{}},
-		"unknown kind":        {"kind": "carrier-pigeon", "name": "p", "config": map[string]any{"path": "/x"}},
+		"git without source": {"kind": "git", "name": "c", "config": map[string]any{}},
+		"unknown kind":       {"kind": "carrier-pigeon", "name": "p", "config": map[string]any{"path": "/x"}},
 	}
 	for name, body := range cases {
 		if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/connectors", "kiln_valid", body, nil); code != http.StatusBadRequest {
 			t.Errorf("%s: create = %d, want 400", name, code)
+		}
+	}
+
+	// An upload connector with an empty config is files mode -- the
+	// browser-upload flow -- and is valid; an explicit path also stays valid.
+	for name, cfg := range map[string]map[string]any{
+		"files mode": {},
+		"path mode":  {"path": "/srv/docs"},
+	} {
+		if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/connectors", "kiln_valid",
+			map[string]any{"kind": "upload", "name": "docs-" + name, "config": cfg}, nil); code != http.StatusCreated {
+			t.Errorf("upload %s: create = %d, want 201", name, code)
 		}
 	}
 }

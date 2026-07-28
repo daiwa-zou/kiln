@@ -6,10 +6,14 @@ import "testing"
 // the corrections wildcard sharing a subtree with the {id} param); building it
 // once is the cheapest possible guard and needs no database.
 func TestRouterConstructs(t *testing.T) {
-	s := &Server{Writes: (*fakeWrites)(nil)}
+	s := &Server{Writes: (*fakeWrites)(nil), Files: (*fakeFiles)(nil)}
 	_ = s.Router()
 }
 
 // fakeWrites satisfies WriteStore by embedding; the router only needs a
 // non-nil value to mount the human-loop routes, none of which are invoked.
 type fakeWrites struct{ WriteStore }
+
+// fakeFiles likewise mounts the file routes, including the upload group that
+// lives outside the standard timeout.
+type fakeFiles struct{ FileStore }

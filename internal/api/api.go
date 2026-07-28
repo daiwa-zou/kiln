@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/daiwa-zou/kiln/internal/auth"
+	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
@@ -84,6 +85,11 @@ type Server struct {
 	// Admin backs the connector and credential CRUD. Nil leaves those routes
 	// unmounted.
 	Admin AdminStore
+	// Files backs the uploaded-documents routes. Nil leaves them unmounted.
+	Files FileStore
+	// Blobs stores uploaded file content. Nil (object storage unconfigured)
+	// keeps listing and deletion working but answers uploads with 503.
+	Blobs blob.Store
 	// Members backs org membership management. Nil leaves it unmounted.
 	Members MemberStore
 	// Keyring seals credentials at write time. Nil (no master key configured)
@@ -109,6 +115,11 @@ type Server struct {
 
 	// writeLimit buckets mutating requests per caller; created by Router().
 	writeLimit *limiter
+
+	// uploadLimit buckets file uploads separately from other writes: dropping
+	// a folder of documents is one user action that arrives as many requests,
+	// so it gets a roomier bucket than the human-paced write surface.
+	uploadLimit *limiter
 }
 
 // Pagination bounds. Defaults serve the UI; ceilings stop a caller from
@@ -133,11 +144,39 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
 	if len(s.CORSOrigins) > 0 {
 		r.Use(corsMiddleware(s.CORSOrigins))
 	}
 
+	// File uploads sit in their own group because the 30-second request
+	// timeout every other route lives under would kill a large document on a
+	// slow uplink mid-stream. Same auth wrap, own limiter, longer leash.
+	if s.Files != nil {
+		if s.uploadLimit == nil {
+			s.uploadLimit = newLimiterSized(uploadBurst, uploadRefillEach)
+		}
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Timeout(uploadTimeout))
+			if s.Auth != nil {
+				r.Use(s.Auth.Wrap)
+			}
+			r.With(writeLimiter(s.uploadLimit)).
+				Post("/api/v1/workspaces/{workspace}/files", s.handleFileUpload)
+		})
+	}
+
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Timeout(30 * time.Second))
+		s.mountRoutes(r)
+	})
+
+	mountUI(r)
+	return r
+}
+
+// mountRoutes registers everything except the upload route, under the
+// standard request timeout.
+func (s *Server) mountRoutes(r chi.Router) {
 	// Liveness answers even when the database is down: a failing readiness
 	// check should not make an orchestrator kill a process that is merely
 	// waiting on Postgres.
@@ -215,6 +254,15 @@ func (s *Server) Router() http.Handler {
 					})
 				}
 
+				if s.Files != nil {
+					// Uploaded documents: listing is a read; deletion shares
+					// the write limiter. The upload POST itself lives outside
+					// this subtree, under the longer timeout.
+					r.Get("/files", s.handleFilesList)
+					r.With(writeLimiter(s.writeLimit)).
+						Delete("/files/{id}", s.handleFileDelete)
+				}
+
 				if s.Members != nil {
 					// Membership: the same owner/admin gate as connectors.
 					r.Group(func(r chi.Router) {
@@ -250,9 +298,6 @@ func (s *Server) Router() http.Handler {
 			})
 		})
 	})
-
-	mountUI(r)
-	return r
 }
 
 // corsMiddleware allows the configured origins to call the API from a

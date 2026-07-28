@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/daiwa-zou/kiln/internal/agent"
+	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/observability"
@@ -82,5 +83,17 @@ func newWorker(cfg *config.Config, db *store.DB, log *slog.Logger) (*worker.Work
 	}
 	js := store.NewWikiStore(db.Pool)
 	pipeline := jobs.NewPipeline(cfg, js, runner, log)
-	return worker.New(cfg, js, pipeline, log), nil
+	w := worker.New(cfg, js, pipeline, log)
+	// Without object storage the worker still builds path-mode and git
+	// sources; a files-mode upload connector then fails its run with the
+	// configuration message rather than the worker refusing to start.
+	if blobs, err := blob.Open(cfg.Storage); err != nil {
+		log.Warn("object storage unavailable; uploaded-files sources disabled", "err", err)
+	} else {
+		w.Blobs = blobs
+		// The pipeline deletes released blobs after an approved deletion's
+		// cascade lands, closing the loop the file API's upload opened.
+		pipeline.Blobs = blobs
+	}
+	return w, nil
 }

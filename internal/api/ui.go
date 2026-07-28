@@ -10,11 +10,12 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// The reading UI: one HTML shell plus one stylesheet and one script, embedded
+// The reading UI: one HTML shell, one stylesheet, and two scripts, embedded
 // and served from /ui/. Split from a single inline file when the graph view
-// pushed it past two thousand lines (the roadmap's revisit trigger); still
-// deliberately not a framework app — it consumes the same public REST API a
-// future frontend would, so it remains a stand-in rather than a detour.
+// pushed it past two thousand lines (the roadmap's revisit trigger), and
+// again when the sources view would have done the same; still deliberately
+// not a framework app — it consumes the same public REST API a future
+// frontend would, so it remains a stand-in rather than a detour.
 //
 //go:embed ui
 var uiFS embed.FS
@@ -24,9 +25,10 @@ var uiFS embed.FS
 var uiAssets = func() map[string]*uiAsset {
 	out := map[string]*uiAsset{}
 	for path, meta := range map[string]struct{ file, contentType string }{
-		"/":             {"ui/index.html", "text/html; charset=utf-8"},
-		"/ui/style.css": {"ui/style.css", "text/css; charset=utf-8"},
-		"/ui/app.js":    {"ui/app.js", "text/javascript; charset=utf-8"},
+		"/":              {"ui/index.html", "text/html; charset=utf-8"},
+		"/ui/style.css":  {"ui/style.css", "text/css; charset=utf-8"},
+		"/ui/app.js":     {"ui/app.js", "text/javascript; charset=utf-8"},
+		"/ui/sources.js": {"ui/sources.js", "text/javascript; charset=utf-8"},
 	} {
 		body, err := uiFS.ReadFile(meta.file)
 		if err != nil {

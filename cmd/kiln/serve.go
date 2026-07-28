@@ -11,6 +11,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/api"
 	"github.com/daiwa-zou/kiln/internal/auth"
+	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/github"
@@ -81,10 +82,19 @@ processes separately so builds scale independently of the API.`,
 				Runs:         ws,
 				Admin:        ws,
 				Members:      ws,
+				Files:        ws,
 				BudgetWindow: cfg.Agent.BudgetWindow,
 				DB:           db,
 				Log:          log,
 				CORSOrigins:  cfg.CORSOrigins,
+			}
+			// Without object storage the upload route answers 503 with the
+			// fix; file listing and deletion keep working.
+			if blobs, err := blob.Open(cfg.Storage); err != nil {
+				log.Warn("object storage unavailable; uploads disabled", "err", err)
+			} else {
+				srv.Blobs = blobs
+				fmt.Fprintln(cmd.OutOrStdout(), "  document uploads enabled ("+string(cfg.Storage.Backend)+" storage)")
 			}
 			// Without a master key the credential routes answer 503 with the
 			// fix; connector CRUD keeps working for local-path setups.

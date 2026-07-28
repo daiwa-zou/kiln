@@ -192,7 +192,10 @@ const api = async (path, opts = {}) => {
   if (method !== "GET" && csrfToken()) headers["X-CSRF-Token"] = csrfToken();
 
   let body;
-  if (opts.body !== undefined) {
+  if (opts.body instanceof FormData) {
+    // Multipart uploads: the browser sets Content-Type with its boundary.
+    body = opts.body;
+  } else if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(opts.body);
   }
@@ -1695,6 +1698,7 @@ function route() {
   if (hash === "reviews") return showReviews(false);
   if (hash === "reviews/all") return showReviews(true);
   if (hash === "runs") return showRuns();
+  if (hash === "sources") return showSources();
   if (hash === "members") return showMembers();
   if (hash === "steering") return showSteering();
   return showArtifact("overview");
@@ -1715,7 +1719,8 @@ const VIEW_COMMANDS = [
   { title: "Overview", hash: "#/overview" }, { title: "Index", hash: "#/index" },
   { title: "Graph", hash: "#/graph" },
   { title: "Gaps", hash: "#/gaps" }, { title: "Reviews", hash: "#/reviews" },
-  { title: "Runs", hash: "#/runs" }, { title: "Members", hash: "#/members" },
+  { title: "Runs", hash: "#/runs" }, { title: "Sources", hash: "#/sources" },
+  { title: "Members", hash: "#/members" },
   { title: "Log", hash: "#/log" }, { title: "Steering", hash: "#/steering" },
 ];
 let closePalette = null, palRows = [], palSelection = 0;

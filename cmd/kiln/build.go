@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/daiwa-zou/kiln/internal/agent"
+	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/mapper/repomap"
@@ -72,19 +73,28 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
-	if f.path == "" {
-		return fmt.Errorf("a directory is required: kiln build <path>")
+	// A repository is optional when documents or web pages feed the build; the
+	// slug then has no directory name to fall back on, so --bench must say it.
+	if f.path == "" && f.docs == "" && len(f.web) == 0 {
+		return fmt.Errorf("nothing to build: give a directory (kiln build <path>), --docs, or --web")
 	}
-	absPath, err := filepath.Abs(f.path)
-	if err != nil {
-		return err
-	}
-	if info, err := os.Stat(absPath); err != nil || !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", f.path)
+	absPath := ""
+	if f.path != "" {
+		var err error
+		absPath, err = filepath.Abs(f.path)
+		if err != nil {
+			return err
+		}
+		if info, err := os.Stat(absPath); err != nil || !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", f.path)
+		}
 	}
 
 	slug := f.workspace
 	if slug == "" {
+		if absPath == "" {
+			return fmt.Errorf("--bench is required when building without a repository directory")
+		}
 		slug = repomap.Slugify(filepath.Base(absPath))
 	}
 
@@ -111,7 +121,11 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 	}
 
 	js := store.NewWikiStore(db.Pool)
-	workspaceID, err := js.EnsureWorkspace(ctx, f.org, slug, filepath.Base(absPath))
+	name := slug
+	if absPath != "" {
+		name = filepath.Base(absPath)
+	}
+	workspaceID, err := js.EnsureWorkspace(ctx, f.org, slug, name)
 	if err != nil {
 		return err
 	}
@@ -121,6 +135,11 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 		return err
 	}
 	pipeline := jobs.NewPipeline(cfg, js, runner, log)
+	// A CLI build can drop blob-backed sources a worker imported earlier; with
+	// storage configured, their released blobs are cleaned up here too.
+	if blobs, err := blob.Open(cfg.Storage); err == nil {
+		pipeline.Blobs = blobs
+	}
 
 	started := time.Now()
 	res, err := pipeline.Execute(ctx, jobs.ExecuteRequest{

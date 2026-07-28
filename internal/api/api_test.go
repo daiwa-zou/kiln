@@ -52,7 +52,8 @@ func testServer(t *testing.T) (*httptest.Server, *store.WikiStore, string) {
 	}
 
 	srv := httptest.NewServer((&Server{
-		Store: js, Writes: js, Runs: js, Admin: js,
+		Store: js, Writes: js, Runs: js, Admin: js, Files: js,
+		Blobs:        newMemBlobs(),
 		BudgetWindow: 30 * 24 * time.Hour,
 		DB:           &store.DB{Pool: pool},
 	}).Router())

@@ -10,14 +10,18 @@ package worker
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/config"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/crypto"
+	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
@@ -35,6 +39,7 @@ type Store interface {
 	LoadSealedCredential(ctx context.Context, id string) (*store.SealedCredential, error)
 	PollDueConnectors(ctx context.Context, olderThan time.Duration) ([]store.ConnectorRow, error)
 	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error)
+	ListFiles(ctx context.Context, workspaceID string) ([]store.FileRow, error)
 	LastSuccessfulRef(ctx context.Context, workspaceID string) (string, error)
 	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
 	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
@@ -96,6 +101,11 @@ type Worker struct {
 	// github installation. Short-lived and repo-scoped, these supersede
 	// stored PATs wherever the App is installed.
 	GitHub *github.Client
+
+	// Blobs reads uploaded workspace files at sync time, for upload
+	// connectors in files mode (no path in the config). Nil makes such a
+	// connector a clear configuration error rather than a mystery.
+	Blobs blob.Store
 }
 
 // New assembles a worker from resolved configuration.
@@ -320,20 +330,50 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 
 	spec := jobs.SourceSpec{Slug: run.WorkspaceSlug}
 	var ids jobs.SourceConnectors
-	var cleanup func()
+	// More than one connector can stage material (a remote clone and a
+	// blob-store materialization in the same run), so cleanups accumulate
+	// rather than occupy a single slot that a second stage would overwrite.
+	var cleanups []func()
+	cleanup := func() {
+		for _, fn := range cleanups {
+			fn()
+		}
+	}
+	fail2 := func(err error) (jobs.SourceSpec, jobs.SourceConnectors, func(), error) {
+		return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, err
+	}
 	for _, c := range connectors {
 		// Web connectors carry URLs, not paths: policy is enforced by the
 		// connector's pinned dialer at fetch time (and at config write time),
 		// so nothing needs resolving here.
 		if c.Kind == "web" {
 			if len(spec.WebURLs) > 0 {
-				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("workspace %s has multiple web connectors; only one is supported", run.WorkspaceSlug)
+				return fail2(fmt.Errorf("workspace %s has multiple web connectors; only one is supported", run.WorkspaceSlug))
 			}
 			spec.WebURLs = webconn.URLsFrom(c.Config)
 			ids.Web = c.ID
 			if len(spec.WebURLs) == 0 {
-				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s (web) has no urls configured", c.Name)
+				return fail2(fmt.Errorf("connector %s (web) has no urls configured", c.Name))
 			}
+			continue
+		}
+
+		// An upload connector without a path is in files mode: its material
+		// is the workspace's uploaded files, staged from the blob store.
+		if path, _ := c.Config["path"].(string); c.Kind == "upload" && path == "" {
+			if spec.DocsDir != "" {
+				return fail2(fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug))
+			}
+			dir, blobKeys, clean, err := w.materializeFiles(ctx, run.WorkspaceID)
+			if clean != nil {
+				cleanups = append(cleanups, clean)
+			}
+			if err != nil {
+				return fail2(fmt.Errorf("connector %s (upload): %w", c.Name, err))
+			}
+			spec.DocsDir = dir
+			spec.BlobKeys = blobKeys
+			ids.Upload = c.ID
 			continue
 		}
 
@@ -342,46 +382,110 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 			err      error
 		)
 		if remoteURL, _ := c.Config["url"].(string); remoteURL != "" && c.Kind == "git" {
-			resolved, cleanup, err = w.cloneRemote(ctx, c, remoteURL)
+			var clean func()
+			resolved, clean, err = w.cloneRemote(ctx, c, remoteURL)
+			if clean != nil {
+				cleanups = append(cleanups, clean)
+			}
 			if err != nil {
-				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err)
+				return fail2(fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err))
 			}
 		} else {
 			path, _ := c.Config["path"].(string)
 			if path == "" {
-				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s (%s) has no path configured", c.Name, c.Kind)
+				return fail2(fmt.Errorf("connector %s (%s) has no path configured", c.Name, c.Kind))
 			}
 			// SECURITY: this config arrived through the API or the database,
 			// not the operator's command line. The allowlist is what keeps it
 			// from being a read of arbitrary directories the process can see.
 			resolved, err = AllowedPath(path, w.PermittedSourceRoots)
 			if err != nil {
-				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err)
+				return fail2(fmt.Errorf("connector %s (%s): %w", c.Name, c.Kind, err))
 			}
 		}
 
 		switch c.Kind {
 		case "git":
 			if spec.Path != "" {
-				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug)
+				return fail2(fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug))
 			}
 			spec.Path = resolved
 			ids.Git = c.ID
 		case "upload":
 			if spec.DocsDir != "" {
-				return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug)
+				return fail2(fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug))
 			}
 			spec.DocsDir = resolved
 			ids.Upload = c.ID
 		default:
-			return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf("connector %s has unsupported kind %q", c.Name, c.Kind)
+			return fail2(fmt.Errorf("connector %s has unsupported kind %q", c.Name, c.Kind))
 		}
 	}
-	if spec.Path == "" {
-		return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, fmt.Errorf(
-			"workspace %s has no git connector; a build needs a repository to scan", run.WorkspaceSlug)
-	}
 	return spec, ids, cleanup, nil
+}
+
+// materializeFiles stages every uploaded workspace file from the blob store
+// into a temp directory under its stored relative path, so the upload
+// connector extracts it exactly as it would a local folder. Zero files is a
+// valid, empty sync. The returned map carries each staged document's unit key
+// to its blob key, for source-record attribution and the deletion cascade.
+func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir string, blobKeys map[string][]string, cleanup func(), err error) {
+	if w.Blobs == nil {
+		return "", nil, nil, fmt.Errorf(
+			"object storage is not configured on this worker; set storage.* (or give the connector a path under permitted_source_roots)")
+	}
+	files, err := w.Store.ListFiles(ctx, workspaceID)
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	dir, err = os.MkdirTemp("", "kiln-files-")
+	if err != nil {
+		return "", nil, nil, err
+	}
+	cleanup = func() { os.RemoveAll(dir) }
+	// Even though stored paths were sanitized at upload time, staging goes
+	// through an os.Root jail so a corrupted row cannot write outside the
+	// staging directory.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return dir, nil, cleanup, err
+	}
+	defer root.Close()
+
+	blobKeys = make(map[string][]string, len(files))
+	for _, f := range files {
+		if err := stageBlob(ctx, w.Blobs, root, f); err != nil {
+			return dir, nil, cleanup, fmt.Errorf("staging %s: %w", f.Path, err)
+		}
+		key := diff.DocKey(diff.UploadOrigin(f.Path))
+		blobKeys[string(key)] = append(blobKeys[string(key)], f.BlobKey)
+	}
+	return dir, blobKeys, cleanup, nil
+}
+
+// stageBlob copies one stored file into the staging jail.
+func stageBlob(ctx context.Context, blobs blob.Store, root *os.Root, f store.FileRow) error {
+	rc, err := blobs.Get(ctx, f.BlobKey)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	if parent := filepath.Dir(filepath.FromSlash(f.Path)); parent != "." {
+		if err := root.MkdirAll(parent, 0o755); err != nil {
+			return err
+		}
+	}
+	dst, err := root.Create(filepath.FromSlash(f.Path))
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, rc); err != nil {
+		dst.Close()
+		return err
+	}
+	return dst.Close()
 }
 
 // cloneRemote materializes a shallow clone of a connector's https remote.

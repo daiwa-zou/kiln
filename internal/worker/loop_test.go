@@ -67,6 +67,10 @@ func (l *loopStore) ClaimNextRun(context.Context, string) (*store.QueuedRun, err
 	return run, nil
 }
 
+func (l *loopStore) ListFiles(context.Context, string) ([]store.FileRow, error) {
+	return nil, nil
+}
+
 func (l *loopStore) FailRun(_ context.Context, runID, msg string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
