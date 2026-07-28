@@ -510,22 +510,14 @@ async function showSources() {
            <div class="empty">Managing sources needs an org owner or an instance
             admin. You can still add documents below if your role allows.</div>`}
 
-      <label class="group-label">Documents</label>
+      <div class="sec-head">
+        <label class="group-label">Documents</label>
+        ${uploadConn && !uploadConn.enabled ? `<span class="chip">paused — skipped on ingest</span>` : ""}
+        ${canAdmin && uploadConn ? `<button class="btn quiet" data-conn-toggle="${esc(uploadConn.id)}" data-enabled="${uploadConn.enabled}">
+          ${uploadConn.enabled ? "pause" : "resume"}</button>` : ""}
+      </div>
       <div id="upload-progress" class="hint" role="status"></div>
       <div class="review" id="file-drop" aria-label="Uploaded documents; drop files to add more">
-        <div class="meta">
-          <span class="chip kind-upload">documents</span>
-          ${uploadConn && !uploadConn.enabled ? `<span class="chip">paused</span>` : ""}
-        </div>
-        <div class="detail">${(() => {
-          if (!uploadConn) return "Files you drop are kept, and are read once document uploads are enabled with + Add source.";
-          if (!uploadConn.enabled) return "paused; documents are skipped on ingest until resumed.";
-          return `${esc(triggerPhrase[uploadConn.triggerMode] || uploadConn.triggerMode)}; ${uploadConn.lastSynced ? `last read ${esc(relTime(uploadConn.lastSynced))}` : "not read yet"}.`;
-        })()}</div>
-        ${canAdmin && uploadConn ? `<div class="meta">
-          <button class="btn quiet" data-conn-toggle="${esc(uploadConn.id)}" data-enabled="${uploadConn.enabled}">
-            ${uploadConn.enabled ? "pause" : "resume"}</button>
-        </div>` : ""}
         ${filesErr ? `<div class="empty">${esc(filesErr)}</div>`
           : files.map(fileRow).join("") ||
             `<div class="empty">No documents yet. Add markdown, PDFs, Office

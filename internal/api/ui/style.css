@@ -353,12 +353,18 @@
      dropzone only while a drag is over it. */
   #file-drop { border-radius: 8px; transition: box-shadow var(--dur); }
   #file-drop.over { box-shadow: 0 0 0 2px var(--ember); }
-  /* Inside the card, dividers sit above each file row -- separating the
-     list from the card's own controls -- and never trail after the last
-     row, where a stray hairline would fight the card border. */
-  #file-drop .row { border-bottom: none; border-top: 1px solid var(--border); margin-top: 6px; }
+  /* Inside the card, dividers sit only between file rows: none under the
+     last (it would fight the card border) and none over the first (the
+     card edge already frames it). */
+  #file-drop .row { border-bottom: none; }
+  #file-drop .row + .row { border-top: 1px solid var(--border); }
+  #file-drop .row:first-child { padding-top: 0; }
   #file-drop .row:last-child { padding-bottom: 0; }
-  #file-drop > .meta { margin-bottom: 2px; }
+
+  /* Section heading with inline controls (the documents pause/resume). */
+  .sec-head { display: flex; align-items: center; gap: 10px; }
+  .sec-head .group-label { margin: 16px 0 5px; }
+  .sec-head .btn, .sec-head .chip { margin-top: 10px; }
 
   /* ---- dynamism: shared ------------------------------------------------ */
   .sr-only {
