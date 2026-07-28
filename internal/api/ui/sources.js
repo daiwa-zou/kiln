@@ -436,7 +436,7 @@ function openSourceWizard(ctx) {
 // ---- the sources view -------------------------------------------------------
 
 async function showSources() {
-  const view = beginView("Sources", "sources");
+  const view = beginView("Ingestion", "sources");
   const ws = encodeURIComponent(state.workspace);
   try {
     // Connectors and credentials are owner-gated; files and runs are readable
@@ -503,10 +503,35 @@ async function showSources() {
         </span>
       </div>`;
 
-    if (!view.done(`<h1>Sources</h1>
-      <p class="hint">What this bench reads: a repository, web pages, and uploaded
-      documents all fire into one wiki. Pausing a source skips it without touching
-      the pages it already produced.</p>
+    const money = (v) => `$${Number(v || 0).toFixed(2)}`;
+    const runPages = (r) => {
+      const parts = [];
+      if (r.pagesCreated) parts.push(`${r.pagesCreated} created`);
+      if (r.pagesUpdated) parts.push(`${r.pagesUpdated} updated`);
+      if (r.pagesDeleted) parts.push(`${r.pagesDeleted} removed`);
+      return parts.join(", ");
+    };
+    const runCard = (r) => `
+      <div class="review">
+        <div class="meta">
+          <span class="chip run-${esc(r.status)}">${esc(r.status)}</span>
+          <span class="chip">${esc(r.trigger)}</span>
+          ${r.ref ? `<span class="chip mono">${esc(r.ref)}</span>` : ""}
+          ${timeTag(r.created)}
+        </div>
+        <strong>${money(r.costUsd)}</strong>
+        <span class="count">${runPages(r) || (r.status === "no_changes" ? "nothing changed — no cost" : "")}</span>
+        ${r.error ? `<div class="detail">${esc(r.error)}</div>` : ""}
+        ${r.costUsd > 0 ? `<details class="panel" data-run-items="${esc(r.id)}">
+          <summary>cost by unit</summary>
+          <div class="detail">loading…</div>
+        </details>` : ""}
+      </div>`;
+
+    if (!view.done(`<h1>Ingestion</h1>
+      <p class="hint">What this bench reads and when it read it: a repository,
+      web pages, and uploaded documents all fire into one wiki. Pausing a source
+      skips it without touching the pages it already produced.</p>
       <div class="meta sources-actions">
         ${canAdmin ? `<button class="btn" id="sources-add">+ Add source</button>` : ""}
         <button class="btn ${canAdmin ? "quiet" : ""}" id="sources-build" ${buildActive ? "disabled" : ""}>
@@ -537,7 +562,34 @@ async function showSources() {
           : files.map(fileRow).join("") ||
             `<div class="empty">No documents yet. Add markdown, PDFs, Office
              files, or HTML with + Add source, or drop files anywhere on this card.</div>`}
-      </div>`)) return;
+      </div>
+
+      <label class="group-label">Recent runs</label>
+      <p class="hint">Each ingest regenerates only the pages whose sources
+      changed; an unchanged bench incurs no cost. Runs execute one at a time
+      per bench.</p>
+      ${runs.map(runCard).join("") ||
+        `<div class="empty">No runs yet. Press Ingest now, or build from the
+         CLI with <span class="mono">kiln build</span>.</div>`}`)) return;
+
+    // Per-unit cost attribution, fetched lazily on first expand: where the
+    // money went, costliest unit first, estimate beside actual.
+    for (const d of document.querySelectorAll("[data-run-items]")) {
+      d.addEventListener("toggle", async () => {
+        if (!d.open || d.dataset.loaded) return;
+        d.dataset.loaded = "true";
+        const box = d.querySelector(".detail");
+        try {
+          const items = await api(`/workspaces/${ws}/runs/${encodeURIComponent(d.dataset.runItems)}/items`);
+          box.innerHTML = items.map((it) => `<div class="row">
+              <span class="mono">${esc(it.key)}${it.status !== "succeeded" ? ` <span class="chip run-failed">${esc(it.status)}</span>` : ""}</span>
+              <span class="count">${money(it.costUsd)}${it.estCostUsd ? ` (est ${money(it.estCostUsd)})` : ""}</span>
+            </div>`).join("") || "no unit records";
+        } catch (err) {
+          if (!err.handled) box.textContent = err.message;
+        }
+      });
+    }
 
     // ---- actions ------------------------------------------------------------
     const buildNote = (msg, isErr) => {
@@ -555,7 +607,8 @@ async function showSources() {
       try {
         const res = await api(`/workspaces/${ws}/runs`, { method: "POST", body: {} });
         toast(res.created ? "Run queued" : "A run was already waiting — joined it");
-        location.hash = "#/runs";
+        // The run appears in Recent runs below; no page bounce.
+        showSources();
       } catch (err) {
         if (!err.handled) buildNote(err.message, true);
       }
@@ -640,9 +693,10 @@ async function showSources() {
       });
     }
 
-    // The next-build line goes stale as deadlines pass; refresh it on a slow
-    // leash while a run is queued or scheduled, guarded by the nav token.
-    if (buildActive) setTimeout(() => { if (view.current()) showSources(); }, 15000);
+    // Live-ish while something is moving: the next-ingest line and the run
+    // cards refresh together on a short leash, guarded by the nav token so
+    // leaving the view stops the poll.
+    if (buildActive) setTimeout(() => { if (view.current()) showSources(); }, 5000);
   } catch (err) {
     if (!err.handled) view.done(banner(err));
   }

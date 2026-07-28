@@ -1424,87 +1424,6 @@ async function showGraph() {
   }
 }
 
-// showRuns renders the build dashboard: what the queue is doing and what each
-// run cost, with the rebuild button that feeds it.
-async function showRuns() {
-  const view = beginView("Runs", "runs");
-  try {
-    const runs = await api(`/workspaces/${encodeURIComponent(state.workspace)}/runs`);
-    const active = runs.some((r) => r.status === "queued" || r.status === "running");
-    const money = (v) => `$${Number(v || 0).toFixed(2)}`;
-    const pages = (r) => {
-      const parts = [];
-      if (r.pagesCreated) parts.push(`${r.pagesCreated} created`);
-      if (r.pagesUpdated) parts.push(`${r.pagesUpdated} updated`);
-      if (r.pagesDeleted) parts.push(`${r.pagesDeleted} removed`);
-      return parts.join(", ");
-    };
-    if (!view.done(`<h1>Runs</h1>
-      <p class="hint">A run synchronizes this bench's sources and regenerates only
-      the pages whose sources changed; an unchanged bench incurs no cost. Runs
-      execute one at a time per bench.</p>
-      <button class="btn" id="run-now" ${active ? "disabled" : ""}>
-        ${active ? "A run is already queued or running" : "Rebuild now"}</button>
-      <span class="hint" id="run-note" role="status"></span>
-      ${runs.map((r) => `
-        <div class="review">
-          <div class="meta">
-            <span class="chip run-${esc(r.status)}">${esc(r.status)}</span>
-            <span class="chip">${esc(r.trigger)}</span>
-            ${r.ref ? `<span class="chip mono">${esc(r.ref)}</span>` : ""}
-            ${timeTag(r.created)}
-          </div>
-          <strong>${money(r.costUsd)}</strong>
-          <span class="count">${pages(r) || (r.status === "no_changes" ? "nothing changed — no cost" : "")}</span>
-          ${r.error ? `<div class="detail">${esc(r.error)}</div>` : ""}
-          ${r.costUsd > 0 ? `<details class="panel" data-run-items="${esc(r.id)}">
-            <summary>cost by unit</summary>
-            <div class="detail">loading…</div>
-          </details>` : ""}
-        </div>`).join("") || `<div class="empty">No runs yet. Rebuild now, or push
-          a build from the CLI with <span class="mono">kiln build</span>.</div>`}`)) return;
-
-    // Per-unit cost attribution, fetched lazily on first expand: where the
-    // money went, costliest unit first, estimate beside actual.
-    for (const d of document.querySelectorAll("[data-run-items]")) {
-      d.addEventListener("toggle", async () => {
-        if (!d.open || d.dataset.loaded) return;
-        d.dataset.loaded = "true";
-        const box = d.querySelector(".detail");
-        try {
-          const items = await api(`/workspaces/${encodeURIComponent(state.workspace)}/runs/${encodeURIComponent(d.dataset.runItems)}/items`);
-          box.innerHTML = items.map((it) => `<div class="row">
-              <span class="mono">${esc(it.key)}${it.status !== "succeeded" ? ` <span class="chip run-failed">${esc(it.status)}</span>` : ""}</span>
-              <span class="count">${money(it.costUsd)}${it.estCostUsd ? ` (est ${money(it.estCostUsd)})` : ""}</span>
-            </div>`).join("") || "no unit records";
-        } catch (err) {
-          if (!err.handled) box.textContent = err.message;
-        }
-      });
-    }
-
-    const btn = $("run-now");
-    if (btn && !btn.disabled) once(btn, async () => {
-      try {
-        const res = await api(`/workspaces/${encodeURIComponent(state.workspace)}/runs`,
-          { method: "POST", body: {} });
-        toast(res.created ? "Run queued" : "A run was already waiting — joined it");
-        showRuns();
-      } catch (err) {
-        if (err.handled) return;
-        const note = $("run-note");
-        if (note) { note.textContent = err.message; note.classList.add("error"); }
-      }
-    });
-
-    // Live-ish while something is moving: re-render on a short leash, guarded
-    // by the nav token so leaving the view stops the poll.
-    if (active) setTimeout(() => { if (view.current()) showRuns(); }, 5000);
-  } catch (err) {
-    if (!err.handled) view.done(banner(err));
-  }
-}
-
 // showMembers manages the org behind this bench: who belongs, with what
 // role. Owners and instance admins only; everyone else sees the explanation
 // rather than a broken form.
@@ -1697,8 +1616,9 @@ function route() {
   if (hash === "graph") return showGraph();
   if (hash === "reviews") return showReviews(false);
   if (hash === "reviews/all") return showReviews(true);
-  if (hash === "runs") return showRuns();
-  if (hash === "sources") return showSources();
+  // Sources and runs merged into one ingestion view; the old hashes stay
+  // routable so bookmarks and habit survive.
+  if (hash === "ingestion" || hash === "sources" || hash === "runs") return showSources();
   if (hash === "members") return showMembers();
   if (hash === "steering") return showSteering();
   return showArtifact("overview");
@@ -1719,7 +1639,7 @@ const VIEW_COMMANDS = [
   { title: "Overview", hash: "#/overview" }, { title: "Index", hash: "#/index" },
   { title: "Graph", hash: "#/graph" },
   { title: "Gaps", hash: "#/gaps" }, { title: "Reviews", hash: "#/reviews" },
-  { title: "Runs", hash: "#/runs" }, { title: "Sources", hash: "#/sources" },
+  { title: "Ingestion", hash: "#/ingestion" },
   { title: "Members", hash: "#/members" },
   { title: "Log", hash: "#/log" }, { title: "Steering", hash: "#/steering" },
 ];
