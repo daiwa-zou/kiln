@@ -376,6 +376,31 @@
   }
   #file-drop .row time { color: var(--ink-dim); font-size: 13px; }
 
+  /* Recent runs: day headers over compact rows. The dot carries state color
+     (the sentence carries the meaning); cost and provenance sit demoted on
+     the right; per-unit cost stays behind its toggle. */
+  .run-day {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--ink-faint); margin: 12px 0 4px;
+  }
+  .run-list .row { border-bottom: none; }
+  .run-list > .row:not(:first-child) { border-top: 1px solid var(--border); }
+  .run-list > .row:first-child { padding-top: 0; }
+  .run-list > *:last-child { padding-bottom: 0; }
+  .run-list .row > span:last-child {
+    display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+  }
+  .run-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 9px; background: var(--ash);
+  }
+  .run-dot.run-no_changes { background: var(--border); }
+  .run-dot.run-running, .run-dot.run-queued { background: var(--ember); }
+  .run-dot.run-failed, .run-dot.run-over_budget { background: #b3261e; }
+  .run-units { margin: 2px 0 8px 17px; }
+  .run-units summary { cursor: pointer; color: var(--ink-dim); font-size: 12.5px; }
+  .run-units .detail { font-size: 13px; color: var(--ink-dim); }
+
   /* Collapsible ingestion sections: the group label doubles as the summary,
      with a small disclosure caret that turns when open. */
   details.sec > summary {

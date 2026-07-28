@@ -513,41 +513,54 @@ async function showSources() {
       </div>`;
 
     const money = (v) => `$${Number(v || 0).toFixed(2)}`;
-    // Trigger values are queue internals; the chips say what actually
-    // happened in words a reader doesn't have to decode.
+    // Trigger values are queue internals; runs started by hand carry no
+    // chip at all (that is the normal case), automatic ones say why.
     const triggerLabel = {
-      manual: "started by you",
       webhook: "repo push",
       upload: "documents changed",
       poll: "scheduled check",
       continuation: "finishing the previous run",
     };
-    const runPages = (r) => {
+    // Each run reads as one sentence about what happened, not a ledger row.
+    const runOutcome = (r) => {
+      if (r.status === "queued") return "Waiting to start";
+      if (r.status === "running") return "Ingesting now…";
+      if (r.status === "failed") return "Failed";
+      if (r.status === "over_budget") return "Stopped at the budget cap";
       const parts = [];
       if (r.pagesCreated) parts.push(`${r.pagesCreated} created`);
       if (r.pagesUpdated) parts.push(`${r.pagesUpdated} updated`);
       if (r.pagesDeleted) parts.push(`${r.pagesDeleted} removed`);
-      return parts.join(", ");
+      if (!parts.length) return "Nothing changed — no cost";
+      const n = (r.pagesCreated || 0) + (r.pagesUpdated || 0) + (r.pagesDeleted || 0);
+      return `${n === 1 ? "1 page" : `${n} pages`}: ${parts.join(", ")}`;
     };
-    // Status keeps its raw value in the class (the colors key off it) but
-    // drops the underscores in what the reader sees.
-    const statusLabel = { no_changes: "no changes", over_budget: "over budget" };
-    const runCard = (r) => `
-      <div class="review">
-        <div class="meta">
-          <span class="chip run-${esc(r.status)}">${esc(statusLabel[r.status] || r.status)}</span>
-          <span class="chip">${esc(triggerLabel[r.trigger] || r.trigger)}</span>
-          ${r.ref ? `<span class="chip mono">${esc(r.ref)}</span>` : ""}
-          ${timeTag(r.created)}
-        </div>
-        <strong>${money(r.costUsd)}</strong>
-        <span class="count">${runPages(r) || (r.status === "no_changes" ? "nothing changed — no cost" : "")}</span>
-        ${r.error ? `<div class="detail">${esc(r.error)}</div>` : ""}
-        ${r.costUsd > 0 ? `<details class="panel" data-run-items="${esc(r.id)}">
-          <summary>cost by unit</summary>
-          <div class="detail">loading…</div>
-        </details>` : ""}
-      </div>`;
+    const runRow = (r) => `
+      <div class="row" title="${esc(r.created)}">
+        <span><span class="run-dot run-${esc(r.status)}" aria-hidden="true"></span>${esc(runOutcome(r))}</span>
+        <span>
+          ${r.trigger && r.trigger !== "manual" ? `<span class="chip">${esc(triggerLabel[r.trigger] || r.trigger)}</span>` : ""}
+          ${r.ref ? `<span class="count mono">${esc(r.ref)}</span>` : ""}
+          ${r.costUsd > 0 ? `<span class="count">${money(r.costUsd)}</span>` : ""}
+        </span>
+      </div>
+      ${r.error ? `<div class="detail hint error">${esc(r.error)}</div>` : ""}
+      ${r.costUsd > 0 ? `<details class="run-units" data-run-items="${esc(r.id)}">
+        <summary>cost by unit</summary>
+        <div class="detail">loading…</div>
+      </details>` : ""}`;
+    // Runs group under day headers, newest first; the repeated time chips go.
+    const runGroups = [];
+    for (const r of runs) {
+      const label = relTime(r.created);
+      if (!runGroups.length || runGroups[runGroups.length - 1].label !== label) {
+        runGroups.push({ label, runs: [] });
+      }
+      runGroups[runGroups.length - 1].runs.push(r);
+    }
+    const runsHTML = runGroups.map((g) => `
+      <div class="run-day">${esc(g.label)}</div>
+      <div class="review run-list">${g.runs.map(runRow).join("")}</div>`).join("");
 
     if (!view.done(`<h1>Ingestion</h1>
       <p class="hint">What this bench reads and when it read it: a repository,
@@ -587,7 +600,7 @@ async function showSources() {
         `<p class="hint">Each ingest regenerates only the pages whose sources
          changed; an unchanged bench incurs no cost. Runs execute one at a time
          per bench.</p>
-         ${runs.map(runCard).join("") ||
+         ${runsHTML ||
            `<div class="empty">No runs yet. Press Ingest now, or build from the
             CLI with <span class="mono">kiln build</span>.</div>`}`)}`)) return;
 
