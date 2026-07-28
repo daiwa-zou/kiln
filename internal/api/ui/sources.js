@@ -449,6 +449,7 @@ async function showSources() {
     const filesErr = filesRes.status === "rejected" ? filesRes.reason.message : "";
     const runs = runsRes.status === "fulfilled" ? [...runsRes.value] : [];
     const buildActive = runs.some((r) => r.status === "queued" || r.status === "running");
+    const uploadConn = connectors.find((c) => c.kind === "upload");
 
     // Each source reads as a sentence, not a row of internals: what it is,
     // where it points, when it ingests, and when it was last read.
@@ -512,12 +513,19 @@ async function showSources() {
       <label class="group-label">Documents</label>
       <div id="upload-progress" class="hint" role="status"></div>
       <div class="review" id="file-drop" aria-label="Uploaded documents; drop files to add more">
-        <div class="meta"><span class="chip kind-upload">documents</span></div>
+        <div class="meta">
+          <span class="chip kind-upload">documents</span>
+          ${uploadConn && !uploadConn.enabled ? `<span class="chip">paused</span>` : ""}
+        </div>
         <div class="detail">${(() => {
-          const up = connectors.find((c) => c.kind === "upload" && c.enabled);
-          if (!up) return "Files you drop are kept, and are read once document uploads are enabled with + Add source.";
-          return `${esc(triggerPhrase[up.triggerMode] || up.triggerMode)}; ${up.lastSynced ? `last read ${esc(relTime(up.lastSynced))}` : "not read yet"}.`;
+          if (!uploadConn) return "Files you drop are kept, and are read once document uploads are enabled with + Add source.";
+          if (!uploadConn.enabled) return "paused; documents are skipped on ingest until resumed.";
+          return `${esc(triggerPhrase[uploadConn.triggerMode] || uploadConn.triggerMode)}; ${uploadConn.lastSynced ? `last read ${esc(relTime(uploadConn.lastSynced))}` : "not read yet"}.`;
         })()}</div>
+        ${canAdmin && uploadConn ? `<div class="meta">
+          <button class="btn quiet" data-conn-toggle="${esc(uploadConn.id)}" data-enabled="${uploadConn.enabled}">
+            ${uploadConn.enabled ? "pause" : "resume"}</button>
+        </div>` : ""}
         ${filesErr ? `<div class="empty">${esc(filesErr)}</div>`
           : files.map(fileRow).join("") ||
             `<div class="empty">No documents yet. Add markdown, PDFs, Office
