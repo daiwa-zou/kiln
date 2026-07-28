@@ -477,11 +477,14 @@ async function showSources() {
       </div>`;
 
     const fileRow = (f) => `
-      <div class="row" data-file-row="${esc(f.id)}">
-        <span class="mono">${esc(f.path)}</span>
+      <div class="row ${f.enabled === false ? "file-paused" : ""}" data-file-row="${esc(f.id)}">
+        <span class="mono">${esc(f.path)}
+          ${f.enabled === false ? `<span class="chip">paused</span>` : ""}</span>
         <span>
           <span class="count">${esc(humanBytes(f.size))}</span>
           ${timeTag(f.updated)}
+          <button class="btn quiet" data-file-toggle="${esc(f.id)}" data-enabled="${f.enabled !== false}">
+            ${f.enabled === false ? "resume" : "pause"}</button>
           <button class="btn quiet" data-file-delete="${esc(f.id)}">delete</button>
         </span>
       </div>`;
@@ -594,6 +597,20 @@ async function showSources() {
       });
     });
 
+    for (const b of document.querySelectorAll("[data-file-toggle]")) {
+      once(b, async () => {
+        try {
+          await api(`/workspaces/${ws}/files/${encodeURIComponent(b.dataset.fileToggle)}`,
+            { method: "PATCH", body: { enabled: b.dataset.enabled !== "true" } });
+          showSources();
+        } catch (err) {
+          if (!err.handled) {
+            const n = $("upload-progress");
+            if (n) { n.textContent = err.message; n.classList.add("error"); }
+          }
+        }
+      });
+    }
     for (const b of document.querySelectorAll("[data-file-delete]")) {
       once(b, async () => {
         if (!armButton(b, "delete")) return;

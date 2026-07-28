@@ -364,7 +364,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 			if spec.DocsDir != "" {
 				return fail2(fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug))
 			}
-			dir, blobKeys, clean, err := w.materializeFiles(ctx, run.WorkspaceID)
+			dir, blobKeys, skipped, clean, err := w.materializeFiles(ctx, run.WorkspaceID)
 			if clean != nil {
 				cleanups = append(cleanups, clean)
 			}
@@ -373,6 +373,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 			}
 			spec.DocsDir = dir
 			spec.BlobKeys = blobKeys
+			spec.SkippedKeys = skipped
 			ids.Upload = c.ID
 			continue
 		}
@@ -424,24 +425,26 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 	return spec, ids, cleanup, nil
 }
 
-// materializeFiles stages every uploaded workspace file from the blob store
+// materializeFiles stages every enabled workspace file from the blob store
 // into a temp directory under its stored relative path, so the upload
 // connector extracts it exactly as it would a local folder. Zero files is a
 // valid, empty sync. The returned map carries each staged document's unit key
-// to its blob key, for source-record attribution and the deletion cascade.
-func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir string, blobKeys map[string][]string, cleanup func(), err error) {
+// to its blob key, for source-record attribution and the deletion cascade;
+// skipped lists the unit keys of paused files, whose absence from the sync is
+// deliberate and must not read as a deletion.
+func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir string, blobKeys map[string][]string, skipped []diff.Key, cleanup func(), err error) {
 	if w.Blobs == nil {
-		return "", nil, nil, fmt.Errorf(
+		return "", nil, nil, nil, fmt.Errorf(
 			"object storage is not configured on this worker; set storage.* (or give the connector a path under permitted_source_roots)")
 	}
 	files, err := w.Store.ListFiles(ctx, workspaceID)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
 
 	dir, err = os.MkdirTemp("", "kiln-files-")
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
 	cleanup = func() { os.RemoveAll(dir) }
 	// Even though stored paths were sanitized at upload time, staging goes
@@ -449,19 +452,23 @@ func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir 
 	// staging directory.
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return dir, nil, cleanup, err
+		return dir, nil, nil, cleanup, err
 	}
 	defer root.Close()
 
 	blobKeys = make(map[string][]string, len(files))
 	for _, f := range files {
-		if err := stageBlob(ctx, w.Blobs, root, f); err != nil {
-			return dir, nil, cleanup, fmt.Errorf("staging %s: %w", f.Path, err)
-		}
 		key := diff.DocKey(diff.UploadOrigin(f.Path))
+		if !f.Enabled {
+			skipped = append(skipped, key)
+			continue
+		}
+		if err := stageBlob(ctx, w.Blobs, root, f); err != nil {
+			return dir, nil, nil, cleanup, fmt.Errorf("staging %s: %w", f.Path, err)
+		}
 		blobKeys[string(key)] = append(blobKeys[string(key)], f.BlobKey)
 	}
-	return dir, blobKeys, cleanup, nil
+	return dir, blobKeys, skipped, cleanup, nil
 }
 
 // stageBlob copies one stored file into the staging jail.

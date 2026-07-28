@@ -360,6 +360,8 @@
   #file-drop .row + .row { border-top: 1px solid var(--border); }
   #file-drop .row:first-child { padding-top: 0; }
   #file-drop .row:last-child { padding-bottom: 0; }
+  /* A paused document dims but stays legible; the chip carries the state. */
+  #file-drop .row.file-paused .mono { color: var(--ink-faint); }
 
   /* Section heading with inline controls (the documents pause/resume). */
   .sec-head { display: flex; align-items: center; gap: 10px; }

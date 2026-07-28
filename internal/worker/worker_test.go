@@ -127,8 +127,8 @@ func TestSourceSpecFilesModeStagesBlobs(t *testing.T) {
 				{ID: "c2", Kind: "upload", Name: "documents", Config: map[string]any{}},
 			},
 			files: []store.FileRow{
-				{ID: "f1", Path: "notes.md", BlobKey: "ws/ws1/uploads/f1"},
-				{ID: "f2", Path: "guides/deep.md", BlobKey: "ws/ws1/uploads/f2"},
+				{ID: "f1", Path: "notes.md", BlobKey: "ws/ws1/uploads/f1", Enabled: true},
+				{ID: "f2", Path: "guides/deep.md", BlobKey: "ws/ws1/uploads/f2", Enabled: true},
 			},
 		},
 		// No PermittedSourceRoots on purpose: files mode does not read
@@ -162,6 +162,48 @@ func TestSourceSpecFilesModeStagesBlobs(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(spec.DocsDir); !os.IsNotExist(err) {
 		t.Errorf("cleanup left staging dir: %v", err)
+	}
+}
+
+func TestSourceSpecFilesModeSkipsPausedFiles(t *testing.T) {
+	blobs := memBlobs{
+		"ws/ws1/uploads/f1": []byte("# Active\n"),
+		"ws/ws1/uploads/f2": []byte("# Paused\n"),
+	}
+	w := &Worker{
+		Store: &fakeStore{
+			connectors: []store.ConnectorRow{
+				{ID: "c2", Kind: "upload", Name: "documents", Config: map[string]any{}},
+			},
+			files: []store.FileRow{
+				{ID: "f1", Path: "active.md", BlobKey: "ws/ws1/uploads/f1", Enabled: true},
+				{ID: "f2", Path: "paused.md", BlobKey: "ws/ws1/uploads/f2", Enabled: false},
+			},
+		},
+		Blobs: blobs,
+	}
+
+	spec, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		t.Fatalf("sourceSpec: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(spec.DocsDir, "active.md")); err != nil {
+		t.Errorf("active file not staged: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(spec.DocsDir, "paused.md")); !os.IsNotExist(err) {
+		t.Errorf("paused file was staged: %v", err)
+	}
+	// The paused key is reported as skipped -- the pipeline needs it to keep
+	// deletion detection from reading the pause as a disappearance.
+	want := diff.DocKey(diff.UploadOrigin("paused.md"))
+	if len(spec.SkippedKeys) != 1 || spec.SkippedKeys[0] != want {
+		t.Errorf("SkippedKeys = %v, want [%s]", spec.SkippedKeys, want)
+	}
+	if _, ok := spec.BlobKeys[string(want)]; ok {
+		t.Error("paused file's blob attributed to the sync")
 	}
 }
 

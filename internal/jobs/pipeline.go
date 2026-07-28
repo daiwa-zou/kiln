@@ -96,6 +96,11 @@ type BuildRequest struct {
 	// Nil for sources that live outside the blob store (CLI --docs, repos).
 	BlobKeys map[string][]string
 
+	// SkippedKeys are unit keys deliberately left out of this sync (paused
+	// documents): absent from the map by choice, so deletion detection must
+	// pass over them and their section children.
+	SkippedKeys []diff.Key
+
 	// Force skips the content-hash gate so every routed unit regenerates, for
 	// recovering from bad output or a prompt change.
 	Force bool
@@ -167,7 +172,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 				synced[ns] = true
 			}
 		}
-		cands := deletionCandidates(sources, req.Map, req.ApprovedDeletions, synced)
+		cands := deletionCandidates(sources, req.Map, req.ApprovedDeletions, req.SkippedKeys, synced)
 		if len(cands) > 0 {
 			if err := p.Store.EnsureDeletionReviews(ctx, req.WorkspaceID, cands); err != nil {
 				return nil, fmt.Errorf("jobs: file deletion reviews: %w", err)

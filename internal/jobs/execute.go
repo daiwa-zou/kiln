@@ -56,6 +56,10 @@ type SourceSpec struct {
 	// local folder. It rides to the source records so an approved deletion
 	// can cascade to storage. Nil for local --docs directories.
 	BlobKeys map[string][]string
+	// SkippedKeys are unit keys deliberately left out of this sync (paused
+	// documents). Their absence from the map is a choice, not a
+	// disappearance, so no deletion review may be raised for them.
+	SkippedKeys []diff.Key
 }
 
 // ExecuteRequest is one full build: sync, map, route, then the pipeline.
@@ -219,6 +223,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		Ref:              gitRef(rm),
 		SourceDir:        req.Source.Path,
 		BlobKeys:         req.Source.BlobKeys,
+		SkippedKeys:      req.Source.SkippedKeys,
 		Map:              wm,
 		Router:           router,
 		Changes:          changes,

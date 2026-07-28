@@ -263,8 +263,11 @@ func (s *Server) mountRoutes(r chi.Router) {
 					// the write limiter. The upload POST itself lives outside
 					// this subtree, under the longer timeout.
 					r.Get("/files", s.handleFilesList)
-					r.With(writeLimiter(s.writeLimit)).
-						Delete("/files/{id}", s.handleFileDelete)
+					r.Group(func(r chi.Router) {
+						r.Use(writeLimiter(s.writeLimit))
+						r.Patch("/files/{id}", s.handleFilePatch)
+						r.Delete("/files/{id}", s.handleFileDelete)
+					})
 				}
 
 				if s.Members != nil {
