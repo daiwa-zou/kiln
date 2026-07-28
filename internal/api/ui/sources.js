@@ -510,12 +510,17 @@ async function showSources() {
 
       <label class="group-label">Documents</label>
       <div id="upload-progress" class="hint" role="status"></div>
-      <div id="file-drop" aria-label="Uploaded documents; drop files to add more">
+      <div class="review" id="file-drop" aria-label="Uploaded documents; drop files to add more">
+        <div class="meta"><span class="chip kind-upload">documents</span></div>
+        <div class="detail">${(() => {
+          const up = connectors.find((c) => c.kind === "upload" && c.enabled);
+          if (!up) return "Files you drop are kept, and are read once document uploads are enabled with + Add source.";
+          return `${esc(triggerPhrase[up.triggerMode] || up.triggerMode)}; ${up.lastSynced ? `last read ${esc(relTime(up.lastSynced))}` : "not read yet"}.`;
+        })()}</div>
         ${filesErr ? `<div class="empty">${esc(filesErr)}</div>`
           : files.map(fileRow).join("") ||
             `<div class="empty">No documents yet. Add markdown, PDFs, Office
-             files, or HTML with ${canAdmin ? "+ Add source, or by dropping" : "your role's write access by dropping"}
-             files anywhere on this list.</div>`}
+             files, or HTML with + Add source, or drop files anywhere on this card.</div>`}
       </div>`)) return;
 
     // ---- actions ------------------------------------------------------------
