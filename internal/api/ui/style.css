@@ -363,6 +363,12 @@
   /* A paused document dims but stays legible; the chip carries the state. */
   #file-drop .row.file-paused .mono { color: var(--ink-faint); }
 
+  /* Icon-only row controls: glyphs draw in the button's own color, and the
+     two-step delete confirm swaps them for explicit text while armed. */
+  .icon-btn { line-height: 0; padding: 5px 8px; vertical-align: middle; }
+  .icon-btn .icon { width: 13px; height: 13px; fill: currentColor; }
+  .icon-btn.danger { line-height: 1.2; }
+
   /* Section heading with inline controls (the documents pause/resume). */
   .sec-head { display: flex; align-items: center; gap: 10px; }
   .sec-head .group-label { margin: 16px 0 5px; }

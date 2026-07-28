@@ -90,22 +90,31 @@ function nextBuildLine(runs, connectors, pollSeconds) {
   return "Sources are ingested when you press Ingest now.";
 }
 
-// armButton is the shared two-step destructive confirm: first click arms,
-// second within 4s commits. Returns true when the click should proceed.
+// armButton is the shared two-step destructive confirm: first click arms
+// (the button turns into an explicit text question), second within 4s
+// commits. Returns true when the click should proceed. Restores whatever the
+// button held before -- text or icon -- so icon buttons survive the round trip.
 function armButton(b, label) {
   if (b.dataset.armed === "true") return true;
+  const orig = b.innerHTML;
   b.dataset.armed = "true";
   b.textContent = `confirm ${label}`;
   b.classList.add("danger");
   setTimeout(() => {
     if (b.isConnected) {
       b.dataset.armed = "false";
-      b.textContent = label;
+      b.innerHTML = orig;
       b.classList.remove("danger");
     }
   }, 4000);
   return false;
 }
+
+// Icon glyphs for row controls, drawn in currentColor so the quiet-button
+// palette applies. Buttons carry aria-labels; the icons are decoration.
+const iconPause = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2h3v12H4zM9 2h3v12H9z"/></svg>`;
+const iconPlay = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2l9 6-9 6z"/></svg>`;
+const iconTrash = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 1h4v1h4v2H2V2h4zM3 5h10l-.8 10H3.8zM6 7v6h1V7zm3 0v6h1V7z"/></svg>`;
 
 // uploadWorkspaceFiles pushes a FileList one request at a time, reporting
 // progress into progressEl. Shared by the page dropzone and the wizard's.
@@ -470,9 +479,11 @@ async function showSources() {
         <div class="detail">${esc(triggerPhrase[c.triggerMode] || c.triggerMode)}; ${c.lastSynced ? `last read ${esc(relTime(c.lastSynced))}` : "not read yet"}.</div>
         ${c.lastError ? `<div class="detail hint error">${esc(c.lastError)}</div>` : ""}
         <div class="meta">
-          <button class="btn quiet" data-conn-toggle="${esc(c.id)}" data-enabled="${c.enabled}">
-            ${c.enabled ? "pause" : "resume"}</button>
-          <button class="btn quiet" data-conn-delete="${esc(c.id)}">delete</button>
+          <button class="btn quiet icon-btn" data-conn-toggle="${esc(c.id)}" data-enabled="${c.enabled}"
+            aria-label="${c.enabled ? "Pause" : "Resume"} ${esc(c.name)}" title="${c.enabled ? "pause" : "resume"}">
+            ${c.enabled ? iconPause : iconPlay}</button>
+          <button class="btn quiet icon-btn" data-conn-delete="${esc(c.id)}"
+            aria-label="Delete ${esc(c.name)}" title="delete">${iconTrash}</button>
         </div>
       </div>`;
 
@@ -483,9 +494,12 @@ async function showSources() {
         <span>
           <span class="count">${esc(humanBytes(f.size))}</span>
           ${timeTag(f.updated)}
-          <button class="btn quiet" data-file-toggle="${esc(f.id)}" data-enabled="${f.enabled !== false}">
-            ${f.enabled === false ? "resume" : "pause"}</button>
-          <button class="btn quiet" data-file-delete="${esc(f.id)}">delete</button>
+          <button class="btn quiet icon-btn" data-file-toggle="${esc(f.id)}" data-enabled="${f.enabled !== false}"
+            aria-label="${f.enabled === false ? "Resume" : "Pause"} ${esc(f.path)}"
+            title="${f.enabled === false ? "resume" : "pause"}">
+            ${f.enabled === false ? iconPlay : iconPause}</button>
+          <button class="btn quiet icon-btn" data-file-delete="${esc(f.id)}"
+            aria-label="Delete ${esc(f.path)}" title="delete">${iconTrash}</button>
         </span>
       </div>`;
 
@@ -516,8 +530,6 @@ async function showSources() {
       <div class="sec-head">
         <label class="group-label">Documents</label>
         ${uploadConn && !uploadConn.enabled ? `<span class="chip">paused — skipped on ingest</span>` : ""}
-        ${canAdmin && uploadConn ? `<button class="btn quiet" data-conn-toggle="${esc(uploadConn.id)}" data-enabled="${uploadConn.enabled}">
-          ${uploadConn.enabled ? "pause" : "resume"}</button>` : ""}
       </div>
       <div id="upload-progress" class="hint" role="status"></div>
       <div class="review" id="file-drop" aria-label="Uploaded documents; drop files to add more">
