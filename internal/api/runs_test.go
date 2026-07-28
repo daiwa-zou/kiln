@@ -3,11 +3,13 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/jobs"
+	"github.com/daiwa-zou/kiln/internal/store"
 )
 
 func TestRunsCreateListAndDebounce(t *testing.T) {
@@ -46,6 +48,49 @@ func TestRunsCreateListAndDebounce(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].Status != "queued" || runs[0].Trigger != "manual" {
 		t.Errorf("runs list: %+v", runs)
+	}
+	// A manual run is claimable immediately: no debounce deadline to report.
+	if runs[0].NotBefore != "" {
+		t.Errorf("manual run notBefore = %q, want empty", runs[0].NotBefore)
+	}
+}
+
+func TestRunsListSurfacesDebounceDeadline(t *testing.T) {
+	srv, js, wsID := testServer(t)
+	ctx := context.Background()
+
+	// A debounced run (the shape uploads and webhook cooldowns enqueue): the
+	// UI needs the deadline to say when the next build starts.
+	notBefore := time.Now().Add(2 * time.Minute).UTC().Truncate(time.Second)
+	if _, _, err := js.EnqueueRunOpts(ctx, wsID, "upload", "",
+		store.EnqueueOptions{NotBefore: notBefore}); err != nil {
+		t.Fatal(err)
+	}
+
+	var runs []RunSummaryJSON
+	if code := get(t, srv, "/api/v1/workspaces/demo/runs", &runs); code != http.StatusOK {
+		t.Fatalf("GET runs = %d", code)
+	}
+	if len(runs) != 1 || runs[0].NotBefore == "" {
+		t.Fatalf("runs list: %+v, want a notBefore", runs)
+	}
+	got, err := time.Parse(time.RFC3339, runs[0].NotBefore)
+	if err != nil || !got.Equal(notBefore) {
+		t.Errorf("notBefore = %q (%v), want %s", runs[0].NotBefore, err, notBefore.Format(time.RFC3339))
+	}
+}
+
+func TestVersionCarriesPollInterval(t *testing.T) {
+	srv := httptest.NewServer((&Server{SourcePollInterval: 10 * time.Minute}).Router())
+	defer srv.Close()
+	var v struct {
+		SourcePollIntervalSeconds int `json:"sourcePollIntervalSeconds"`
+	}
+	if code := get(t, srv, "/api/v1/version", &v); code != http.StatusOK {
+		t.Fatalf("GET version = %d", code)
+	}
+	if v.SourcePollIntervalSeconds != 600 {
+		t.Errorf("sourcePollIntervalSeconds = %d, want 600", v.SourcePollIntervalSeconds)
 	}
 }
 

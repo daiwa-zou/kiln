@@ -1881,9 +1881,10 @@ async function boot() {
   });
 
   try {
-    const { version, githubSignIn } = await api("/version");
+    const { version, githubSignIn, sourcePollIntervalSeconds } = await api("/version");
     $("version").textContent = version;
     state.githubSignIn = Boolean(githubSignIn);
+    state.sourcePollIntervalSeconds = Number(sourcePollIntervalSeconds) || 0;
 
     const workspaces = await api("/workspaces");
     if (!workspaces.length) {

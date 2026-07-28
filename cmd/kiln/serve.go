@@ -77,16 +77,17 @@ processes separately so builds scale independently of the API.`,
 
 			ws := store.NewWikiStore(db.Pool)
 			srv := &api.Server{
-				Store:        ws,
-				Writes:       ws,
-				Runs:         ws,
-				Admin:        ws,
-				Members:      ws,
-				Files:        ws,
-				BudgetWindow: cfg.Agent.BudgetWindow,
-				DB:           db,
-				Log:          log,
-				CORSOrigins:  cfg.CORSOrigins,
+				Store:              ws,
+				Writes:             ws,
+				Runs:               ws,
+				Admin:              ws,
+				Members:            ws,
+				Files:              ws,
+				BudgetWindow:       cfg.Agent.BudgetWindow,
+				SourcePollInterval: cfg.Worker.SourcePollInterval,
+				DB:                 db,
+				Log:                log,
+				CORSOrigins:        cfg.CORSOrigins,
 			}
 			// Without object storage the upload route answers 503 with the
 			// fix; file listing and deletion keep working.

@@ -311,6 +311,40 @@
   .dropzone:hover, .dropzone.over { border-color: var(--ember); }
   .dropzone.over { background: var(--surface); }
 
+  /* The add-source wizard rides the palette's backdrop but is a form panel,
+     not a search popup: padded, and its inputs keep the global field look
+     the palette strips from its own. */
+  .wizard-panel { margin-top: 12vh; max-width: 620px; padding: 16px 18px; }
+  .wizard-panel input {
+    margin: 10px 0; border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 9px; font-size: 14px;
+  }
+  .wizard-panel input:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
+  .wizard-steps {
+    font-size: 12.5px; color: var(--ink-dim); text-transform: uppercase;
+    letter-spacing: 0.06em; margin-bottom: 10px;
+  }
+  .wizard-card {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: var(--bg); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin: 8px 0; font-family: var(--sans); font-size: 14px;
+    transition: border-color var(--dur);
+  }
+  .wizard-card:hover { border-color: var(--ember); }
+  .wizard-card strong { display: block; margin-bottom: 2px; }
+  .wizard-card .hint { margin: 0; }
+  .wizard-actions {
+    display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px;
+  }
+  .wizard-actions #wizard-back { margin-right: auto; }
+  .sources-actions { margin-bottom: 4px; }
+
+  /* The documents list doubles as the drop target; it lights up like a
+     dropzone only while a drag is over it. */
+  #file-drop { border-radius: 8px; transition: box-shadow var(--dur); }
+  #file-drop.over { box-shadow: 0 0 0 2px var(--ember); }
+
   /* ---- dynamism: shared ------------------------------------------------ */
   .sr-only {
     position: absolute; width: 1px; height: 1px; margin: -1px;
