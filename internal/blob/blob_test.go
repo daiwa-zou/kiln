@@ -150,6 +150,25 @@ func TestFSRejectsEscape(t *testing.T) {
 	}
 }
 
+func TestFSHonorsCanceledContext(t *testing.T) {
+	s, err := openFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	key := FileKey("ws", "f")
+	if err := s.Put(ctx, key, strings.NewReader("x"), 1); err == nil {
+		t.Error("put with canceled context succeeded")
+	}
+	if _, err := s.Get(ctx, key); err == nil {
+		t.Error("get with canceled context succeeded")
+	}
+	if err := s.Delete(ctx, key); err == nil {
+		t.Error("delete with canceled context succeeded")
+	}
+}
+
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }

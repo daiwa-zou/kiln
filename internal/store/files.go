@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -68,7 +69,7 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 		SELECT blob_key FROM workspace_files
 		WHERE workspace_id = $1 AND path = $2 FOR UPDATE`,
 		f.WorkspaceID, f.Path).Scan(&prevBlobKey)
-	if err != nil && err != pgx.ErrNoRows {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return "", "", fmt.Errorf("store: lock file row: %w", err)
 	}
 
@@ -101,7 +102,7 @@ func (s *WikiStore) DeleteFile(ctx context.Context, workspaceID, id string) (blo
 	err = s.pool.QueryRow(ctx, `
 		DELETE FROM workspace_files WHERE workspace_id = $1 AND id = $2
 		RETURNING blob_key`, workspaceID, id).Scan(&blobKey)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}
 	if err != nil {

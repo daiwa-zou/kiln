@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -59,7 +60,7 @@ func TestFilesCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DeleteFile(ctx, other, id); err != ErrNotFound {
+	if _, err := s.DeleteFile(ctx, other, id); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-tenant delete: %v, want ErrNotFound", err)
 	}
 	if list, _ := s.ListFiles(ctx, other); len(list) != 0 {
@@ -73,7 +74,7 @@ func TestFilesCRUD(t *testing.T) {
 	if blobKey != "ws/"+ws+"/uploads/f2" {
 		t.Fatalf("delete returned blob %q", blobKey)
 	}
-	if _, err := s.DeleteFile(ctx, ws, id); err != ErrNotFound {
+	if _, err := s.DeleteFile(ctx, ws, id); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second delete: %v, want ErrNotFound", err)
 	}
 	if files, _ := s.ListFiles(ctx, ws); len(files) != 0 {

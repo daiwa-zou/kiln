@@ -60,15 +60,15 @@ func (s *fsStore) Put(ctx context.Context, key string, r io.Reader, size int64) 
 	}
 	if _, err := io.Copy(f, r); err != nil {
 		f.Close()
-		s.root.Remove(tmp)
+		_ = s.root.Remove(tmp) // best effort; a stray .tmp is inert
 		return fmt.Errorf("blob: put %s: %w", key, err)
 	}
 	if err := f.Close(); err != nil {
-		s.root.Remove(tmp)
+		_ = s.root.Remove(tmp)
 		return fmt.Errorf("blob: put %s: %w", key, err)
 	}
 	if err := s.root.Rename(tmp, key); err != nil {
-		s.root.Remove(tmp)
+		_ = s.root.Remove(tmp)
 		return fmt.Errorf("blob: put %s: %w", key, err)
 	}
 	return nil
