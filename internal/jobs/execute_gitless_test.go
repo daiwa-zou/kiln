@@ -125,3 +125,54 @@ func TestExecuteDocsOnlyLeavesRepoSourcesAlone(t *testing.T) {
 		t.Fatalf("deletion reviews = %+v, want one for the vanished upload", store.deletionReviews)
 	}
 }
+
+func TestPausedDocumentIsNotFlaggedAsDeleted(t *testing.T) {
+	docs := t.TempDir()
+	writeTree(t, docs, map[string]string{
+		"active.md": "# Active\n\nStill part of the bench.\n",
+	})
+
+	store := newMemStore()
+	// A previously ingested document, now paused: absent from this sync's
+	// map and staging, present in the source records, and named skipped.
+	pausedKey := diff.DocKey(diff.UploadOrigin("paused.md"))
+	store.sources[pausedKey] = diff.SourceRecord{
+		Key: pausedKey, InputHash: "old",
+		FilesWritten: []string{"docs/paused.md"},
+	}
+	// Its section unit rides along.
+	sectionKey := diff.Key(string(pausedKey) + "#chapter-one")
+	store.sources[sectionKey] = diff.SourceRecord{
+		Key: sectionKey, InputHash: "old",
+		FilesWritten: []string{"docs/paused-chapter-one.md"},
+	}
+
+	runner := &structuredRunner{byUnit: map[string][]agent.GeneratedPage{
+		string(diff.DocKey(diff.UploadOrigin("active.md"))): {{
+			Path: "docs/active.md", Type: "source", Title: "Active",
+			Body: "# Active\n\nAn uploaded document still part of the bench, " +
+				"read on every ingest and kept current with its source file.\n",
+		}},
+	}}
+	p := testPipeline(store, runner)
+
+	if _, err := p.Execute(context.Background(), ExecuteRequest{
+		RunID:       "run-paused-doc",
+		WorkspaceID: "ws-1",
+		Trigger:     "manual",
+		Source: SourceSpec{
+			DocsDir: docs, Slug: "bench",
+			SkippedKeys: []diff.Key{pausedKey},
+		},
+	}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if len(store.deletionReviews) != 0 {
+		t.Fatalf("deletion reviews = %+v; a paused document must not read as deleted", store.deletionReviews)
+	}
+	// The paused document's pages survive untouched.
+	if _, ok := store.sources[pausedKey]; !ok {
+		t.Error("paused document's source record was dropped")
+	}
+}

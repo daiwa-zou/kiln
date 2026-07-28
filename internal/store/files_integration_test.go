@@ -55,10 +55,32 @@ func TestFilesCRUD(t *testing.T) {
 		t.Fatalf("list after replace: %+v", files)
 	}
 
-	// Deleting is workspace-scoped: another tenant's workspace sees nothing.
+	// Pause round-trips, and re-uploading a paused path resumes it.
+	if err := s.SetFileEnabled(ctx, ws, id, false); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	files, _ = s.ListFiles(ctx, ws)
+	if len(files) != 1 || files[0].Enabled {
+		t.Fatalf("list after pause: %+v", files)
+	}
+	if _, _, err := s.CreateFile(ctx, FileRow{
+		WorkspaceID: ws, Path: "notes/plan.md", BlobKey: "ws/" + ws + "/uploads/f3",
+		SizeBytes: 5, SHA256: "cccc",
+	}); err != nil {
+		t.Fatalf("re-upload: %v", err)
+	}
+	files, _ = s.ListFiles(ctx, ws)
+	if len(files) != 1 || !files[0].Enabled {
+		t.Fatalf("re-upload did not resume: %+v", files)
+	}
+
+	// Pause and delete are workspace-scoped: another tenant sees nothing.
 	other, err := s.EnsureWorkspace(ctx, "local", "other", "other")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := s.SetFileEnabled(ctx, other, id, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant pause: %v, want ErrNotFound", err)
 	}
 	if _, err := s.DeleteFile(ctx, other, id); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-tenant delete: %v, want ErrNotFound", err)
@@ -71,8 +93,8 @@ func TestFilesCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if blobKey != "ws/"+ws+"/uploads/f2" {
-		t.Fatalf("delete returned blob %q", blobKey)
+	if blobKey != "ws/"+ws+"/uploads/f3" {
+		t.Fatalf("delete returned blob %q, want the re-uploaded f3", blobKey)
 	}
 	if _, err := s.DeleteFile(ctx, ws, id); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second delete: %v, want ErrNotFound", err)

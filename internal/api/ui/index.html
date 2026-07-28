@@ -18,6 +18,11 @@
 </svg>
 <a class="skip" href="#main">Skip to content</a>
 <button class="menu-btn" id="menu" aria-label="Navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
+<div id="wizard" class="palette" hidden>
+  <div class="palette-panel wizard-panel" role="dialog" aria-modal="true" aria-label="Add a source">
+    <div id="wizard-body"></div>
+  </div>
+</div>
 <div id="palette" class="palette" hidden>
   <div class="palette-panel" role="dialog" aria-modal="true" aria-label="Go to page">
     <input id="palette-input" type="text" role="combobox" aria-expanded="true"
@@ -43,8 +48,7 @@
       <a href="#/graph" data-view="graph">Graph</a>
       <a href="#/gaps" data-view="gaps">Gaps</a>
       <a href="#/reviews" data-view="reviews">Reviews <span class="badge" id="reviews-badge" hidden></span></a>
-      <a href="#/runs" data-view="runs">Runs</a>
-      <a href="#/sources" data-view="sources">Sources</a>
+      <a href="#/ingestion" data-view="sources">Ingestion</a>
       <a href="#/members" data-view="members">Members</a>
       <a href="#/log" data-view="log">Log</a>
       <a href="#/steering" data-view="steering">Steering</a>

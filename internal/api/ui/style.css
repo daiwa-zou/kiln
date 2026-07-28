@@ -311,6 +311,109 @@
   .dropzone:hover, .dropzone.over { border-color: var(--ember); }
   .dropzone.over { background: var(--surface); }
 
+  /* The add-source wizard rides the palette's backdrop but is a form panel,
+     not a search popup: padded, and its inputs keep the global field look
+     the palette strips from its own. */
+  .wizard-panel { margin-top: 12vh; max-width: 620px; padding: 16px 18px; }
+  .wizard-panel input {
+    margin: 10px 0; border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 9px; font-size: 14px;
+  }
+  .wizard-panel input:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
+  .wizard-head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 10px;
+  }
+  .wizard-steps {
+    font-size: 12.5px; color: var(--ink-dim); text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .wizard-x {
+    background: none; border: none; cursor: pointer; padding: 0 4px;
+    font-size: 20px; line-height: 1; color: var(--ink-dim);
+  }
+  .wizard-x:hover { color: var(--ink); }
+  .wizard-card {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: var(--bg); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin: 8px 0; font-family: var(--sans); font-size: 14px;
+    transition: border-color var(--dur);
+  }
+  .wizard-card:hover { border-color: var(--ember); }
+  .wizard-card strong { display: block; margin-bottom: 2px; }
+  .wizard-card .hint { margin: 0; }
+  .wizard-actions {
+    display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px;
+  }
+  .wizard-actions #wizard-back { margin-right: auto; }
+  .sources-actions { margin-bottom: 4px; }
+
+  /* The documents list doubles as the drop target; it lights up like a
+     dropzone only while a drag is over it. */
+  #file-drop { border-radius: 8px; transition: box-shadow var(--dur); }
+  #file-drop.over { box-shadow: 0 0 0 2px var(--ember); }
+  /* Inside the card, dividers sit only between file rows: none under the
+     last (it would fight the card border) and none over the first (the
+     card edge already frames it). */
+  #file-drop .row { border-bottom: none; }
+  #file-drop .row + .row { border-top: 1px solid var(--border); }
+  #file-drop .row:first-child { padding-top: 0; }
+  #file-drop .row:last-child { padding-bottom: 0; }
+  /* A paused document dims but stays legible; the chip carries the state. */
+  #file-drop .row.file-paused .mono { color: var(--ink-faint); }
+
+  /* Icon-only row controls: glyphs draw in the button's own color, and the
+     two-step delete confirm swaps them for explicit text while armed. */
+  .icon-btn { line-height: 0; padding: 5px 8px; vertical-align: middle; }
+  .icon-btn .icon { width: 13px; height: 13px; fill: currentColor; }
+  .icon-btn.danger { line-height: 1.2; }
+
+  /* The row's trailing cluster -- size, age, controls -- lays out on one
+     baseline with even gaps instead of collapsing into each other. */
+  #file-drop .row > span:last-child {
+    display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+  }
+  #file-drop .row time { color: var(--ink-dim); font-size: 13px; }
+
+  /* Recent runs: day headers over compact rows. The dot carries state color
+     (the sentence carries the meaning); cost and provenance sit demoted on
+     the right; per-unit cost stays behind its toggle. */
+  .run-day {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--ink-faint); margin: 12px 0 4px;
+  }
+  .run-list .row { border-bottom: none; }
+  .run-list > .row:not(:first-child) { border-top: 1px solid var(--border); }
+  .run-list > .row:first-child { padding-top: 0; }
+  .run-list > *:last-child { padding-bottom: 0; }
+  .run-list .row > span:last-child {
+    display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+  }
+  .run-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 9px; background: var(--ash);
+  }
+  .run-dot.run-no_changes { background: var(--border); }
+  .run-dot.run-running, .run-dot.run-queued { background: var(--ember); }
+  .run-dot.run-failed, .run-dot.run-over_budget { background: #b3261e; }
+  .run-units { margin: 2px 0 8px 17px; }
+  .run-units summary { cursor: pointer; color: var(--ink-dim); font-size: 12.5px; }
+  .run-units .detail { font-size: 13px; color: var(--ink-dim); }
+
+  /* Collapsible ingestion sections: the group label doubles as the summary,
+     with a small disclosure caret that turns when open. */
+  details.sec > summary {
+    cursor: pointer; list-style: none;
+    display: flex; align-items: center; gap: 8px;
+  }
+  details.sec > summary::-webkit-details-marker { display: none; }
+  details.sec > summary::before {
+    content: "▸"; font-size: 10px; color: var(--ink-faint);
+    transition: transform var(--dur) var(--ease);
+  }
+  details.sec[open] > summary::before { transform: rotate(90deg); }
+
   /* ---- dynamism: shared ------------------------------------------------ */
   .sr-only {
     position: absolute; width: 1px; height: 1px; margin: -1px;

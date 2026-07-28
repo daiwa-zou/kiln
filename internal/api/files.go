@@ -38,6 +38,7 @@ import (
 type FileStore interface {
 	ListFiles(ctx context.Context, workspaceID string) ([]store.FileRow, error)
 	CreateFile(ctx context.Context, f store.FileRow) (id, replacedBlobKey string, err error)
+	SetFileEnabled(ctx context.Context, workspaceID, id string, enabled bool) error
 	DeleteFile(ctx context.Context, workspaceID, id string) (blobKey string, err error)
 }
 
@@ -62,9 +63,34 @@ func fileJSON(f store.FileRow) map[string]any {
 	return map[string]any{
 		"id": f.ID, "path": f.Path, "size": f.SizeBytes, "sha256": f.SHA256,
 		"contentType": f.ContentType,
+		"enabled":     f.Enabled,
 		"uploaded":    f.CreatedAt.UTC().Format(time.RFC3339),
 		"updated":     f.UpdatedAt.UTC().Format(time.RFC3339),
 	}
+}
+
+// handleFilePatch pauses or resumes one document's ingestion. A member-level
+// write like upload and delete: reversible, and nothing destructive follows.
+func (s *Server) handleFilePatch(w http.ResponseWriter, r *http.Request) {
+	ws, _, ok := s.guardWrite(w, r, maxResolveBytes)
+	if !ok {
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if body.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled is required"})
+		return
+	}
+	if err := s.Files.SetFileEnabled(r.Context(), ws.ID, chi.URLParam(r, "id"), *body.Enabled); err != nil {
+		s.failOrNotFound(w, err, "file not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": chi.URLParam(r, "id"), "enabled": *body.Enabled})
 }
 
 func (s *Server) handleFilesList(w http.ResponseWriter, r *http.Request) {

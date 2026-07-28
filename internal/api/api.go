@@ -82,6 +82,10 @@ type Server struct {
 	// BudgetWindow is the rolling window workspace budgets apply to; zero
 	// disables budget enforcement at enqueue.
 	BudgetWindow time.Duration
+	// SourcePollInterval mirrors the worker's poll cadence so the UI can say
+	// when poll-mode sources are next checked. Informational only; the worker
+	// process's own config remains the authority on when polls actually run.
+	SourcePollInterval time.Duration
 	// Admin backs the connector and credential CRUD. Nil leaves those routes
 	// unmounted.
 	Admin AdminStore
@@ -259,8 +263,11 @@ func (s *Server) mountRoutes(r chi.Router) {
 					// the write limiter. The upload POST itself lives outside
 					// this subtree, under the longer timeout.
 					r.Get("/files", s.handleFilesList)
-					r.With(writeLimiter(s.writeLimit)).
-						Delete("/files/{id}", s.handleFileDelete)
+					r.Group(func(r chi.Router) {
+						r.Use(writeLimiter(s.writeLimit))
+						r.Patch("/files/{id}", s.handleFilePatch)
+						r.Delete("/files/{id}", s.handleFileDelete)
+					})
 				}
 
 				if s.Members != nil {
@@ -342,11 +349,15 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	// The UI compares this to its own build so a skewed pair is visible rather
 	// than mysterious. githubSignIn tells the sign-in form whether to offer
 	// the OAuth button; it discloses only that the deployment configured it.
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"version":       observability.Version,
 		"schemaVersion": store.SchemaVersion,
 		"githubSignIn":  s.GitHub.SignInConfigured(),
-	})
+	}
+	if s.SourcePollInterval > 0 {
+		payload["sourcePollIntervalSeconds"] = int(s.SourcePollInterval.Seconds())
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {

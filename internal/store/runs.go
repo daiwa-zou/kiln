@@ -24,6 +24,9 @@ type RunRow struct {
 	CreatedAt    time.Time
 	StartedAt    *time.Time
 	FinishedAt   *time.Time
+	// NotBefore is the debounce deadline a queued run waits behind (webhook
+	// cooldowns, upload batching); nil when the run is claimable immediately.
+	NotBefore *time.Time
 }
 
 // ListRuns returns a workspace's runs, newest first.
@@ -32,7 +35,7 @@ func (s *WikiStore) ListRuns(ctx context.Context, workspaceID string, limit, off
 		SELECT id, trigger, coalesce(ref, ''), status, cost_usd,
 		       pages_created, pages_updated, pages_deleted,
 		       coalesce(error, ''), coalesce(claimed_by, ''),
-		       created_at, started_at, finished_at
+		       created_at, started_at, finished_at, not_before
 		FROM runs
 		WHERE workspace_id = $1
 		ORDER BY created_at DESC
@@ -47,7 +50,8 @@ func (s *WikiStore) ListRuns(ctx context.Context, workspaceID string, limit, off
 		var r RunRow
 		if err := rows.Scan(&r.ID, &r.Trigger, &r.Ref, &r.Status, &r.CostUSD,
 			&r.PagesCreated, &r.PagesUpdated, &r.PagesDeleted,
-			&r.Error, &r.ClaimedBy, &r.CreatedAt, &r.StartedAt, &r.FinishedAt); err != nil {
+			&r.Error, &r.ClaimedBy, &r.CreatedAt, &r.StartedAt, &r.FinishedAt,
+			&r.NotBefore); err != nil {
 			return nil, fmt.Errorf("store: scan run: %w", err)
 		}
 		out = append(out, r)

@@ -21,8 +21,11 @@ type FileRow struct {
 	ContentType string
 	SHA256      string
 	UploadedBy  string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// Enabled gates ingestion: a paused file is skipped when the documents
+	// source is staged, without reading as a deletion.
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // ListFiles returns a workspace's uploaded files ordered by path, the order
@@ -31,7 +34,7 @@ func (s *WikiStore) ListFiles(ctx context.Context, workspaceID string) ([]FileRo
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, workspace_id, path, blob_key, size_bytes,
 		       coalesce(content_type, ''), sha256, coalesce(uploaded_by::text, ''),
-		       created_at, updated_at
+		       enabled, created_at, updated_at
 		FROM workspace_files WHERE workspace_id = $1 ORDER BY path`, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("store: load files: %w", err)
@@ -42,7 +45,7 @@ func (s *WikiStore) ListFiles(ctx context.Context, workspaceID string) ([]FileRo
 	for rows.Next() {
 		var f FileRow
 		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.Path, &f.BlobKey, &f.SizeBytes,
-			&f.ContentType, &f.SHA256, &f.UploadedBy, &f.CreatedAt, &f.UpdatedAt); err != nil {
+			&f.ContentType, &f.SHA256, &f.UploadedBy, &f.Enabled, &f.CreatedAt, &f.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan file: %w", err)
 		}
 		out = append(out, f)
@@ -83,6 +86,9 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 			content_type = excluded.content_type,
 			sha256       = excluded.sha256,
 			uploaded_by  = excluded.uploaded_by,
+			-- Re-uploading a paused path resumes it: fresh content is the
+			-- clearest possible signal the file is wanted again.
+			enabled      = TRUE,
 			updated_at   = now()
 		RETURNING id`,
 		f.WorkspaceID, f.Path, f.BlobKey, f.SizeBytes,
@@ -93,6 +99,21 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 		return "", "", fmt.Errorf("store: commit create file: %w", err)
 	}
 	return id, prevBlobKey, nil
+}
+
+// SetFileEnabled pauses or resumes one file's ingestion, scoped to the
+// workspace so a cross-tenant id reads as absent.
+func (s *WikiStore) SetFileEnabled(ctx context.Context, workspaceID, id string, enabled bool) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE workspace_files SET enabled = $3, updated_at = now()
+		WHERE workspace_id = $1 AND id = $2`, workspaceID, id, enabled)
+	if err != nil {
+		return fmt.Errorf("store: set file enabled: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // DeleteFile removes a file row, scoped to the workspace so an id from

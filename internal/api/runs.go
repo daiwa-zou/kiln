@@ -42,6 +42,9 @@ type RunSummaryJSON struct {
 	Created      string  `json:"created"`
 	Started      string  `json:"started,omitempty"`
 	Finished     string  `json:"finished,omitempty"`
+	// NotBefore is when a debounced queued run becomes claimable, so the UI
+	// can say when the next build starts rather than shrugging.
+	NotBefore string `json:"notBefore,omitempty"`
 }
 
 // handleRunsList returns a workspace's runs, newest first. Deliberately not
@@ -67,9 +70,10 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 			PagesCreated: run.PagesCreated, PagesUpdated: run.PagesUpdated,
 			PagesDeleted: run.PagesDeleted,
 			Error:        run.Error, ClaimedBy: run.ClaimedBy,
-			Created:  run.CreatedAt.UTC().Format(time.RFC3339),
-			Started:  timeOrEmpty(run.StartedAt),
-			Finished: timeOrEmpty(run.FinishedAt),
+			Created:   run.CreatedAt.UTC().Format(time.RFC3339),
+			Started:   timeOrEmpty(run.StartedAt),
+			Finished:  timeOrEmpty(run.FinishedAt),
+			NotBefore: timeOrEmpty(run.NotBefore),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

@@ -352,7 +352,7 @@ const maxCandidatePages = 10
 // where removing the *last* source of a kind raised no flag -- the caller
 // knows it synced uploads and found nothing, which is exactly a deletion.
 // A nil synced falls back to inferring from surviving unit prefixes.
-func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, approved []diff.Key, synced map[string]bool) []DeletionCandidate {
+func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, approved, skipped []diff.Key, synced map[string]bool) []DeletionCandidate {
 	units := unitsByKey(m)
 
 	prefixes := map[string]bool{}
@@ -363,10 +363,20 @@ func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, app
 	for _, k := range approved {
 		skip[k] = true
 	}
+	// A skipped (paused) document covers its section units too: they are
+	// spans of the same absent file, equally deliberate.
+	skippedByParent := func(key diff.Key) bool {
+		for _, k := range skipped {
+			if key == k || strings.HasPrefix(string(key), string(k)+"#") {
+				return true
+			}
+		}
+		return false
+	}
 
 	var out []DeletionCandidate
 	for _, s := range sources {
-		if s.Key == diff.ArchOverview || skip[s.Key] {
+		if s.Key == diff.ArchOverview || skip[s.Key] || skippedByParent(s.Key) {
 			continue
 		}
 		if _, live := units[string(s.Key)]; live {

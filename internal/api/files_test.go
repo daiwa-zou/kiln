@@ -251,6 +251,35 @@ func TestFileUploadAuthorizationByRole(t *testing.T) {
 	}
 }
 
+func TestFilePauseRoundTrip(t *testing.T) {
+	srv, _, _ := testServer(t)
+
+	code, body := upload(t, srv, "demo", "", "", "pausable.md", []byte("x"))
+	if code != http.StatusCreated {
+		t.Fatalf("upload = %d", code)
+	}
+	id, _ := body["id"].(string)
+
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/files/"+id, "",
+		map[string]any{"enabled": false}, nil); code != http.StatusOK {
+		t.Fatalf("pause = %d, want 200", code)
+	}
+	var listed []map[string]any
+	get(t, srv, "/api/v1/workspaces/demo/files", &listed)
+	if len(listed) != 1 || listed[0]["enabled"] != false {
+		t.Fatalf("list after pause: %v", listed)
+	}
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/files/"+id, "",
+		map[string]any{"enabled": true}, nil); code != http.StatusOK {
+		t.Fatalf("resume = %d", code)
+	}
+	// Missing enabled field is a 400, not a silent no-op.
+	if code := send(t, srv, http.MethodPatch, "/api/v1/workspaces/demo/files/"+id, "",
+		map[string]any{}, nil); code != http.StatusBadRequest {
+		t.Fatalf("empty patch = %d, want 400", code)
+	}
+}
+
 func TestFileDeleteIsWorkspaceScoped(t *testing.T) {
 	srv, js, _ := testServer(t)
 	ctx := context.Background()
