@@ -369,6 +369,13 @@
   .icon-btn .icon { width: 13px; height: 13px; fill: currentColor; }
   .icon-btn.danger { line-height: 1.2; }
 
+  /* The row's trailing cluster -- size, age, controls -- lays out on one
+     baseline with even gaps instead of collapsing into each other. */
+  #file-drop .row > span:last-child {
+    display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+  }
+  #file-drop .row time { color: var(--ink-dim); font-size: 13px; }
+
   /* Section heading with inline controls (the documents pause/resume). */
   .sec-head { display: flex; align-items: center; gap: 10px; }
   .sec-head .group-label { margin: 16px 0 5px; }
