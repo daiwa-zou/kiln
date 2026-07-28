@@ -353,6 +353,12 @@
      dropzone only while a drag is over it. */
   #file-drop { border-radius: 8px; transition: box-shadow var(--dur); }
   #file-drop.over { box-shadow: 0 0 0 2px var(--ember); }
+  /* Inside the card, dividers sit above each file row -- separating the
+     list from the card's own controls -- and never trail after the last
+     row, where a stray hairline would fight the card border. */
+  #file-drop .row { border-bottom: none; border-top: 1px solid var(--border); margin-top: 6px; }
+  #file-drop .row:last-child { padding-bottom: 0; }
+  #file-drop > .meta { margin-bottom: 2px; }
 
   /* ---- dynamism: shared ------------------------------------------------ */
   .sr-only {
