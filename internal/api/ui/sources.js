@@ -513,6 +513,15 @@ async function showSources() {
       </div>`;
 
     const money = (v) => `$${Number(v || 0).toFixed(2)}`;
+    // Trigger values are queue internals; the chips say what actually
+    // happened in words a reader doesn't have to decode.
+    const triggerLabel = {
+      manual: "started by you",
+      webhook: "repo push",
+      upload: "documents changed",
+      poll: "scheduled check",
+      continuation: "finishing the previous run",
+    };
     const runPages = (r) => {
       const parts = [];
       if (r.pagesCreated) parts.push(`${r.pagesCreated} created`);
@@ -520,11 +529,14 @@ async function showSources() {
       if (r.pagesDeleted) parts.push(`${r.pagesDeleted} removed`);
       return parts.join(", ");
     };
+    // Status keeps its raw value in the class (the colors key off it) but
+    // drops the underscores in what the reader sees.
+    const statusLabel = { no_changes: "no changes", over_budget: "over budget" };
     const runCard = (r) => `
       <div class="review">
         <div class="meta">
-          <span class="chip run-${esc(r.status)}">${esc(r.status)}</span>
-          <span class="chip">${esc(r.trigger)}</span>
+          <span class="chip run-${esc(r.status)}">${esc(statusLabel[r.status] || r.status)}</span>
+          <span class="chip">${esc(triggerLabel[r.trigger] || r.trigger)}</span>
           ${r.ref ? `<span class="chip mono">${esc(r.ref)}</span>` : ""}
           ${timeTag(r.created)}
         </div>
