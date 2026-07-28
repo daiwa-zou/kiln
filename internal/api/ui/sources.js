@@ -460,6 +460,15 @@ async function showSources() {
     const buildActive = runs.some((r) => r.status === "queued" || r.status === "running");
     const uploadConn = connectors.find((c) => c.kind === "upload");
 
+    // sec renders one collapsible section. Open is the default; a collapsed
+    // choice is read back at render time so re-renders (including the
+    // active-run refresh) respect it.
+    const sec = (name, labelHTML, bodyHTML) => `
+      <details class="sec" data-sec="${name}" ${lsGet(`kiln.ingest.${name}`, true) ? "open" : ""}>
+        <summary class="group-label">${labelHTML}</summary>
+        ${bodyHTML}
+      </details>`;
+
     // Each source reads as a sentence, not a row of internals: what it is,
     // where it points, when it ingests, and when it was last read.
     const kindLabel = { git: "repository", web: "web pages", upload: "documents" };
@@ -542,35 +551,40 @@ async function showSources() {
 
       <div id="connector-note" class="hint" role="status"></div>
       ${canAdmin
-        ? `<label class="group-label">Repositories</label>
-           ${connectors.filter((c) => c.kind === "git").map(connectorRow).join("") ||
-             `<div class="empty">No repository connected yet. Add one with + Add source.</div>`}
-           <label class="group-label">Web pages</label>
-           ${connectors.filter((c) => c.kind === "web").map(connectorRow).join("") ||
-             `<div class="empty">No web pages connected yet. Add some with + Add source.</div>`}`
-        : `<label class="group-label">Repositories &amp; web pages</label>
-           <div class="empty">Managing sources needs an org owner or an instance
-            admin. You can still add documents below if your role allows.</div>`}
+        ? sec("repos", "Repositories",
+            connectors.filter((c) => c.kind === "git").map(connectorRow).join("") ||
+              `<div class="empty">No repository connected yet. Add one with + Add source.</div>`) +
+          sec("web", "Web pages",
+            connectors.filter((c) => c.kind === "web").map(connectorRow).join("") ||
+              `<div class="empty">No web pages connected yet. Add some with + Add source.</div>`)
+        : sec("repos", "Repositories &amp; web pages",
+            `<div class="empty">Managing sources needs an org owner or an instance
+             admin. You can still add documents below if your role allows.</div>`)}
 
-      <div class="sec-head">
-        <label class="group-label">Documents</label>
-        ${uploadConn && !uploadConn.enabled ? `<span class="chip">paused — skipped on ingest</span>` : ""}
-      </div>
-      <div id="upload-progress" class="hint" role="status"></div>
-      <div class="review" id="file-drop" aria-label="Uploaded documents; drop files to add more">
-        ${filesErr ? `<div class="empty">${esc(filesErr)}</div>`
-          : files.map(fileRow).join("") ||
-            `<div class="empty">No documents yet. Add markdown, PDFs, Office
-             files, or HTML with + Add source, or drop files anywhere on this card.</div>`}
-      </div>
+      ${sec("docs",
+        `Documents${uploadConn && !uploadConn.enabled ? ` <span class="chip">paused — skipped on ingest</span>` : ""}`,
+        `<div id="upload-progress" class="hint" role="status"></div>
+         <div class="review" id="file-drop" aria-label="Uploaded documents; drop files to add more">
+           ${filesErr ? `<div class="empty">${esc(filesErr)}</div>`
+             : files.map(fileRow).join("") ||
+               `<div class="empty">No documents yet. Add markdown, PDFs, Office
+                files, or HTML with + Add source, or drop files anywhere on this card.</div>`}
+         </div>`)}
 
-      <label class="group-label">Recent runs</label>
-      <p class="hint">Each ingest regenerates only the pages whose sources
-      changed; an unchanged bench incurs no cost. Runs execute one at a time
-      per bench.</p>
-      ${runs.map(runCard).join("") ||
-        `<div class="empty">No runs yet. Press Ingest now, or build from the
-         CLI with <span class="mono">kiln build</span>.</div>`}`)) return;
+      ${sec("runs", "Recent runs",
+        `<p class="hint">Each ingest regenerates only the pages whose sources
+         changed; an unchanged bench incurs no cost. Runs execute one at a time
+         per bench.</p>
+         ${runs.map(runCard).join("") ||
+           `<div class="empty">No runs yet. Press Ingest now, or build from the
+            CLI with <span class="mono">kiln build</span>.</div>`}`)}`)) return;
+
+    // Collapsed/expanded choices persist across renders and visits -- the
+    // 5-second active-run refresh must not spring sections back open.
+    for (const d of document.querySelectorAll("details.sec")) {
+      d.addEventListener("toggle", () =>
+        lsSet(`kiln.ingest.${d.dataset.sec}`, d.open));
+    }
 
     // Per-unit cost attribution, fetched lazily on first expand: where the
     // money went, costliest unit first, estimate beside actual.

@@ -376,10 +376,18 @@
   }
   #file-drop .row time { color: var(--ink-dim); font-size: 13px; }
 
-  /* Section heading with inline controls (the documents pause/resume). */
-  .sec-head { display: flex; align-items: center; gap: 10px; }
-  .sec-head .group-label { margin: 16px 0 5px; }
-  .sec-head .btn, .sec-head .chip { margin-top: 10px; }
+  /* Collapsible ingestion sections: the group label doubles as the summary,
+     with a small disclosure caret that turns when open. */
+  details.sec > summary {
+    cursor: pointer; list-style: none;
+    display: flex; align-items: center; gap: 8px;
+  }
+  details.sec > summary::-webkit-details-marker { display: none; }
+  details.sec > summary::before {
+    content: "▸"; font-size: 10px; color: var(--ink-faint);
+    transition: transform var(--dur) var(--ease);
+  }
+  details.sec[open] > summary::before { transform: rotate(90deg); }
 
   /* ---- dynamism: shared ------------------------------------------------ */
   .sr-only {
