@@ -60,6 +60,10 @@ embedded reading UI; `kiln build` runs the generation pipeline against a local d
 scale by adding worker processes — the queue is the runs table itself, claimed with
 `FOR UPDATE SKIP LOCKED`, one active run per bench.
 The API requires a bearer token by default — mint one with `kiln admin token create`.
+Uploaded documents land in object storage (`storage.*`: S3/MinIO, or a mounted
+volume via the fs backend); document uploads accept up to 32 MiB per file, so a
+reverse proxy in front of kiln needs its body limit raised to match (nginx:
+`client_max_body_size 34m`).
 
 Planned, not yet built: a Next.js frontend in its own container.
 
@@ -99,7 +103,9 @@ make dev-build    # again: "nothing changed; no model calls, no cost"
 make dev-clean    # drop the dev database and blobs
 ```
 
-To exercise the queue path, register the repo as a connector and enqueue a run:
+To exercise the queue path, open the **Sources** view at http://localhost:8080,
+add the repo as a source (path `$PWD`), and hit Build now — or do the same over
+the API:
 
 ```bash
 curl -X POST localhost:8080/api/v1/workspaces/kiln/connectors \
@@ -108,7 +114,9 @@ curl -X POST localhost:8080/api/v1/workspaces/kiln/connectors \
 curl -X POST localhost:8080/api/v1/workspaces/kiln/runs
 ```
 
-then watch it on the Runs view at http://localhost:8080. The fake runner
+then watch it on the Runs view. The Sources view also takes document uploads
+(drag-and-drop; stored via `storage.*`, fs-backed in dev) and web page sources,
+and a bench fed only by documents or web pages builds without any repository. The fake runner
 charges a synthetic $0.01/call so cost columns, estimates, and budget windows
 behave realistically; `KILN_AGENT_FAKE_FAIL_UNITS=module:foo` injects failures
 for exercising partial runs, and `KILN_AGENT_FAKE_LATENCY=2s` slows calls down

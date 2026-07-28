@@ -295,6 +295,22 @@
   details.panel { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 10px; }
   details.panel summary { cursor: pointer; color: var(--ink-dim); font-size: 13.5px; }
 
+  /* Sources: connector kinds borrow the temperature language -- code glows
+     warm, fetched pages read ash-cool, documents sit between. Labels carry
+     the meaning; the tint only reinforces. */
+  .chip.kind-git { border-color: var(--ember); color: var(--ember); }
+  .chip.kind-web { border-color: var(--ash); color: var(--ash); }
+  .chip.kind-upload { border-color: var(--ember-soft); }
+
+  .dropzone {
+    border: 2px dashed var(--border); border-radius: 8px;
+    padding: 26px 16px; margin: 10px 0; text-align: center;
+    color: var(--ink-dim); cursor: pointer;
+    transition: border-color var(--dur), background-color var(--dur);
+  }
+  .dropzone:hover, .dropzone.over { border-color: var(--ember); }
+  .dropzone.over { background: var(--surface); }
+
   /* ---- dynamism: shared ------------------------------------------------ */
   .sr-only {
     position: absolute; width: 1px; height: 1px; margin: -1px;

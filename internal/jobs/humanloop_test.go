@@ -125,6 +125,7 @@ func TestApprovedDeletionExecutesTheCascade(t *testing.T) {
 	store.sources[diff.Key("module:legacy")] = diff.SourceRecord{
 		Key: diff.Key("module:legacy"), InputHash: "old",
 		FilesWritten: []string{"entities/legacy.md"},
+		BlobKeys:     []string{"ws/w/uploads/legacy-blob"},
 	}
 	store.pages["entities/legacy.md"] = page("entities/legacy.md", "legacy", "entity", "Legacy")
 	// The approval recorded through the review queue.
@@ -132,11 +133,17 @@ func TestApprovedDeletionExecutesTheCascade(t *testing.T) {
 
 	runner := &structuredRunner{byUnit: map[string][]agent.GeneratedPage{}}
 	p := testPipeline(store, runner)
+	deleter := &fakeBlobDeleter{}
+	p.Blobs = deleter
 	m := testMap() // the legacy module is gone from the map entirely
 
 	res, err := p.Build(context.Background(), testRequest(t, m, diff.ChangeSet{FullRebuild: true}))
 	if err != nil {
 		t.Fatalf("Build: %v", err)
+	}
+	// The cascade released the source's blob, and the GC hook deleted it.
+	if len(deleter.deleted) != 1 || deleter.deleted[0] != "ws/w/uploads/legacy-blob" {
+		t.Errorf("deleted blobs = %v, want the released one", deleter.deleted)
 	}
 
 	if _, ok := store.pages["entities/legacy.md"]; ok {
@@ -152,6 +159,14 @@ func TestApprovedDeletionExecutesTheCascade(t *testing.T) {
 	if len(store.deletionReviews) != 0 {
 		t.Errorf("deletion reviews after approval = %+v, want none", store.deletionReviews)
 	}
+}
+
+// fakeBlobDeleter records the keys the pipeline's GC hook deleted.
+type fakeBlobDeleter struct{ deleted []string }
+
+func (f *fakeBlobDeleter) Delete(_ context.Context, key string) error {
+	f.deleted = append(f.deleted, key)
+	return nil
 }
 
 func TestDryRunFilesNoDeletionReviews(t *testing.T) {

@@ -19,6 +19,7 @@ type RunStore interface {
 	ListRuns(ctx context.Context, workspaceID string, limit, offset int) ([]store.RunRow, error)
 	ListRunItems(ctx context.Context, workspaceID, runID string) ([]store.RunItemRow, error)
 	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (runID string, created bool, err error)
+	EnqueueRunOpts(ctx context.Context, workspaceID, trigger, connectorID string, opts store.EnqueueOptions) (runID string, created bool, err error)
 	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
 	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
 	FileReview(ctx context.Context, workspaceID, kind, title, detail string) error

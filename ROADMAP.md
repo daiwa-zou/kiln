@@ -113,13 +113,36 @@ credentials atomically.*
    credential under a new key in one transaction; the worker's error text
    already asks the question the command answers.
 
+## Sources self-serve ✅ shipped (2026-07-27)
+
+*Users and admins set sources from the UI, and documents upload from the
+browser. Pulled forward from M8 because the connector CRUD API had shipped
+in M2 with no UI over it — sources were configured with `curl`.*
+
+1. **Object storage client** (`internal/blob`) — the parked M8 item: an fs
+   driver (os.Root-jailed, atomic writes) and an S3/MinIO driver behind the
+   long-validated `storage.*` config; blob GC consumes the cascade's
+   `DeleteBlobs` after import.
+2. **Browser upload** — `workspace_files` (migration 005) + a streaming
+   multipart `POST …/files` (32 MiB cap, extract-format allowlist, blob keys
+   server-constructed per workspace). Upload/delete are member-level writes;
+   page deletion still routes through the review queue.
+3. **Files-mode upload connector** — an upload connector with no `path`
+   consumes the workspace's uploaded files; the worker materializes blobs to
+   a staging dir, so the connector and the LFI allowlist are untouched.
+4. **Git-optional builds** — a bench fed only by documents or web pages
+   builds; synced-namespace bookkeeping keeps un-scanned repo sources from
+   reading as deletions, and no phantom `arch:overview` is planned.
+5. **Sources view** — connector CRUD, credential sealing, drag-drop
+   document upload, and Build-now in the reader UI (`ui/sources.js`).
+
 ## M8 — SaaS Completion (parked)
 
 Self-serve org/workspace creation (user #2 currently signs into an empty
 list with no path forward); retire the permissive `member`-writes default;
-activate `digests` for review-queue notifications; object storage client +
-blob GC (config, validation, secrets, and `DeleteBlobs` all exist and wait);
-container image, compose, and `/metrics`.
+activate `digests` for review-queue notifications; container image, compose,
+and `/metrics`. (The object storage client + blob GC formerly parked here
+shipped with sources self-serve.)
 
 ## Deferred decisions
 

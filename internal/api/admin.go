@@ -143,9 +143,10 @@ func validateConnectorConfig(kind string, cfg map[string]any) string {
 			}
 		}
 	case "upload":
-		if path == "" {
-			return "upload connector config needs path"
-		}
+		// No path means files mode: the connector consumes the workspace's
+		// uploaded files from the blob store, which is the browser-upload
+		// flow. An explicit path stays valid for worker-local directories and
+		// is still gated by worker.permitted_source_roots at run time.
 	case "web":
 		urls := webconn.URLsFrom(cfg)
 		if len(urls) == 0 {

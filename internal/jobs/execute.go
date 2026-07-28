@@ -51,6 +51,11 @@ type SourceSpec struct {
 	WebURLs []string
 	// Slug names the bench, for the git connector's cache keys.
 	Slug string
+	// BlobKeys names the stored blobs behind each staged document's unit key,
+	// set when DocsDir was materialized from the blob store rather than a
+	// local folder. It rides to the source records so an approved deletion
+	// can cascade to storage. Nil for local --docs directories.
+	BlobKeys map[string][]string
 }
 
 // ExecuteRequest is one full build: sync, map, route, then the pipeline.
@@ -88,36 +93,45 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	if out == nil {
 		out = io.Discard
 	}
-
-	// Sync goes through the connector registry rather than calling the scanner
-	// directly, so the abstraction is exercised by the path that uses it rather
-	// than assumed to work.
-	conn, err := connector.Get("git")
-	if err != nil {
-		return nil, err
-	}
-	fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), req.Source.Path)
-
-	set, err := conn.Sync(ctx, connector.Config{"path": req.Source.Path, "slug": req.Source.Slug}, "")
-	if err != nil {
-		return nil, err
+	if req.Source.Path == "" && req.Source.DocsDir == "" && len(req.Source.WebURLs) == 0 {
+		return nil, fmt.Errorf("nothing to build: no repository, documents, or web pages")
 	}
 
-	// Routing and prompt grounding need the module graph, which a flat item
-	// list cannot express. The git connector carried it on the same sync.
-	rm := gitconn.MapOf(set)
-	if rm == nil {
-		return nil, fmt.Errorf("git connector returned no repository map")
-	}
-	wm := rm.ToWorkspaceMap()
-	fmt.Fprintf(out, "  %d modules, %d units, %d edges\n", len(rm.Modules), len(wm.Units), len(wm.Edges))
-	if rm.Git != nil && rm.Git.HeadSHA != "" {
-		fmt.Fprintf(out, "  at %s on %s\n", shortRef(rm.Git.HeadSHA), rm.Git.Branch)
-	} else {
-		fmt.Fprintln(out, "  not a git repository; change detection uses content hashes")
-	}
+	// The repository is optional: a bench fed only by documents or web pages
+	// builds from those alone. When present, sync goes through the connector
+	// registry rather than calling the scanner directly, so the abstraction is
+	// exercised by the path that uses it rather than assumed to work.
+	var rm *repomap.RepoMap
+	wm := &mapper.WorkspaceMap{SchemaVersion: 1}
+	router := diff.Router{ModuleDirs: map[string]diff.Key{}, DocPaths: map[string]diff.Key{}, Cosmetic: cosmeticPath}
+	if req.Source.Path != "" {
+		conn, err := connector.Get("git")
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), req.Source.Path)
 
-	router := routerFor(rm)
+		set, err := conn.Sync(ctx, connector.Config{"path": req.Source.Path, "slug": req.Source.Slug}, "")
+		if err != nil {
+			return nil, err
+		}
+
+		// Routing and prompt grounding need the module graph, which a flat item
+		// list cannot express. The git connector carried it on the same sync.
+		rm = gitconn.MapOf(set)
+		if rm == nil {
+			return nil, fmt.Errorf("git connector returned no repository map")
+		}
+		wm = rm.ToWorkspaceMap()
+		fmt.Fprintf(out, "  %d modules, %d units, %d edges\n", len(rm.Modules), len(wm.Units), len(wm.Edges))
+		if rm.Git != nil && rm.Git.HeadSHA != "" {
+			fmt.Fprintf(out, "  at %s on %s\n", shortRef(rm.Git.HeadSHA), rm.Git.Branch)
+		} else {
+			fmt.Fprintln(out, "  not a git repository; change detection uses content hashes")
+		}
+
+		router = routerFor(rm)
+	}
 
 	// A second connector's material merges into the same map, so code and
 	// documents produce one wiki whose pages can link across the boundary
@@ -170,7 +184,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	// commit range actually touched, which is what suppresses cosmetic churn
 	// and keeps plan previews honest on big repositories.
 	changes := diff.ChangeSet{FullRebuild: true}
-	if req.BaseRef != "" {
+	if req.BaseRef != "" && req.Source.Path != "" {
 		head := gitconn.HeadRef(ctx, req.Source.Path)
 		if list, ok := gitconn.DiffRange(ctx, req.Source.Path, req.BaseRef, head); ok && head != "" {
 			changes = diff.ChangeSet{FromRef: req.BaseRef, ToRef: head, Changes: list}
@@ -181,9 +195,14 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	}
 
 	// Which namespaces this run synced decides which disappearances are
-	// deletions: git always covers modules, entries, arch, and repo docs;
-	// uploads and web pages only when their sources were actually consulted.
-	syncedNS := []string{"module", "entry", "arch", "doc"}
+	// deletions: modules, entries, arch, and repo docs only when a repository
+	// was actually scanned; uploads and web pages only when their sources were
+	// consulted. A docs-only run that claimed the git namespaces would file a
+	// deletion review for every repo-derived source it never looked at.
+	var syncedNS []string
+	if req.Source.Path != "" {
+		syncedNS = append(syncedNS, "module", "entry", "arch", "doc")
+	}
 	if req.Source.DocsDir != "" {
 		syncedNS = append(syncedNS, "doc:upload")
 	}
@@ -199,6 +218,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		SyncedNamespaces: syncedNS,
 		Ref:              gitRef(rm),
 		SourceDir:        req.Source.Path,
+		BlobKeys:         req.Source.BlobKeys,
 		Map:              wm,
 		Router:           router,
 		Changes:          changes,
@@ -381,7 +401,7 @@ func sectionsByParent(wm *mapper.WorkspaceMap) map[diff.Key][]diff.Key {
 }
 
 func gitRef(rm *repomap.RepoMap) string {
-	if rm.Git == nil {
+	if rm == nil || rm.Git == nil {
 		return ""
 	}
 	return shortRef(rm.Git.HeadSHA)

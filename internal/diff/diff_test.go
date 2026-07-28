@@ -145,6 +145,22 @@ func TestRouteFullRebuildDirtiesEverything(t *testing.T) {
 	}
 }
 
+func TestRouteFullRebuildWithoutModulesSkipsArch(t *testing.T) {
+	// A documents-only bench has no modules, so a full rebuild must not plan
+	// a phantom architecture-overview unit.
+	r := Router{DocPaths: map[string]Key{
+		"upload:notes.md": DocKey("upload:notes.md"),
+	}}
+	plan := r.Route(ChangeSet{FullRebuild: true})
+
+	if containsKey(plan.Dirty, ArchOverview) {
+		t.Errorf("no modules yet plan contains %s: %v", ArchOverview, plan.Dirty)
+	}
+	if !containsKey(plan.Dirty, DocKey("upload:notes.md")) {
+		t.Errorf("doc unit missing from full rebuild: %v", plan.Dirty)
+	}
+}
+
 func TestRouteOrdersArchitectureLast(t *testing.T) {
 	// Architecture summarizes the modules, so it must regenerate after them.
 	cs := ChangeSet{Changes: []Change{

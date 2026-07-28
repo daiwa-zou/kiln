@@ -122,6 +122,17 @@ func derefPages(in []*wiki.Page) []wiki.Page {
 	return out
 }
 
+// parentDocID collapses a section unit's key onto its parent document's, so
+// blob attribution reaches sections without the caller enumerating them:
+// "doc:upload:a.pdf#intro" and "doc:upload:a.pdf" name the same stored bytes.
+func parentDocID(key diff.Key) string {
+	s := string(key)
+	if i := strings.Index(s, "#"); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
 func pagePaths(pages []wiki.Page) []string {
 	out := make([]string, 0, len(pages))
 	for _, p := range pages {

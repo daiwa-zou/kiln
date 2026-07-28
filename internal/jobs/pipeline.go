@@ -36,6 +36,14 @@ type Pipeline struct {
 	FallbackModel string
 	Timeout       time.Duration
 
+	// Blobs, when set, deletes stored blobs the deletion cascade released.
+	// Nil (no object storage) leaves DeleteBlobs as computed-but-inert data,
+	// the pre-blob-store behavior. A narrow local interface rather than
+	// blob.Store: the pipeline only ever deletes.
+	Blobs interface {
+		Delete(ctx context.Context, key string) error
+	}
+
 	// MaxRetries is the number of corrective attempts after a validation
 	// failure. The first re-states the errors; the second halves the work.
 	MaxRetries int
@@ -81,6 +89,12 @@ type BuildRequest struct {
 	// is ever deleted without this, because a suspended token and a genuine
 	// deletion look identical at the sync layer.
 	ApprovedDeletions []diff.Key
+
+	// BlobKeys names the stored blobs behind each uploaded document's unit
+	// key, so the source records carry them and an approved deletion can
+	// cascade to storage. Section units inherit their parent document's blobs.
+	// Nil for sources that live outside the blob store (CLI --docs, repos).
+	BlobKeys map[string][]string
 
 	// Force skips the content-hash gate so every routed unit regenerates, for
 	// recovering from bad output or a prompt change.
@@ -342,6 +356,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 				InputHash:    hash,
 				FilesWritten: pagePaths(out.Pages),
 				ConnectorID:  req.Connectors.For(key),
+				BlobKeys:     req.BlobKeys[parentDocID(key)],
 			})
 			for _, pg := range out.Pages {
 				known[pg.Slug] = true
@@ -403,6 +418,19 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 			log.Error("run could not be ledgered after import failure", "err", rerr)
 		}
 		return nil, fmt.Errorf("jobs: import: %w", err)
+	}
+
+	// Blob GC rides the same post-import moment as the page cascade: only
+	// after the sources that referenced these blobs are durably dropped is
+	// deleting them safe. Best effort -- the blob store's deletes are
+	// idempotent, and a failure leaves an orphan for a later sweep, never a
+	// dangling reference.
+	if p.Blobs != nil {
+		for _, key := range cascade.DeleteBlobs {
+			if err := p.Blobs.Delete(importCtx, key); err != nil {
+				log.Error("blob delete failed; orphan left for GC", "key", key, "err", err)
+			}
+		}
 	}
 
 	if res.Summary.Status == StatusRunning {

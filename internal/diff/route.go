@@ -85,7 +85,11 @@ func (r Router) Route(cs ChangeSet) Plan {
 		for _, k := range r.DocPaths {
 			markDoc(k, "full rebuild")
 		}
-		mark(ArchOverview, "full rebuild")
+		// No modules means nothing for an architecture overview to describe:
+		// a documents-only build must not plan a phantom synthesis unit.
+		if len(r.ModuleDirs) > 0 {
+			mark(ArchOverview, "full rebuild")
+		}
 		return finish(reasons)
 	}
 

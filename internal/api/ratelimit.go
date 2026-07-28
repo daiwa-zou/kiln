@@ -16,10 +16,14 @@ import (
 //
 // Sizing: writes here are human actions (pin a correction, resolve a review).
 // A burst of 20 covers any real editing session; the refill of one every
-// three seconds caps a sustained writer at 20/minute.
+// three seconds caps a sustained writer at 20/minute. Uploads get their own
+// bucket: dragging a folder of documents into the browser is one user action
+// that arrives as dozens of requests.
 const (
-	writeBurst      = 20
-	writeRefillEach = 3 * time.Second
+	writeBurst       = 20
+	writeRefillEach  = 3 * time.Second
+	uploadBurst      = 60
+	uploadRefillEach = time.Second
 )
 
 // bucket is a classic token bucket, refilled lazily on take.
@@ -33,12 +37,18 @@ type bucket struct {
 type limiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
+	burst   float64
+	refill  time.Duration
 	// now is injectable for tests.
 	now func() time.Time
 }
 
 func newLimiter() *limiter {
-	return &limiter{buckets: map[string]*bucket{}, now: time.Now}
+	return newLimiterSized(writeBurst, writeRefillEach)
+}
+
+func newLimiterSized(burst float64, refill time.Duration) *limiter {
+	return &limiter{buckets: map[string]*bucket{}, burst: burst, refill: refill, now: time.Now}
 }
 
 // take reports whether the caller may proceed, consuming one token if so.
@@ -49,11 +59,11 @@ func (l *limiter) take(key string) bool {
 	now := l.now()
 	b, ok := l.buckets[key]
 	if !ok {
-		b = &bucket{tokens: writeBurst, last: now}
+		b = &bucket{tokens: l.burst, last: now}
 		l.buckets[key] = b
 	}
 
-	b.tokens = min(writeBurst, b.tokens+now.Sub(b.last).Seconds()/writeRefillEach.Seconds())
+	b.tokens = min(l.burst, b.tokens+now.Sub(b.last).Seconds()/l.refill.Seconds())
 	b.last = now
 
 	if b.tokens < 1 {
@@ -64,7 +74,7 @@ func (l *limiter) take(key string) bool {
 	// Opportunistic prune: full buckets untouched for an hour are dead weight.
 	if len(l.buckets) > 1024 {
 		for k, old := range l.buckets {
-			if old.tokens >= writeBurst-0.01 && now.Sub(old.last) > time.Hour {
+			if old.tokens >= l.burst-0.01 && now.Sub(old.last) > time.Hour {
 				delete(l.buckets, k)
 			}
 		}
