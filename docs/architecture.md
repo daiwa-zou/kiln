@@ -23,6 +23,7 @@ Operational concerns — deploying, upgrading, backups — live in
 - [Cost control](#cost-control)
 - [Data model](#data-model)
 - [HTTP API and auth](#http-api-and-auth)
+- [Serving the wiki to agents](#serving-the-wiki-to-agents)
 - [Failure and recovery](#failure-and-recovery)
 - [Configuration reference](#configuration-reference)
 - [Extension points](#extension-points)
@@ -756,6 +757,53 @@ publishing queue depth and spend to every reader or inventing an auth scheme
 Prometheus does not want to use.
 
 ---
+
+## Serving the wiki to agents
+
+`kiln mcp` exposes a bench over the Model Context Protocol on stdio. The wiki
+is already the artifact worth reading — prose compiled from sources and kept
+current — so an agent that can reach it answers from compiled knowledge instead
+of re-deriving it from raw material on every question.
+
+```mermaid
+flowchart LR
+    Agent["MCP-capable agent"] -->|"stdio · JSON-RPC"| M["kiln mcp"]
+    M -->|"HTTP + bearer token"| API["kiln serve"]
+    API --> PG[("Postgres")]
+
+    subgraph tools["tools"]
+        direction TB
+        T1["search_wiki · read_page<br/><i>the main path</i>"]
+        T2["wiki_overview · list_benches · list_pages<br/><i>orientation</i>"]
+        T3["page_backlinks · wiki_gaps<br/><i>context and known unknowns</i>"]
+    end
+    M -.- tools
+```
+
+Three decisions shape it:
+
+**It reads the HTTP API, not the database.** An agent's machine needs no
+Postgres credentials, the server works against a kiln running anywhere, and the
+token it carries decides what it can see — so an agent reads exactly the benches
+that token reads.
+
+**Search-first, seven tools.** An agent that can search, read, and follow links
+has what it needs; a tool per endpoint would spend the model's attention on
+choosing between them. `search_wiki` returns slugs and snippets, `read_page`
+takes those slugs back.
+
+**Failures are tool errors, not protocol errors.** An unknown bench or a missing
+page is a normal thing for an agent to hit, so each one returns text naming the
+recovery (`list_benches` for the former, `search_wiki` for the latter) rather
+than a transport failure the host reports as a broken server.
+
+Two details exist because the model is the reader. `wiki_gaps` distinguishes
+*"the wiki says nothing about X"* from *"the wiki has not covered X yet"*, which
+is the difference between a confident negative answer and an unanswered
+question. And Postgres marks search matches with `[[[term]]]`, which the reading
+UI renders as a highlight but a model reads as a wikilink to a page named
+`term`; the MCP layer rewrites those markers to bold so no phantom link
+survives.
 
 ## Failure and recovery
 

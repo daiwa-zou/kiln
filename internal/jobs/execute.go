@@ -217,6 +217,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	breq := BuildRequest{
 		RunID:            req.RunID,
 		WorkspaceID:      req.WorkspaceID,
+		WorkspaceSlug:    req.Source.Slug,
 		Trigger:          req.Trigger,
 		Connectors:       req.Connectors,
 		SyncedNamespaces: syncedNS,

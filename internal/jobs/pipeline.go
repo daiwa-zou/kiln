@@ -107,6 +107,12 @@ type BuildRequest struct {
 	// pass over them and their section children.
 	SkippedKeys []diff.Key
 
+	// WorkspaceSlug names the bench for anything a human reads. WorkspaceID is
+	// a UUID, and putting it on the overview -- the first page anyone opens --
+	// labelled the wiki with a string that identifies nothing to its reader.
+	// Empty falls back to the id, so a hand-built request still renders.
+	WorkspaceSlug string
+
 	// Force skips the content-hash gate so every routed unit regenerates, for
 	// recovering from bad output or a prompt change.
 	Force bool
@@ -131,6 +137,15 @@ type BuildResult struct {
 
 // defaultEstimatePerUnit is used until a workspace has real cost history.
 const defaultEstimatePerUnit = 0.12
+
+// workspaceLabel is the bench's name for human-facing output, falling back to
+// the id when no slug was supplied.
+func (r BuildRequest) workspaceLabel() string {
+	if r.WorkspaceSlug != "" {
+		return r.WorkspaceSlug
+	}
+	return r.WorkspaceID
+}
 
 // Build runs the pipeline.
 func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, error) {
@@ -282,7 +297,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	merged := mergePages(pages, written, cascade.DeletePages)
 	index := wiki.BuildIndex(merged, wiki.IndexOptions{})
 	overview := wiki.BuildOverview(merged, wiki.OverviewInput{
-		Workspace: req.WorkspaceID,
+		Workspace: req.workspaceLabel(),
 		Ref:       req.Ref,
 		Date:      now.Format(wiki.DateFormat),
 		Narrative: findings,

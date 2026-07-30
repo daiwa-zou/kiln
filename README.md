@@ -71,6 +71,34 @@ reverse proxy in front of kiln needs its body limit raised to match (nginx:
 
 Planned, not yet built: a Next.js frontend in its own container.
 
+## Agents can read it
+
+`kiln mcp` serves a bench to any MCP-capable agent over stdio, so an agent
+answers from the compiled wiki instead of re-reading your sources every time.
+
+```json
+{
+  "mcpServers": {
+    "kiln": {
+      "command": "kiln",
+      "args": ["mcp", "--url", "http://127.0.0.1:8080", "--workspace", "my-bench"],
+      "env": {"KILN_TOKEN": "..."}
+    }
+  }
+}
+```
+
+Seven tools: `search_wiki` and `read_page` carry most traffic, with
+`wiki_overview` for orientation, `list_benches` and `list_pages` for
+enumeration, `page_backlinks` for context, and `wiki_gaps` — which is what
+lets an agent tell *"the wiki says nothing about X"* from *"the wiki has not
+covered X yet"*.
+
+It reads over the HTTP API rather than the database, so it needs no Postgres
+credentials and works against an instance running anywhere; the token decides
+which benches it can see. Omit `--workspace` and every tool takes a `bench`
+argument instead.
+
 ## Deploying
 
 One image runs every role; the reading UI is embedded in the binary, so there
