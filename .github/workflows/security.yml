@@ -48,11 +48,22 @@ jobs:
           # is enough for a push or PR.
           fetch-depth: ${{ github.event_name == 'schedule' && 0 || 1 }}
       - name: Install gitleaks
+        # Pinned rather than resolved from the releases API at run time. That
+        # lookup is unauthenticated, and a rate-limited response carries no
+        # tag_name -- which produced an empty version, a 404 download, and a
+        # *failing secret scan* that looked like a finding. A security gate
+        # must not break because an upstream API throttled us; upgrades here
+        # are deliberate, and the checksum proves we got what we pinned --
+        # a scanner fetched over the network is itself supply chain.
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
         run: |
-          version=$(curl -fsSL https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
-            | grep -m1 '"tag_name"' | cut -d'"' -f4)
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${version}/gitleaks_${version#v}_linux_x64.tar.gz" \
-            | tar -xz -C /usr/local/bin gitleaks
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 --retry-delay 2 -o /tmp/gitleaks.tar.gz "$url"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xz -C /usr/local/bin -f /tmp/gitleaks.tar.gz gitleaks
           gitleaks version
       - name: Scan
         run: |
