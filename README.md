@@ -53,6 +53,10 @@ through three channels, all editable from the UI (or the write API):
 
 ## Architecture
 
+A full walkthrough — topology, the build pipeline stage by stage, how material
+flows through it, where cost is bounded, the data model, and every configurable —
+is in [docs/architecture.md](docs/architecture.md). The short version:
+
 Modular monolith: one Go binary against Postgres. `kiln serve` runs the HTTP API and the
 embedded reading UI; `kiln build` runs the generation pipeline against a local directory;
 `kiln worker` claims queued runs from the database and builds them through the same pipeline
