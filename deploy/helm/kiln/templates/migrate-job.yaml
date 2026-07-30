@@ -1,0 +1,50 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "kiln.fullname" . }}-migrate
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    # Before the workloads roll, and gating them: both the API and the workers
+    # refuse to start against an unexpected schema version, so a failed
+    # migration should stop the release rather than produce a crash loop.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "kiln.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "kiln.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "kiln.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Advisory-locked and idempotent, so parallel releases serialize
+          # rather than race, and a re-run applies nothing.
+          args: ["admin", "migrate"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            {{- include "kiln.env" . | nindent 12 }}
+            {{- include "kiln.secretEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "kiln.volumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "kiln.volumes" . | nindent 8 }}
+{{- end }}

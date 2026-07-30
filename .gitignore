@@ -31,3 +31,6 @@ web/.turbo/
 
 # Local dev state: fs blob storage for config.dev.toml
 .dev/
+
+# Rendered from deploy/helm/kiln by `make manifests`; regenerate rather than edit.
+/deploy/kubernetes/kiln.yaml

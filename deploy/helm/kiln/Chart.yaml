@@ -1,0 +1,30 @@
+apiVersion: v2
+name: kiln
+description: Self-hosted platform that compiles and maintains knowledge-base wikis from code, documents, and web pages
+type: application
+
+# version is the chart's own version; appVersion tracks the kiln release it
+# defaults to. They move independently: a chart fix should not imply a new
+# application release.
+version: 0.1.0
+appVersion: "0.1.0"
+
+home: https://github.com/daiwa-zou/kiln
+sources:
+  - https://github.com/daiwa-zou/kiln
+keywords:
+  - documentation
+  - knowledge-base
+  - wiki
+  - llm
+
+maintainers:
+  - name: daiwa-zou
+    url: https://github.com/daiwa-zou
+
+annotations:
+  # Postgres and object storage are deliberately not subchart dependencies.
+  # Every cloud has a managed offering that an operator should prefer over a
+  # pod with a PVC, and bundling one invites exactly the single-replica
+  # database that fails an audit later.
+  artifacthub.io/prerelease: "true"

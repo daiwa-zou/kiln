@@ -8,7 +8,7 @@ TEST_DB_URL := postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
 # Pinned to match .github/workflows/ci.yml. Bump both together.
 GOLANGCI := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
-.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev dev-db migrate-dev dev-build dev-clean clean
+.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev dev-db migrate-dev dev-build dev-clean clean image compose-up compose-down manifests helm-lint
 
 all: fmt test build
 
@@ -99,6 +99,36 @@ dev-clean:
 	@docker exec kiln-test psql -U kiln -c "DROP DATABASE IF EXISTS kiln_dev" 2>/dev/null || true
 	@rm -rf .dev
 	@echo "dev state removed"
+
+# --- deployment -------------------------------------------------------------
+
+# The same image CI publishes, built locally for a smoke test or an air-gapped
+# registry push.
+image:
+	docker build -t kiln:$(VERSION) --build-arg VERSION=$(VERSION) .
+
+compose-up:
+	docker compose up -d --build
+	@echo "kiln at http://localhost:8080 — mint a token:"
+	@echo "  docker compose exec api kiln admin token create --login you --scopes read,write,admin --admin"
+
+compose-down:
+	docker compose down -v
+
+helm-lint:
+	helm lint deploy/helm/kiln --set secrets.existingSecret=kiln-secrets
+
+# Renders the chart to plain YAML for GitOps repositories and Kustomize
+# overlays. Deliberately gitignored: a generated manifest committed beside its
+# generator drifts, and a stale one still applies cleanly.
+manifests:
+	@mkdir -p deploy/kubernetes
+	helm template kiln deploy/helm/kiln \
+		--namespace kiln \
+		--set secrets.existingSecret=kiln-secrets \
+		--set config.database.host=postgres.kiln.svc.cluster.local \
+		> deploy/kubernetes/kiln.yaml
+	@echo "wrote deploy/kubernetes/kiln.yaml"
 
 clean:
 	rm -rf bin dist

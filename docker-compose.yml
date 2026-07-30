@@ -1,0 +1,176 @@
+# A complete kiln deployment: Postgres, S3-compatible object storage, the API
+# with its embedded reading UI, and a pool of build workers.
+#
+# The topology is the point. `kiln serve --with-worker` exists for a laptop,
+# but this file runs the API and the workers as separate services because that
+# is how the system scales: the API is stateless and scales for readers, the
+# workers claim from the runs table (FOR UPDATE SKIP LOCKED) and scale for
+# builds. `docker compose up --scale worker=4` adds build throughput without
+# touching the API, and no broker is involved.
+#
+#   cp .env.example .env   # fill in KILN_MASTER_KEY and KILN_ANTHROPIC_API_KEY
+#   docker compose up -d
+#   docker compose exec api kiln admin token create --login you --scopes read,write,admin
+#   open http://localhost:8080   # paste the token when the UI asks
+#
+# The stack requires a token. Not as a nicety: inside a container the server
+# must bind every interface to be reachable at all, and kiln refuses to serve
+# a wide-open bind with auth disabled -- because there the container boundary,
+# not the listen address, is what limits reach, and the process cannot tell a
+# published port from a private one. auth.mode = none stays a localhost
+# convenience for `make dev`, never a deployment default.
+
+name: kiln
+
+x-kiln-env: &kiln-env
+  KILN_DATABASE_URL: postgres://kiln:${POSTGRES_PASSWORD:-kiln}@postgres:5432/kiln?sslmode=disable
+  KILN_STORAGE_BACKEND: s3
+  KILN_STORAGE_ENDPOINT: minio:9000
+  KILN_STORAGE_BUCKET: ${KILN_STORAGE_BUCKET:-kiln}
+  KILN_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-kilnminio}
+  KILN_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-kilnminio}
+  KILN_STORAGE_USE_SSL: "false"
+  KILN_STORAGE_PATH_STYLE: "true"
+  KILN_LOG_LEVEL: ${KILN_LOG_LEVEL:-info}
+  # Sealing key for connector credentials, and the model key the agent spends
+  # against. Both are required; see .env.example.
+  KILN_MASTER_KEY: ${KILN_MASTER_KEY:?set KILN_MASTER_KEY in .env (openssl rand -hex 32)}
+  KILN_ANTHROPIC_API_KEY: ${KILN_ANTHROPIC_API_KEY:-}
+  # Generation knobs worth reaching without editing this file: the runner
+  # ("api", or "fake" to exercise the whole pipeline at zero spend), the
+  # models, and the spend caps. Empty values are ignored rather than applied,
+  # so an unset variable here keeps kiln's own default.
+  KILN_AGENT_RUNNER: ${KILN_AGENT_RUNNER:-}
+  KILN_AGENT_MODEL: ${KILN_AGENT_MODEL:-}
+  KILN_AGENT_RUN_BUDGET_USD: ${KILN_AGENT_RUN_BUDGET_USD:-}
+  KILN_AGENT_MAX_PAGES_PER_RUN: ${KILN_AGENT_MAX_PAGES_PER_RUN:-}
+  KILN_AGENT_BUDGET_WINDOW: ${KILN_AGENT_BUDGET_WINDOW:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kiln
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kiln}
+      POSTGRES_DB: kiln
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # Gated on the real user and database, not just a listening port: an
+      # initializing Postgres accepts connections before it is usable.
+      test: ["CMD-SHELL", "pg_isready -U kiln -d kiln"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-kilnminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-kilnminio}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:9001:9001" # console; the API talks to :9000 on the network
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # One-shot: create the uploads bucket, then exit. Uploads answer 503 with a
+  # clear message if the bucket is missing, so this failing is visible rather
+  # than mysterious.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-kilnminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-kilnminio}
+      KILN_STORAGE_BUCKET: ${KILN_STORAGE_BUCKET:-kiln}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set kiln http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mb --ignore-existing kiln/$$KILN_STORAGE_BUCKET
+      "
+
+  # Migrations run as their own service rather than on server boot: schema
+  # changes are an operator decision, the advisory lock makes concurrent runs
+  # safe, and both API and workers refuse to start against an unexpected
+  # version -- so this must succeed before they come up.
+  migrate:
+    image: ${KILN_IMAGE:-ghcr.io/daiwa-zou/kiln:latest}
+    build:
+      context: .
+      args:
+        VERSION: ${KILN_VERSION:-compose}
+    command: ["admin", "migrate"]
+    environment: *kiln-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ${KILN_IMAGE:-ghcr.io/daiwa-zou/kiln:latest}
+    build:
+      context: .
+      args:
+        VERSION: ${KILN_VERSION:-compose}
+    command: ["serve"]
+    environment:
+      <<: *kiln-env
+      KILN_HTTP_ADDR: ":8080"
+      # Tokens by default. Mint the first one after the stack is up:
+      #   docker compose exec api kiln admin token create --login you \
+      #     --scopes read,write,admin
+      KILN_AUTH_MODE: ${KILN_AUTH_MODE:-token}
+      KILN_PUBLIC_URL: ${KILN_PUBLIC_URL:-http://localhost:8080}
+    ports:
+      - "${KILN_BIND_ADDR:-127.0.0.1}:8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # /readyz reports database reachability; /healthz answers even when the
+      # database is down, which is deliberately not what "ready" means.
+      test: ["CMD", "/usr/local/bin/kiln", "admin", "health", "--addr", "http://127.0.0.1:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  # The scaling unit: `docker compose up -d --scale worker=4`. Each worker
+  # claims one run at a time (builds are LLM-bound, so per-process concurrency
+  # would multiply spend rather than throughput) and identifies itself in
+  # runs.claimed_by by hostname, which Compose makes unique per replica.
+  worker:
+    image: ${KILN_IMAGE:-ghcr.io/daiwa-zou/kiln:latest}
+    build:
+      context: .
+      args:
+        VERSION: ${KILN_VERSION:-compose}
+    command: ["worker"]
+    environment: *kiln-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    # SIGTERM starts the drain: the worker stops claiming immediately and the
+    # in-flight build gets its grace window before being requeued. Give it
+    # room, or a deploy turns paid-for work into a requeue.
+    stop_grace_period: 5m
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:
