@@ -244,6 +244,55 @@ func TestValidateFakeRunner(t *testing.T) {
 	}
 }
 
+// A per-call budget above the run ceiling can never be reserved, so every run
+// dies on its first unit with an error naming the run budget rather than the
+// per-call one that actually caused it. config.dev.toml shipped exactly this
+// combination once ($1.50 page budget under a $1 run budget) and it made
+// `make dev-build` impossible.
+func TestValidateRejectsPerCallBudgetAboveRunBudget(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Role: RoleServer, HTTPAddr: ":8080",
+			Database: Database{Host: "h", Port: 5432, Name: "kiln", MaxConns: 10, MinConns: 2},
+			Storage:  Storage{Backend: BackendFS, Path: "/tmp/blobs"},
+			Agent: Agent{
+				Runner: RunnerFake, Timeout: time.Minute,
+				MaxPagesPerRun: 12, UnitConcurrency: 1,
+				AnalyzeBudgetUSD: 0.40, PageBudgetUSD: 1.50, RunBudgetUSD: 6.00,
+			},
+		}
+	}
+
+	if err := base().Validate(); err != nil {
+		t.Errorf("the shipped production budgets were rejected: %v", err)
+	}
+
+	c := base()
+	c.Agent.RunBudgetUSD = 1.00
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("a page budget above the run budget was accepted")
+	}
+	// The message has to name the per-call key, since naming only the run
+	// budget is what made this hard to diagnose in the first place.
+	if !strings.Contains(err.Error(), "page_budget_usd") {
+		t.Errorf("error does not name the offending key:\n%v", err)
+	}
+
+	c = base()
+	c.Agent.RunBudgetUSD = 0.20
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "analyze_budget_usd") {
+		t.Errorf("an analyze budget above the run budget was accepted: %v", err)
+	}
+
+	// Zero means unlimited, so nothing can exceed it.
+	c = base()
+	c.Agent.RunBudgetUSD = 0
+	if err := c.Validate(); err != nil {
+		t.Errorf("an unlimited run budget rejected per-call budgets: %v", err)
+	}
+}
+
 func TestValidateStorageCredentialPairing(t *testing.T) {
 	base := func() *Config {
 		return &Config{

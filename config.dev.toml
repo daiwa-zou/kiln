@@ -34,6 +34,14 @@ fake_cost_usd = 0.01
 # Low enough that the over-budget path is easy to demonstrate by setting a
 # small workspace budget_usd.
 run_budget_usd = 1.00
+# These must stay under run_budget_usd. The ledger reserves a call's budget
+# *before* making the call, so a per-call budget above the run ceiling can
+# never be reserved and every run dies on its first unit -- which is exactly
+# what the production defaults ($0.40 analyze, $1.50 page) did here against a
+# $1 run budget. Sized for the fake runner's $0.01 calls with headroom to
+# spare: 12 units cost $0.24 of the dollar.
+analyze_budget_usd = 0.05
+page_budget_usd = 0.10
 
 [worker]
 # Snappy queue pickup so enqueued runs start visibly fast.
