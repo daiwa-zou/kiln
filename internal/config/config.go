@@ -19,10 +19,16 @@ const (
 // Config is the fully resolved configuration. Nothing downstream re-merges:
 // Load returns this ready to use.
 type Config struct {
-	Role      Role   `mapstructure:"-"`
-	HTTPAddr  string `mapstructure:"http_addr"`
-	PublicURL string `mapstructure:"public_url"`
-	LogLevel  string `mapstructure:"log_level"`
+	Role     Role   `mapstructure:"-"`
+	HTTPAddr string `mapstructure:"http_addr"`
+	// MetricsAddr serves Prometheus metrics on its own listener. Separate
+	// from the API on purpose: metrics describe the deployment, not a tenant,
+	// so exposing them on the public router would mean either publishing
+	// queue depth and spend to every reader or inventing an auth scheme
+	// Prometheus does not want to use. Empty disables the listener.
+	MetricsAddr string `mapstructure:"metrics_addr"`
+	PublicURL   string `mapstructure:"public_url"`
+	LogLevel    string `mapstructure:"log_level"`
 	// CORSOrigins are browser origins allowed to call the API, for a
 	// separately hosted frontend. Empty means same-origin only.
 	CORSOrigins []string `mapstructure:"cors_origins"`

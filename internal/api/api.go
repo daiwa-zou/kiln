@@ -124,6 +124,10 @@ type Server struct {
 	// a folder of documents is one user action that arrives as many requests,
 	// so it gets a roomier bucket than the human-paced write surface.
 	uploadLimit *limiter
+
+	// Metrics, when set, instruments every route. Nil leaves the server
+	// uninstrumented, which is what tests and embedded uses want.
+	Metrics *observability.Metrics
 }
 
 // Pagination bounds. Defaults serve the UI; ceilings stop a caller from
@@ -148,6 +152,12 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
+	if s.Metrics != nil {
+		// Outermost of the observability middleware so it sees the status
+		// Recoverer produces for a panic, rather than reporting the request
+		// that panicked as a success.
+		r.Use(metricsMiddleware(s.Metrics))
+	}
 	if len(s.CORSOrigins) > 0 {
 		r.Use(corsMiddleware(s.CORSOrigins))
 	}

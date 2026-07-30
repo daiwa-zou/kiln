@@ -109,6 +109,13 @@ See [`deploy/kubernetes/`](../deploy/kubernetes) for manifests and
   gets its grace window before being requeued. Cutting that short turns
   paid-for work into a requeue.
 
+## Observability
+
+Prometheus metrics are served on a separate port (`:9090` by default) by both
+the API and every worker: request traffic, queue depth, build outcomes, and
+model spend. See [observability.md](observability.md) for the metric reference,
+alert rules, and scraping queue depth to autoscale workers.
+
 ## Operating
 
 **Upgrades.** Roll the migration Job, then the API, then the workers. Workers

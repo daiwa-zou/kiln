@@ -56,6 +56,20 @@ are only readable under worker.permitted_source_roots.`,
 				return err
 			}
 
+			// A standalone worker holds no API listener, so this port is the
+			// only way to see queue depth, build outcomes, and spend from
+			// outside. Skipped for --once, which is a one-shot drain that
+			// would exit before a scrape ever arrived.
+			if cfg.MetricsAddr != "" && !once {
+				w.Metrics = observability.NewMetrics()
+				fmt.Fprintf(cmd.OutOrStdout(), "metrics at %s/metrics\n", cfg.MetricsAddr)
+				go func() {
+					if err := w.Metrics.ServeMetrics(ctx, cfg.MetricsAddr); err != nil {
+						log.Error("metrics listener stopped", "error", err)
+					}
+				}()
+			}
+
 			if once {
 				n, err := w.RunOnce(ctx)
 				fmt.Fprintf(cmd.OutOrStdout(), "processed %d run(s)\n", n)

@@ -24,6 +24,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/jobs"
+	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
 
@@ -46,6 +47,7 @@ type Store interface {
 	FileReview(ctx context.Context, workspaceID, kind, title, detail string) error
 	RequeueRun(ctx context.Context, runID string) error
 	Sweep(ctx context.Context, softDeleteRetention, runRetention time.Duration) (int64, error)
+	QueueDepth(ctx context.Context) (map[string]int, error)
 }
 
 // Worker is one claim-and-build loop.
@@ -83,6 +85,9 @@ type Worker struct {
 	RunRetention        time.Duration
 	lastSweep           time.Time
 
+	// lastQueueSample throttles the queue-depth gauge; see sampleQueueDepth.
+	lastQueueSample time.Time
+
 	// lastSourcePoll throttles the scheduler to roughly one sweep per
 	// interval regardless of how fast the claim loop spins.
 	lastSourcePoll time.Time
@@ -106,6 +111,19 @@ type Worker struct {
 	// connectors in files mode (no path in the config). Nil makes such a
 	// connector a clear configuration error rather than a mystery.
 	Blobs blob.Store
+
+	// Metrics instruments builds. Nil is fine -- metrics() substitutes a
+	// no-op registry -- so tests and embedded uses need not wire one.
+	Metrics *observability.Metrics
+}
+
+// metrics never returns nil, so the recording calls need no guard at each
+// site. A discarded registry costs an allocation once, not a branch per run.
+func (w *Worker) metrics() *observability.Metrics {
+	if w.Metrics == nil {
+		w.Metrics = observability.NewMetrics()
+	}
+	return w.Metrics
 }
 
 // New assembles a worker from resolved configuration.
@@ -160,6 +178,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.requeueStale(ctx, log)
 		w.pollSources(ctx, log)
 		w.sweep(ctx, log)
+		w.sampleQueueDepth(ctx, log)
 
 		run, err := w.Store.ClaimNextRun(ctx, w.ID)
 		if err != nil {
@@ -219,6 +238,13 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	log := w.logger().With("run", run.ID, "workspace", run.WorkspaceSlug)
 	log.Info("claimed run", "trigger", run.Trigger)
 
+	// Counted at claim rather than at execution: a run that fails to resolve
+	// its sources never reaches the pipeline, and those are precisely the
+	// failures worth alerting on (a bad connector, unreachable storage).
+	// Instrumenting later would make them invisible.
+	started := time.Now()
+	w.metrics().RunStarted(run.Trigger)
+
 	spec, connectors, cleanup, err := w.sourceSpec(ctx, run)
 	if cleanup != nil {
 		defer cleanup()
@@ -230,10 +256,12 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 			if rerr := w.Store.RequeueRun(context.WithoutCancel(ctx), run.ID); rerr != nil {
 				log.Error("requeue after interruption failed", "error", rerr)
 			}
+			w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
 			return
 		}
 		log.Error("run not executable", "error", err)
 		w.failRun(ctx, run.ID, err, log)
+		w.metrics().RunFinished("unresolvable", time.Since(started), 0, 0, 0, 0)
 		// A run pinned to one connector can attribute the failure to it;
 		// workspace-wide resolution failures have no single owner.
 		if run.ConnectorID != "" {
@@ -277,14 +305,18 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		if rerr := w.Store.RequeueRun(context.WithoutCancel(ctx), run.ID); rerr != nil {
 			log.Error("requeue after interruption failed", "error", rerr)
 		}
+		w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
 	case err != nil:
 		syncErr = err.Error()
 		log.Error("build failed", "error", err)
 		w.failRun(ctx, run.ID, err, log)
+		w.metrics().RunFinished("failed", time.Since(started), 0, 0, 0, 0)
 	default:
 		log.Info("build finished", "status", res.Summary.Status,
 			"cost_usd", res.Summary.CostUSD,
 			"created", res.Summary.Created, "updated", res.Summary.Updated)
+		w.metrics().RunFinished(string(res.Summary.Status), time.Since(started),
+			res.Summary.CostUSD, res.Summary.Created, res.Summary.Updated, res.Summary.Deleted)
 		w.warnNearBudget(ctx, run.WorkspaceID, log)
 		w.enqueueContinuation(ctx, run, res, log)
 	}
@@ -699,6 +731,27 @@ func (w *Worker) sweep(ctx context.Context, log *slog.Logger) {
 	if swept > 0 {
 		log.Info("gc sweep removed expired rows", "rows", swept)
 	}
+}
+
+// sampleQueueDepth publishes the queue gauge on a leash rather than on every
+// claim-loop iteration. The loop spins as fast as the poll interval (a second
+// in some deployments), and a count(*) per worker per second is a database
+// load nobody asked for; ten seconds is well inside a Prometheus scrape.
+//
+// A failure here is logged at debug and otherwise ignored: monitoring must
+// never be the thing that stops builds.
+func (w *Worker) sampleQueueDepth(ctx context.Context, log *slog.Logger) {
+	if time.Since(w.lastQueueSample) < 10*time.Second {
+		return
+	}
+	w.lastQueueSample = time.Now()
+
+	depth, err := w.Store.QueueDepth(ctx)
+	if err != nil {
+		log.Debug("queue depth sample failed", "error", err)
+		return
+	}
+	w.metrics().SetQueueDepth(depth)
 }
 
 func (w *Worker) logger() *slog.Logger {

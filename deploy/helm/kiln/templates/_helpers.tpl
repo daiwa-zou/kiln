@@ -66,6 +66,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   value: {{ .Values.config.logLevel | quote }}
 - name: KILN_AUTH_MODE
   value: {{ .Values.config.authMode | quote }}
+- name: KILN_METRICS_ADDR
+  value: {{ .Values.config.metricsAddr | quote }}
 {{- with .Values.config.publicURL }}
 - name: KILN_PUBLIC_URL
   value: {{ . | quote }}

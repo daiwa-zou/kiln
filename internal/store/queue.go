@@ -39,6 +39,38 @@ type EnqueueOptions struct {
 	NotBefore time.Time
 }
 
+// QueueDepth counts runs that have not reached a terminal state, grouped by
+// status. It is the number workers should be scaled on: CPU is a poor proxy
+// for a queue of LLM-bound builds, because a worker waiting on a model call is
+// idle by every resource measure and busy by the only one that matters.
+//
+// Deliberately instance-wide rather than per workspace: this feeds a
+// deployment-level gauge, and a label per tenant would grow without bound.
+func (s *WikiStore) QueueDepth(ctx context.Context) (map[string]int, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT status, count(*)
+		FROM runs
+		WHERE status IN ('queued', 'running')
+		GROUP BY status`)
+	if err != nil {
+		return nil, fmt.Errorf("store: queue depth: %w", err)
+	}
+	defer rows.Close()
+
+	// Both statuses are always reported, so a drained queue publishes zeros
+	// rather than leaving the last non-zero sample looking current forever.
+	out := map[string]int{"queued": 0, "running": 0}
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("store: scan queue depth: %w", err)
+		}
+		out[status] = n
+	}
+	return out, rows.Err()
+}
+
 // EnqueueRun files a build request for a workspace. When the workspace already
 // has a queued or running run, that run is returned instead and created is
 // false: the partial unique index makes double-submission and webhook storms

@@ -13,6 +13,10 @@ const (
 
 func applyDefaults(v setter, role Role) {
 	v.SetDefault("http_addr", ":8080")
+	// A conventional, non-public port. It is not reachable through the API's
+	// ingress, so serving it by default costs nothing and means a scrape
+	// works without a configuration round trip.
+	v.SetDefault("metrics_addr", ":9090")
 	v.SetDefault("log_level", "info")
 
 	v.SetDefault("database.host", "localhost")
