@@ -68,12 +68,14 @@ storage is needed once you upload documents.
 flowchart TB
     subgraph clients[" "]
         Browser["Browser<br/><i>embedded reading UI</i>"]
+        Agent["MCP agent<br/><i>reads the wiki</i>"]
         CLI["kiln build<br/><i>local, no server</i>"]
         GH["GitHub<br/><i>webhooks, OAuth, App tokens</i>"]
     end
 
-    subgraph kiln["kiln (one image, three roles)"]
+    subgraph kiln["kiln (one image, four roles)"]
         API["kiln serve<br/>HTTP API + UI"]
+        MCP["kiln mcp<br/><i>stdio</i>"]
         W1["kiln worker"]
         W2["kiln worker"]
         WN["kiln worker …"]
@@ -84,6 +86,8 @@ flowchart TB
     Claude["Anthropic API<br/><i>or claude CLI</i>"]
 
     Browser --> API
+    Agent --> MCP
+    MCP -->|"HTTP + token"| API
     GH -->|"push webhook"| API
     API --> PG
     API --> Blob
@@ -102,9 +106,15 @@ flowchart TB
 
 **Roles.** `kiln serve` runs the HTTP API and the embedded reading UI.
 `kiln worker` claims queued runs and builds them. `kiln build` runs the same
-pipeline against a local directory with no server and no database.
-`kiln serve --with-worker` runs both in one process, which is the right shape
-for a single node.
+pipeline against a local directory with no server and no database. `kiln mcp`
+serves a bench to agents over stdio, reading through the API rather than the
+database (see [Serving the wiki to agents](#serving-the-wiki-to-agents)).
+`kiln serve --with-worker` runs the first two in one process, which is the
+right shape for a single node.
+
+Only `serve` and `worker` touch Postgres, which is why only those two have
+pool settings. `build` needs neither a server nor a database; `mcp` needs a
+reachable `serve`.
 
 **Scaling.** Builds scale by adding worker processes. There is no external
 broker — the queue *is* the `runs` table, claimed with `FOR UPDATE SKIP LOCKED`.
