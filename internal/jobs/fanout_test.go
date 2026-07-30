@@ -18,7 +18,7 @@ import (
 // same time rather than the test passing on a sequential pipeline, and a
 // per-unit delay for forcing a completion order that differs from plan order.
 type concurrentRunner struct {
-	mu       sync.Mutex
+	mu     sync.Mutex
 	byUnit map[string][]agent.GeneratedPage
 	delays map[string]time.Duration
 	// defaultDelay applies to units with no entry in delays. Some delay is
