@@ -1712,6 +1712,61 @@ function openPalette() {
   closePalette = openOverlay($("palette"), () => { closePalette = null; });
 }
 
+// slugify turns a typed name into the URL-safe slug the API accepts. The
+// server validates independently; this only spares the user from having to
+// know the rule.
+const slugify = (name) => name.toLowerCase().trim()
+  .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
+
+// wireBenchCreate binds a name field and a button to bench creation, used by
+// both the first-run welcome and the "+ New bench" overlay.
+function wireBenchCreate(nameID, buttonID, noteID, onDone) {
+  const note = (msg) => {
+    const n = $(noteID);
+    if (n) { n.textContent = msg || ""; n.classList.toggle("error", Boolean(msg)); }
+  };
+  const submit = async () => {
+    const name = $(nameID).value.trim();
+    const slug = slugify(name);
+    if (!slug) { note("give the bench a name"); return; }
+    try {
+      await api("/workspaces", { method: "POST", body: { slug, name } });
+      toast(`Created ${name}`);
+      onDone?.();
+      // Reload rather than patch state: a first bench changes the whole
+      // shell, and a fresh boot is simpler than reconciling it in place.
+      location.hash = "#/ingestion";
+      location.reload();
+    } catch (err) {
+      if (!err.handled) note(err.message);
+    }
+  };
+  once($(buttonID), submit);
+  $(nameID).addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  $(nameID).focus();
+}
+
+// openBenchCreator reuses the wizard overlay for a one-field form.
+function openBenchCreator() {
+  const body = $("wizard-body");
+  let close = null;
+  body.innerHTML = `
+    <div class="wizard-head">
+      <span class="wizard-steps">New bench</span>
+      <button class="wizard-x" id="bench-x" aria-label="Close">&times;</button>
+    </div>
+    <p class="hint">A bench is one wiki and the sources it is compiled from.</p>
+    <label class="hint" for="new-bench-name">Name</label>
+    <input id="new-bench-name" placeholder="Team handbook" autocomplete="off">
+    <div class="wizard-actions">
+      <button class="btn" id="new-bench-create">Create bench</button>
+    </div>
+    <span class="hint" id="new-bench-note" role="status"></span>`;
+  close = openOverlay($("wizard"), () => { body.innerHTML = ""; });
+  $("bench-x").addEventListener("click", () => close?.());
+  wireBenchCreate("new-bench-name", "new-bench-create", "new-bench-note", () => close?.());
+}
+
 async function boot() {
   $("menu").addEventListener("click", () =>
     setDrawer(!document.body.classList.contains("nav-open")));
@@ -1807,16 +1862,29 @@ async function boot() {
 
     const workspaces = await api("/workspaces");
     if (!workspaces.length) {
-      $("main").innerHTML = `<div class="empty">
-        No benches yet. Run <code>kiln build &lt;path&gt;</code> to create one.</div>`;
+      // A dead end before this: a signed-in user with no bench was told to
+      // run a CLI command on a machine they may not have.
+      $("main").innerHTML = `<h1>Welcome</h1>
+        <p class="hint">A bench is one wiki and the sources it is compiled from.
+        Create one, then add a repository, web pages, or documents to it.</p>
+        <label class="group-label" for="first-bench-name">Name</label>
+        <input id="first-bench-name" placeholder="Team handbook" autocomplete="off">
+        <button class="btn" id="first-bench-create">Create bench</button>
+        <span class="hint" id="first-bench-note" role="status"></span>`;
+      wireBenchCreate("first-bench-name", "first-bench-create", "first-bench-note");
       return;
     }
     state.benches = workspaces;
     $("bench-list").innerHTML = workspaces
       .map((w) => `<button type="button" data-slug="${esc(w.slug)}">${esc(w.name)} (${esc(w.pageCount)})</button>`)
-      .join("");
+      .join("") + `<button type="button" class="bench-new" id="bench-new">+ New bench</button>`;
 
     $("bench-list").addEventListener("click", (e) => {
+      if (e.target.closest("#bench-new")) {
+        $("bench").open = false;
+        openBenchCreator();
+        return;
+      }
       const b = e.target.closest("button[data-slug]");
       if (!b) return;
       if (b.dataset.slug === state.workspace) { $("bench").open = false; return; }

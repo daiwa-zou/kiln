@@ -136,13 +136,28 @@ in M2 with no UI over it — sources were configured with `curl`.*
 5. **Sources view** — connector CRUD, credential sealing, drag-drop
    document upload, and Build-now in the reader UI (`ui/sources.js`).
 
-## M8 — SaaS Completion (parked)
+## M8 — SaaS Completion ✅ mostly shipped (2026-07-30)
 
-Self-serve org/workspace creation (user #2 currently signs into an empty
-list with no path forward); retire the permissive `member`-writes default;
-activate `digests` for review-queue notifications; container image, compose,
-and `/metrics`. (The object storage client + blob GC formerly parked here
-shipped with sources self-serve.)
+1. **Deployable artifact** — a non-root multi-arch image on GHCR (signed,
+   with SBOM and provenance), a compose stack that runs the real topology
+   (API and a scalable worker pool against Postgres and S3), and a Helm
+   chart with separate API/worker Deployments, a migration hook, HPAs, and a
+   restricted pod security context. `docs/deployment.md`.
+2. **`/metrics`** — Prometheus on its own listener for both roles: request
+   traffic, build outcomes, queue depth, and model spend, with bounded label
+   cardinality. Queue depth is the worker autoscaling signal.
+   `docs/observability.md`.
+3. **Self-serve bench creation** — `POST /api/v1/workspaces` makes the
+   creator an owner of the org, closing the "user #2 signs into an empty
+   list with no path forward" gap. Creating inside an existing org requires
+   owning it, and answers 404 either way so orgs cannot be enumerated.
+4. **WCAG 2.2 AA** — audited across every view in both themes; contrast,
+   target sizes, and accessible names fixed. `docs/accessibility.md`.
+
+Still open: activate `digests` for review-queue notifications, and revisit
+the permissive `member`-writes default (members write content; owners shape
+connectors, credentials, and membership -- the split holds, but the default
+role granted on sign-in deserves a second look).
 
 ## Deferred decisions
 
