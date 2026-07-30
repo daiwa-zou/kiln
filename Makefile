@@ -8,7 +8,7 @@ TEST_DB_URL := postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
 # Pinned to match .github/workflows/ci.yml. Bump both together.
 GOLANGCI := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
-.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev dev-db migrate-dev dev-build dev-clean clean image compose-up compose-down manifests helm-lint
+.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev dev-up dev-seed dev-db migrate-dev dev-build dev-clean clean image compose-up compose-down manifests helm-lint
 
 all: fmt test build
 
@@ -84,8 +84,31 @@ dev-db: db-up
 migrate-dev: build dev-db
 	./bin/$(BINARY) admin migrate --config $(DEV_CONFIG)
 
+# The one-command entry point: Postgres, schema, a wiki with content already in
+# it, then the server. Everything a deployment has except object storage, which
+# config.dev.toml points at the filesystem so no MinIO is needed.
+#
+# `make dev` is the same thing without the seeding, for restarting the server
+# against a wiki that already exists.
+dev-up: dev-seed dev
+
+# Builds this repository into the dev wiki until it converges. The loop is not
+# belt-and-braces: a run stops at agent.max_pages_per_run and defers the rest,
+# so a repository with more units than the cap needs several runs to finish.
+# Each one is hash-gated, so the last is free and the loop ends on it.
+dev-seed: migrate-dev
+	@for i in 1 2 3 4 5 6; do \
+		out=$$(KILN_WORKER_PERMITTED_SOURCE_ROOTS=$(CURDIR) \
+			./bin/$(BINARY) build $(CURDIR) --config $(DEV_CONFIG) 2>&1) || \
+			{ echo "$$out" | tail -20; exit 1; }; \
+		echo "$$out" | grep -E '^(succeeded|no_changes|partial|over_budget|failed)' || true; \
+		case "$$out" in *"nothing changed"*) break ;; esac; \
+	done
+	@echo "dev wiki seeded — start the server with 'make dev'"
+
 # API + UI + in-process worker. Connectors may read anything under this repo.
 dev: migrate-dev
+	@echo "kiln dev on http://127.0.0.1:8080 (auth disabled, fake agent runner)"
 	KILN_WORKER_PERMITTED_SOURCE_ROOTS=$(CURDIR) \
 		./bin/$(BINARY) serve --with-worker --config $(DEV_CONFIG)
 

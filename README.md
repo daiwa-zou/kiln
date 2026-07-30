@@ -113,7 +113,8 @@ make lint              # golangci-lint, same config CI runs
 make vulncheck         # govulncheck against the Go vulnerability database
 make build             # -> bin/kiln
 make migrate           # apply schema (advisory-lock guarded, safe to run concurrently)
-make dev               # server + worker in one process
+make dev-up            # one command: database, schema, a built wiki, then the server
+make dev               # just the server + worker, against a wiki that already exists
 make db-up / db-down   # manage the test Postgres container
 ```
 
@@ -122,19 +123,36 @@ unset, so `make test` stays fast and offline.
 
 ### Local end-to-end run (no API key, zero cost)
 
-`make dev` brings up the whole system against [config.dev.toml](config.dev.toml):
-Postgres (in the same container the tests use, but a dedicated `kiln_dev`
-database that test runs cannot wipe), migrations, and `serve --with-worker`
-with `agent.runner = "fake"` — a deterministic runner that exercises every real
-pipeline stage (sync, map, plan, validate, import, the queue, the budget
-ledger, the UI) while generating placeholder prose with zero API spend.
+One command, from nothing to a wiki you can read:
 
 ```bash
-make dev          # terminal 1: API + UI + worker on :8080
-make dev-build    # terminal 2: build kiln itself into the dev wiki
-make dev-build    # again: "nothing changed; no model calls, no cost"
+make dev-up       # then open http://127.0.0.1:8080
+```
+
+Docker is the only prerequisite — `make dev-up` starts Postgres itself. It runs
+against [config.dev.toml](config.dev.toml) and does four things: starts the
+Postgres container (the same one the tests use, but a dedicated `kiln_dev`
+database that test runs cannot wipe), applies migrations, builds this repository
+into the dev wiki until it converges, and starts `serve --with-worker` on
+:8080.
+
+Every component a deployment has is present. Object storage is the one
+substitution: `storage.backend = "fs"` writes blobs under `.dev/`, so no MinIO
+is needed. The agent is `agent.runner = "fake"` — a deterministic runner that
+exercises every real pipeline stage (sync, map, plan, validate, import, the
+queue, the budget ledger, the UI) while generating placeholder prose. **No API
+key, no spend.**
+
+```bash
+make dev          # just the server, against a wiki that already exists
+make dev-build    # one build into the dev wiki, from another terminal
 make dev-clean    # drop the dev database and blobs
 ```
+
+A build stops at `agent.max_pages_per_run` and defers the rest, so this
+repository takes two runs to cover and a third to report *"nothing changed; no
+model calls, no cost"*. `make dev-up` runs that loop for you; `make dev-build`
+is a single run.
 
 To exercise the queue path, open the **Sources** view at http://localhost:8080,
 add the repo as a source (path `$PWD`), and hit Build now — or do the same over

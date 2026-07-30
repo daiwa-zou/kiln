@@ -88,6 +88,27 @@ func (c *Config) Validate() error {
 	if c.Agent.AnalyzeBudgetUSD < 0 || c.Agent.PageBudgetUSD < 0 || c.Agent.RunBudgetUSD < 0 {
 		problems = append(problems, "agent: budgets cannot be negative")
 	}
+	// A per-call budget above the run ceiling is dead configuration, not a
+	// tight one. The ledger reserves a call's budget before making the call,
+	// so a reservation that cannot fit under the ceiling is refused every
+	// time: the run fails on its first unit, forever, with an "exhausted"
+	// error that points at the run budget rather than at the real culprit.
+	// Cheaper to refuse the combination than to debug it at $0.01 a try.
+	if c.Agent.RunBudgetUSD > 0 {
+		for _, b := range []struct {
+			key string
+			usd float64
+		}{
+			{"analyze_budget_usd", c.Agent.AnalyzeBudgetUSD},
+			{"page_budget_usd", c.Agent.PageBudgetUSD},
+		} {
+			if b.usd > c.Agent.RunBudgetUSD {
+				problems = append(problems, fmt.Sprintf(
+					"agent: %s ($%.2f) exceeds run_budget_usd ($%.2f), so no call could ever reserve its budget and every run would fail on its first unit",
+					b.key, b.usd, c.Agent.RunBudgetUSD))
+			}
+		}
+	}
 	if c.Agent.UnitConcurrency < 1 {
 		problems = append(problems, "agent: unit_concurrency must be at least 1")
 	}
