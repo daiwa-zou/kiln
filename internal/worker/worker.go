@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/daiwa-zou/kiln/internal/blob"
@@ -396,12 +397,20 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 			if spec.DocsDir != "" {
 				return fail2(fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug))
 			}
-			dir, blobKeys, skipped, clean, err := w.materializeFiles(ctx, run.WorkspaceID)
+			dir, blobKeys, skipped, unreadable, clean, err := w.materializeFiles(ctx, run.WorkspaceID)
 			if clean != nil {
 				cleanups = append(cleanups, clean)
 			}
 			if err != nil {
 				return fail2(fmt.Errorf("connector %s (upload): %w", c.Name, err))
+			}
+			// Documents whose bytes are gone are an operational incident, not
+			// a decision anyone made. The build continues without them; the
+			// review queue is where the wiki asks its humans about exactly
+			// this kind of thing, and their pages stay untouched until one
+			// answers.
+			if len(unreadable) > 0 {
+				w.reportUnreadableDocuments(ctx, run, c, unreadable)
 			}
 			spec.DocsDir = dir
 			spec.BlobKeys = blobKeys
@@ -462,21 +471,29 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 // connector extracts it exactly as it would a local folder. Zero files is a
 // valid, empty sync. The returned map carries each staged document's unit key
 // to its blob key, for source-record attribution and the deletion cascade;
-// skipped lists the unit keys of paused files, whose absence from the sync is
-// deliberate and must not read as a deletion.
-func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir string, blobKeys map[string][]string, skipped []diff.Key, cleanup func(), err error) {
+// skipped lists the unit keys of files left out of this sync -- paused ones,
+// whose absence is deliberate, and unreadable ones, whose absence is an
+// incident. Both must be reported as skipped rather than missing, or the
+// deletion cascade would offer to delete their pages.
+//
+// A blob that cannot be read does not fail the run. One unreadable document
+// is data loss for that document; failing the whole build would also stop the
+// repository, the web pages, and every other document from ingesting, turning
+// a storage incident into a total outage. The failure is returned so the
+// caller can surface it where humans look.
+func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir string, blobKeys map[string][]string, skipped []diff.Key, unreadable []string, cleanup func(), err error) {
 	if w.Blobs == nil {
-		return "", nil, nil, nil, fmt.Errorf(
+		return "", nil, nil, nil, nil, fmt.Errorf(
 			"object storage is not configured on this worker; set storage.* (or give the connector a path under permitted_source_roots)")
 	}
 	files, err := w.Store.ListFiles(ctx, workspaceID)
 	if err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, nil, nil, err
 	}
 
 	dir, err = os.MkdirTemp("", "kiln-files-")
 	if err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, nil, nil, err
 	}
 	cleanup = func() { os.RemoveAll(dir) }
 	// Even though stored paths were sanitized at upload time, staging goes
@@ -484,7 +501,7 @@ func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir 
 	// staging directory.
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return dir, nil, nil, cleanup, err
+		return dir, nil, nil, nil, cleanup, err
 	}
 	defer root.Close()
 
@@ -496,11 +513,41 @@ func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir 
 			continue
 		}
 		if err := stageBlob(ctx, w.Blobs, root, f); err != nil {
-			return dir, nil, nil, cleanup, fmt.Errorf("staging %s: %w", f.Path, err)
+			// Cancellation is not a storage problem: it means the worker is
+			// draining, and every remaining file would "fail" the same way.
+			// Report it as the interruption it is.
+			if ctx.Err() != nil {
+				return dir, nil, nil, nil, cleanup, ctx.Err()
+			}
+			unreadable = append(unreadable, f.Path)
+			skipped = append(skipped, key)
+			continue
 		}
 		blobKeys[string(key)] = append(blobKeys[string(key)], f.BlobKey)
 	}
-	return dir, blobKeys, skipped, cleanup, nil
+	return dir, blobKeys, skipped, unreadable, cleanup, nil
+}
+
+// reportUnreadableDocuments records a storage incident where an operator will
+// see it: the connector's last_error (visible on the Ingestion page) and the
+// review queue. Deliberately not a run failure -- the rest of the bench built
+// fine, and marking the run failed would hide that.
+func (w *Worker) reportUnreadableDocuments(ctx context.Context, run *store.QueuedRun, c store.ConnectorRow, paths []string) {
+	log := w.logger().With("run", run.ID, "workspace", run.WorkspaceSlug)
+	log.Error("documents could not be read from object storage; skipped for this build",
+		"connector", c.Name, "count", len(paths), "paths", paths)
+
+	detail := fmt.Sprintf(
+		"%d uploaded document(s) are recorded on this bench but their content could not be read from object storage:\n\n  %s\n\n"+
+			"They were skipped for this build, so their pages are untouched and nothing was deleted. "+
+			"This usually means the storage bucket lost objects, or storage.* now points somewhere else. "+
+			"Re-upload the documents, or remove them from the Ingestion page if they are no longer wanted.",
+		len(paths), strings.Join(paths, "\n  "))
+
+	if err := w.Store.FileReview(ctx, run.WorkspaceID, "storage",
+		fmt.Sprintf("%d document(s) unreadable from storage", len(paths)), detail); err != nil {
+		log.Error("filing storage review failed", "error", err)
+	}
 }
 
 // stageBlob copies one stored file into the staging jail.

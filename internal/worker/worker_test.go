@@ -21,6 +21,7 @@ type fakeStore struct {
 	connectors []store.ConnectorRow
 	byID       map[string]store.ConnectorRow
 	files      []store.FileRow
+	reviews    []string
 }
 
 func (f *fakeStore) ClaimNextRun(context.Context, string) (*store.QueuedRun, error) {
@@ -63,7 +64,10 @@ func (f *fakeStore) Sweep(context.Context, time.Duration, time.Duration) (int64,
 func (f *fakeStore) SpendInWindow(context.Context, string, time.Duration) (float64, error) {
 	return 0, nil
 }
-func (f *fakeStore) FileReview(context.Context, string, string, string, string) error { return nil }
+func (f *fakeStore) FileReview(_ context.Context, _, kind, title, _ string) error {
+	f.reviews = append(f.reviews, kind+":"+title)
+	return nil
+}
 
 func run(ws string) *store.QueuedRun {
 	return &store.QueuedRun{ID: "r1", WorkspaceID: ws, WorkspaceSlug: "bench", Trigger: "manual"}
@@ -207,6 +211,68 @@ func TestSourceSpecFilesModeSkipsPausedFiles(t *testing.T) {
 	}
 	if _, ok := spec.BlobKeys[string(want)]; ok {
 		t.Error("paused file's blob attributed to the sync")
+	}
+}
+
+// A document whose bytes are missing from object storage is an incident for
+// that document, not for the bench. Failing the run would stop the
+// repository, the web pages, and every healthy document from ingesting --
+// turning a storage problem into a total outage.
+func TestSourceSpecFilesModeSurvivesUnreadableBlob(t *testing.T) {
+	blobs := memBlobs{
+		"ws/ws1/uploads/ok": []byte("# Present\n"),
+		// "ws/ws1/uploads/gone" is deliberately absent.
+	}
+	st := &fakeStore{
+		connectors: []store.ConnectorRow{
+			{ID: "c2", Kind: "upload", Name: "documents", Config: map[string]any{}},
+		},
+		files: []store.FileRow{
+			{ID: "f1", Path: "present.md", BlobKey: "ws/ws1/uploads/ok", Enabled: true},
+			{ID: "f2", Path: "vanished.md", BlobKey: "ws/ws1/uploads/gone", Enabled: true},
+		},
+	}
+	w := &Worker{Store: st, Blobs: blobs}
+
+	spec, ids, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		t.Fatalf("one unreadable blob failed the whole resolution: %v", err)
+	}
+	if ids.Upload != "c2" {
+		t.Fatalf("upload connector not resolved: %+v", ids)
+	}
+
+	// The healthy document still staged.
+	if _, err := os.Stat(filepath.Join(spec.DocsDir, "present.md")); err != nil {
+		t.Errorf("healthy document not staged: %v", err)
+	}
+
+	// The unreadable one is reported as skipped, not missing: treating it as
+	// gone would let the deletion cascade offer to remove its pages, turning
+	// a storage incident into content loss.
+	want := diff.DocKey(diff.UploadOrigin("vanished.md"))
+	var found bool
+	for _, k := range spec.SkippedKeys {
+		if k == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("SkippedKeys = %v, want it to contain %s", spec.SkippedKeys, want)
+	}
+	if _, ok := spec.BlobKeys[string(want)]; ok {
+		t.Error("unreadable document was attributed to the sync")
+	}
+
+	// And it is surfaced where a human looks, rather than swallowed.
+	if len(st.reviews) != 1 {
+		t.Fatalf("reviews = %v, want one storage review", st.reviews)
+	}
+	if !strings.Contains(st.reviews[0], "storage") || !strings.Contains(st.reviews[0], "unreadable") {
+		t.Errorf("review %q does not name the problem", st.reviews[0])
 	}
 }
 
