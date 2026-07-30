@@ -30,8 +30,8 @@ type scriptedRunner struct {
 	// cross-unit collision check makes shared paths a failure, as it should).
 	filesBySession map[string]map[int]map[string]string
 	attempts       map[string]int
-	costPerCall float64
-	failWith    error
+	costPerCall    float64
+	failWith       error
 	// failWithCost returns a costed result *alongside* failWith, the way the
 	// CLI runner does when the process exits non-zero despite a success
 	// envelope. The call really ran and really billed, so the run must
