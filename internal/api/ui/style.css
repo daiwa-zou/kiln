@@ -149,8 +149,13 @@
   /* The nav's clusters take the same tiny uppercase headers the page tree
      below uses, so one sidebar speaks one language. Tighter above than the
      tree's, since these sit between short lists rather than long ones. */
-  .nav .group-label { margin: 10px 0 2px; padding-left: 10px; }
-  .nav .group-label:first-child { margin-top: 0; }
+  /* A rule above each cluster label divides the groups; the first needs
+     none, since the search box above it already closes that edge. */
+  .nav .group-label {
+    margin: 12px 0 2px; padding: 11px 0 0 10px;
+    border-top: 1px solid var(--border);
+  }
+  .nav .group-label:first-child { margin-top: 0; padding-top: 0; border-top: none; }
   .nav a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
   .nav a[aria-current="page"] .badge { background: var(--on-ember); color: var(--ember); }
 
