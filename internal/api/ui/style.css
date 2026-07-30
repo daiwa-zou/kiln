@@ -138,6 +138,17 @@
     content: "\2713"; position: absolute; left: 9px; color: var(--ember);
   }
 
+  /* First run, before any bench exists. The sidebar's controls all act on a
+     bench, so with none they are noise at best and dead ends at worst --
+     an empty picker, a filter over nothing, and nine views that render
+     nothing. Only the brand stays. */
+  body.no-bench .bench,
+  body.no-bench .nav,
+  body.no-bench [role="search"],
+  body.no-bench #tree-filter,
+  body.no-bench #tree,
+  body.no-bench .signout { display: none; }
+
   .nav { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
   .nav a {
     display: flex; align-items: center;
@@ -161,6 +172,11 @@
     border-top: 1px solid var(--border);
   }
   .nav .group-label:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+  /* Views that cannot hold anything until the first ingest. Dimmed, not
+     disabled: they still explain themselves when clicked, which is more
+     useful than a link that does nothing. */
+  .nav a.nav-waiting { opacity: 0.5; }
+  .nav a.nav-waiting:hover { opacity: 1; }
   .nav a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
   .nav a[aria-current="page"] .badge { background: var(--on-ember); color: var(--ember); }
 
@@ -190,6 +206,7 @@
      token measures 4.28:1, under the 4.5:1 WCAG AA floor for body text.
      --ink-faint stays reserved for the dead-wikilink token, which pairs low
      contrast with a dashed underline so "absent" is never color alone. */
+  .tree-empty { padding: 4px 8px; line-height: 1.4; }
   .tree-group .count { color: var(--ink-dim); font-size: 10px; font-weight: 400; }
   .tree a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
   .tree a[aria-current="page"] { background: var(--ember-soft); color: var(--ink); }
@@ -407,6 +424,27 @@
     display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
   }
   #file-drop .row time { color: var(--ink-dim); font-size: 13px; }
+
+  /* The first-run checklist. Numbered by state rather than by CSS counter:
+     which step you are on is data, and the mark carries it. */
+  .steps { list-style: none; margin: 18px 0; padding: 0; }
+  .step {
+    display: flex; gap: 12px; align-items: flex-start;
+    padding: 14px 0; border-top: 1px solid var(--border);
+  }
+  .step:last-child { border-bottom: 1px solid var(--border); }
+  .step .hint { display: block; margin: 2px 0 0; }
+  .step .meta { margin-top: 8px; }
+  .step-mark {
+    flex: none; width: 22px; height: 22px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border); color: var(--ink-faint); font-size: 12px;
+  }
+  .step-mark.done { background: var(--ember); border-color: var(--ember); color: var(--on-ember); }
+  .step-mark.now { border-color: var(--ember); color: var(--ember); font-weight: 600; }
+  /* The step in progress is the one the eye should land on. */
+  .step.todo strong, .step.todo .hint { color: var(--ink-faint); }
+  .step.now strong { color: var(--ink); }
 
   /* Recent runs: day headers over compact rows. The dot carries state color
      (the sentence carries the meaning); cost and provenance sit demoted on
