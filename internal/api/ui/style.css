@@ -138,6 +138,17 @@
     content: "\2713"; position: absolute; left: 9px; color: var(--ember);
   }
 
+  /* First run, before any bench exists. The sidebar's controls all act on a
+     bench, so with none they are noise at best and dead ends at worst --
+     an empty picker, a filter over nothing, and nine views that render
+     nothing. Only the brand stays. */
+  body.no-bench .bench,
+  body.no-bench .nav,
+  body.no-bench [role="search"],
+  body.no-bench #tree-filter,
+  body.no-bench #tree,
+  body.no-bench .signout { display: none; }
+
   .nav { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
   .nav a {
     display: flex; align-items: center;

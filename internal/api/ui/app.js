@@ -1897,6 +1897,11 @@ async function boot() {
 
     const workspaces = await api("/workspaces");
     if (!workspaces.length) {
+      // Nothing is navigable without a bench: an empty picker, a page filter
+      // over no pages, and nine views that would all render nothing. The
+      // shell hides itself so the one thing worth doing is the only thing on
+      // screen.
+      document.body.classList.add("no-bench");
       // A dead end before this: a signed-in user with no bench was told to
       // run a CLI command on a machine they may not have.
       $("main").innerHTML = `<h1>Welcome</h1>
