@@ -42,15 +42,18 @@
       <input id="search" type="search" placeholder="Full-text search…" aria-label="Full-text search"
              enterkeyhint="search" autocomplete="off">
     </div>
-    <nav class="nav" aria-label="Views">
+    <nav class="nav" aria-labelledby="nav-explore">
+      <div class="group-label" id="nav-explore">Explore</div>
       <a href="#/overview" data-view="overview">Overview</a>
       <a href="#/index" data-view="index">Index</a>
       <a href="#/graph" data-view="graph">Graph</a>
       <a href="#/gaps" data-view="gaps">Gaps</a>
-      <a class="nav-sep" href="#/ingestion" data-view="sources">Ingestion</a>
+      <div class="group-label">Change</div>
+      <a href="#/ingestion" data-view="sources">Ingestion</a>
       <a href="#/log" data-view="log">Log</a>
       <a href="#/reviews" data-view="reviews">Reviews <span class="badge" id="reviews-badge" hidden></span></a>
-      <a class="nav-sep" href="#/steering" data-view="steering">Steering</a>
+      <div class="group-label">Configure</div>
+      <a href="#/steering" data-view="steering">Steering</a>
       <a href="#/members" data-view="members">Members</a>
     </nav>
     <input id="tree-filter" type="search" placeholder="Filter pages…  ( / )" aria-label="Filter pages"
