@@ -55,6 +55,7 @@ func applyDefaults(v setter, role Role) {
 	v.SetDefault("agent.page_budget_usd", 1.50)
 	v.SetDefault("agent.run_budget_usd", 6.00)
 	v.SetDefault("agent.max_pages_per_run", 12)
+	v.SetDefault("agent.unit_concurrency", 1)
 	v.SetDefault("agent.warn_turns", 40)
 	// A month-shaped window: workspace budget_usd reads naturally as a
 	// monthly cap. Enforced only for workspaces that set a budget.

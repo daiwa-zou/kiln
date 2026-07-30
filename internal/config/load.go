@@ -131,7 +131,7 @@ func bindEnv(v *viper.Viper) error {
 		"agent.runner", "agent.binary", "agent.base_url", "agent.effort",
 		"agent.model", "agent.analyze_model", "agent.fallback_model",
 		"agent.timeout", "agent.analyze_budget_usd", "agent.page_budget_usd",
-		"agent.run_budget_usd", "agent.max_pages_per_run", "agent.warn_turns",
+		"agent.run_budget_usd", "agent.max_pages_per_run", "agent.unit_concurrency", "agent.warn_turns",
 		"agent.budget_window",
 		"agent.fake_cost_usd", "agent.fake_fail_units", "agent.fake_latency",
 		"auth.mode",

@@ -223,7 +223,7 @@ func TestValidateFakeRunner(t *testing.T) {
 			Role: RoleServer, HTTPAddr: ":8080",
 			Database: Database{Host: "h", Port: 5432, Name: "kiln", MaxConns: 10, MinConns: 2},
 			Storage:  Storage{Backend: BackendFS, Path: "/tmp/blobs"},
-			Agent:    Agent{Runner: RunnerFake, Timeout: time.Minute, MaxPagesPerRun: 12},
+			Agent:    Agent{Runner: RunnerFake, Timeout: time.Minute, MaxPagesPerRun: 12, UnitConcurrency: 1},
 		}
 	}
 
@@ -250,7 +250,7 @@ func TestValidateStorageCredentialPairing(t *testing.T) {
 			Role: RoleServer, HTTPAddr: ":8080",
 			Database: Database{Host: "h", Port: 5432, Name: "kiln", MaxConns: 10, MinConns: 2},
 			Storage:  Storage{Backend: BackendS3, Bucket: "kiln"},
-			Agent:    Agent{Binary: "claude", Timeout: time.Minute, MaxPagesPerRun: 12},
+			Agent:    Agent{Binary: "claude", Timeout: time.Minute, MaxPagesPerRun: 12, UnitConcurrency: 1},
 		}
 	}
 
