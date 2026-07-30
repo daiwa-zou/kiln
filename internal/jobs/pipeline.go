@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -47,6 +48,11 @@ type Pipeline struct {
 	// MaxRetries is the number of corrective attempts after a validation
 	// failure. The first re-states the errors; the second halves the work.
 	MaxRetries int
+	// UnitConcurrency is how many units may generate at once. Values below 2
+	// keep the pipeline sequential, which is the default: fan-out multiplies
+	// in-flight model calls, so the run budget is what bounds spend rather
+	// than the one-call-at-a-time shape of the loop.
+	UnitConcurrency int
 	// WarnTurns logs a warning when a single agent call uses more turns than
 	// this. Zero disables the check.
 	WarnTurns int
@@ -242,9 +248,10 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	known := knownSlugs(pages)
 	units := unitsByKey(req.Map)
 
-	// Slug is the database's page identity and Created survives regeneration;
-	// both maps are maintained through the loop so a later unit sees pages an
-	// earlier unit just wrote.
+	// Slug is the database's page identity and Created survives regeneration.
+	// Both are snapshots taken before generation: units may run concurrently,
+	// so what the sequential pipeline accumulated here as it went is settled
+	// afterwards, in mergeOutcomes.
 	existingBySlug := make(map[string]string, len(pages))
 	existingCreated := make(map[string]string, len(pages))
 	for _, pg := range pages {
@@ -252,127 +259,22 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		existingCreated[pg.Slug] = pg.Meta.Created
 	}
 
-	// writtenBy tracks which unit produced each page path this run, for the
-	// cross-unit collision check.
-	writtenBy := map[string]diff.Key{}
-
-	var (
-		written    []wiki.Page
-		newSources []diff.SourceRecord
-		// findings are the agent's narrative observations. They are the one
-		// part of the overview the model contributes; the structure around
-		// them stays derived.
-		findings []string
-		spent    float64
-	)
-
-	for _, key := range dirty {
-		if ctx.Err() != nil {
-			// Break rather than fail: units already generated are still valid
-			// and are imported below on an uncancelable context, so a Ctrl-C
-			// costs the remainder of the run, not the work already paid for.
-			log.Warn("run canceled; importing what completed", "cause", ctx.Err())
-			res.Summary.Status = StatusCanceled
-			break
-		}
-		if p.Budget.RunUSD > 0 && spent >= p.Budget.RunUSD {
-			// Stop scheduling rather than failing: work already imported is
-			// good, and the remainder keeps its stale hash so it retries.
-			log.Warn("run budget exhausted; remaining units stay stale",
-				"spent", spent, "budget", p.Budget.RunUSD)
-			res.Summary.Status = StatusOverBudget
-			break
-		}
-
-		var remaining float64
-		if p.Budget.RunUSD > 0 {
-			remaining = p.Budget.RunUSD - spent
-		}
-
-		unit := units[string(key)]
-		item := ItemSummary{Key: key, Status: StatusPending, EstCostUSD: perUnit}
-
-		out := p.generateUnit(ctx, req, key, unit, unitScope{
-			steering:        steering,
-			known:           known,
-			existingBySlug:  existingBySlug,
-			existingCreated: existingCreated,
-			remainingUSD:    remaining,
-		})
-		spent += out.CostUSD
-		item.CostUSD = out.CostUSD
-		item.Turns = out.Turns
-		res.Summary.Tokens += out.Tokens
-
-		// Two units claiming one path in the same run is silent data loss:
-		// the second import overwrites the first with no violation, because
-		// per-unit validation cannot see across units. The run-level check
-		// can, and treats it like any other validation failure — the later
-		// unit fails and retries next run, the earlier one keeps its page.
-		if out.Err == nil && len(out.Violations) == 0 {
-			for _, pg := range out.Pages {
-				if owner, taken := writtenBy[pg.Path]; taken {
-					out.Violations = append(out.Violations, wiki.Violation{
-						Path:   pg.Path,
-						Reason: fmt.Sprintf("already written by unit %s in this run; two units must not claim one page", owner),
-					})
-				}
-			}
-		}
-
-		switch {
-		case out.Err != nil:
-			item.Status = StatusFailed
-			item.Err = out.Err.Error()
-			log.Error("unit failed", "key", key, "err", out.Err)
-		case len(out.Violations) > 0:
-			item.Status = StatusFailed
-			item.Err = fmt.Sprintf("%d validation violations", len(out.Violations))
-			res.Violations = append(res.Violations, out.Violations...)
-			log.Error("unit failed validation", "key", key, "violations", len(out.Violations))
-		default:
-			item.Status = StatusSucceeded
-			written = append(written, out.Pages...)
-			findings = append(findings, out.Findings...)
-			for _, pg := range out.Pages {
-				writtenBy[pg.Path] = key
-			}
-
-			// Review flags ride the run summary and are persisted with it.
-			// Only successful units contribute: a failed unit retries next run
-			// and will raise its flags again alongside content that landed.
-			for _, rf := range out.Reviews {
-				res.Summary.Reviews = append(res.Summary.Reviews, ReviewNote{
-					Kind: rf.Kind, Title: rf.Title, Detail: rf.Detail, Unit: key,
-				})
-			}
-
-			// The source record is only updated on success, so a failed unit
-			// keeps its old hash and is retried on the next run. The
-			// architecture synthesis has no unit of its own; the whole-map
-			// hash is its input, and recording it is what makes an unchanged
-			// repeat build genuinely free.
-			hash := unit.Hash
-			if key == diff.ArchOverview {
-				hash = req.Map.Hash
-			}
-			newSources = append(newSources, diff.SourceRecord{
-				Key:          key,
-				InputHash:    hash,
-				FilesWritten: pagePaths(out.Pages),
-				ConnectorID:  req.Connectors.For(key),
-				BlobKeys:     req.BlobKeys[parentDocID(key)],
-			})
-			for _, pg := range out.Pages {
-				known[pg.Slug] = true
-				existingBySlug[pg.Slug] = pg.Path
-				existingCreated[pg.Slug] = pg.Meta.Created
-			}
-		}
-
-		res.Summary.Items = append(res.Summary.Items, item)
+	conc := p.unitConcurrency()
+	ledger := newBudgetLedger(p.Budget.RunUSD)
+	outcomes, halted := p.generateUnits(ctx, req, dirty, units, conc, unitScope{
+		steering:        steering,
+		known:           known,
+		existingBySlug:  existingBySlug,
+		existingCreated: existingCreated,
+		ledger:          ledger,
+		estPerCall:      perUnit,
+		deferLinks:      conc > 1,
+	}, log)
+	if halted != "" {
+		res.Summary.Status = halted
 	}
 
+	written, newSources, findings, spent := p.mergeOutcomes(res, req, outcomes, known, perUnit, log)
 	res.Summary.CostUSD = spent
 
 	// Post-pass: rebuild the derived artifacts from what pages now exist. The
@@ -396,7 +298,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		Action:  "build",
 		Subject: req.WorkspaceID,
 		Ref:     req.Ref,
-		Lines:   buildLogLines(res.Summary, spent),
+		Lines:   buildLogLines(res.Summary, res.Summary.CostUSD),
 	})
 
 	// Import and the run record survive cancellation: the money is already
@@ -517,20 +419,53 @@ type unitResult struct {
 	Err        error
 }
 
-// unitScope is the run-level context a unit is generated against.
+// errRunBudgetExhausted marks a unit that could not reserve budget for an
+// agent call. Sentinel rather than a formatted error because the scheduler
+// distinguishes it from a genuine failure: it stops launching further units
+// instead of recording a fault against this one.
+var errRunBudgetExhausted = errors.New("run budget exhausted")
+
+// unitScope is the run-level context a unit is generated against. Every map
+// in it is a snapshot taken before generation begins and is read-only for
+// the duration: units may run concurrently, so nothing here may be mutated
+// as they land. What the sequential pipeline accumulated in these maps is
+// now settled after every unit finishes, in mergeOutcomes.
 type unitScope struct {
 	steering Steering
-	// known resolves wikilinks: existing slugs plus everything written so far
-	// in this run.
+	// known resolves wikilinks against pages that existed when the run
+	// started. Pages written by *this* run are not here -- a concurrent unit
+	// cannot see them -- so the link check is deferred to mergeOutcomes,
+	// where the run's full slug set is finally known.
 	known map[string]bool
 	// existingBySlug rejects slug collisions against live pages, since slug is
-	// the database's page identity.
+	// the database's page identity. Collisions between two units of the same
+	// run are caught in mergeOutcomes instead.
 	existingBySlug map[string]string
 	// existingCreated preserves a page's original Created date across
 	// regeneration.
 	existingCreated map[string]string
-	// remainingUSD is what is left of the run budget; zero means unlimited.
-	remainingUSD float64
+	// ledger enforces the run budget across concurrent units by reserving
+	// before each agent call rather than accumulating after it.
+	ledger *budgetLedger
+	// estPerCall is the fallback reservation when no per-call budget is
+	// configured, so a run budget still bounds something.
+	estPerCall float64
+	// deferLinks moves the unresolved-wikilink check out of the retry loop
+	// and into mergeOutcomes. Set only when units actually run concurrently:
+	// at concurrency 1 the sequential pipeline's growing slug set is both
+	// available and strictly better, because a dangling link caught inside
+	// the loop is stated back to the agent and fixed within the run rather
+	// than failing the unit until the next one.
+	deferLinks bool
+}
+
+// costOf reads a call's cost defensively: a runner that fails may return a
+// nil result, and the reservation must still be settled with something.
+func costOf(res *agent.Result) float64 {
+	if res == nil {
+		return 0
+	}
+	return res.TotalCostUSD
 }
 
 // generateUnit runs analyze once and then generate for one unit, retrying
@@ -558,8 +493,16 @@ func (p *Pipeline) generateUnit(
 	}
 
 	sessionID := req.RunID + "-" + sanitize(string(key))
-	overBudget := func() bool { return sc.remainingUSD > 0 && res.CostUSD >= sc.remainingUSD }
 
+	// Reserved before the call, settled after. A unit that cannot reserve its
+	// analyze call has not spent anything, so it is not a failure -- the
+	// scheduler reads the sentinel and simply stops launching work, leaving
+	// this unit stale for the next run.
+	want, ok := sc.ledger.reserveOr(p.Budget.AnalyzeUSD, sc.estPerCall)
+	if !ok {
+		res.Err = errRunBudgetExhausted
+		return res
+	}
 	analyzeRes, aerr := p.Runner.Run(ctx, agent.Request{
 		Step: agent.StepAnalyze, SessionID: sessionID,
 		WorkDir: req.SourceDir, Model: p.AnalyzeModel,
@@ -572,6 +515,7 @@ func (p *Pipeline) generateUnit(
 		Prompt:           analyzePrompt(key, unit, req.SourceDir, sc.steering, 0, nil),
 		JSONSchema:       AnalysisSchema,
 	})
+	sc.ledger.settle(want, costOf(analyzeRes))
 	if aerr != nil {
 		res.Err = aerr
 		return res
@@ -595,8 +539,12 @@ func (p *Pipeline) generateUnit(
 	var lastViolations []wiki.Violation
 
 	for attempt := range attempts {
-		if overBudget() {
-			res.Err = fmt.Errorf("run budget exhausted mid-unit after $%.4f", res.CostUSD)
+		// Past the analyze call this unit has already spent money, so running
+		// out here is a failure worth recording against it -- unlike the
+		// reservation above, which means it never started.
+		want, ok := sc.ledger.reserveOr(p.Budget.PageUSD, sc.estPerCall)
+		if !ok {
+			res.Err = fmt.Errorf("%w mid-unit after $%.4f", errRunBudgetExhausted, res.CostUSD)
 			return res
 		}
 
@@ -609,6 +557,7 @@ func (p *Pipeline) generateUnit(
 			CacheableContext: req.Map.Summary,
 			Prompt:           generatePrompt(key, unit, req.SourceDir, sc.steering, plan, attempt, lastViolations),
 		})
+		sc.ledger.settle(want, costOf(genRes))
 		if gerr != nil {
 			res.Err = gerr
 			return res
@@ -639,6 +588,7 @@ func (p *Pipeline) generateUnit(
 			ExistingBySlug: sc.existingBySlug,
 			Planned:        planned,
 			RequireDates:   true,
+			DeferLinkCheck: sc.deferLinks,
 		})...)
 		if len(lastViolations) == 0 {
 			res.Pages = derefPages(collected)

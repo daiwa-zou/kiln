@@ -88,6 +88,9 @@ func (c *Config) Validate() error {
 	if c.Agent.AnalyzeBudgetUSD < 0 || c.Agent.PageBudgetUSD < 0 || c.Agent.RunBudgetUSD < 0 {
 		problems = append(problems, "agent: budgets cannot be negative")
 	}
+	if c.Agent.UnitConcurrency < 1 {
+		problems = append(problems, "agent: unit_concurrency must be at least 1")
+	}
 	if c.Agent.MaxPagesPerRun < 1 {
 		problems = append(problems, "agent: max_pages_per_run must be at least 1")
 	}

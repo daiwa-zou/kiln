@@ -45,6 +45,11 @@ type ValidateOptions struct {
 	// RequireDates enforces created/updated. Disabled when the caller stamps
 	// them itself after validation.
 	RequireDates bool
+	// DeferLinkCheck suppresses the unresolved-wikilink check, for callers
+	// that generate units concurrently and cannot know the run's full slug
+	// set yet. Such a caller must run CheckLinks once every unit has landed,
+	// or dangling links would stop being caught at all.
+	DeferLinkCheck bool
 }
 
 // DefaultMaxUnresolvedLinks is the tolerance before a page fails.
@@ -117,14 +122,42 @@ func ValidatePage(p *Page, opts ValidateOptions) []Violation {
 	if limit == 0 {
 		limit = DefaultMaxUnresolvedLinks
 	}
-	if opts.KnownSlugs != nil {
-		if _, unresolved := ResolveLinks(p.Body, opts.KnownSlugs); len(unresolved) > limit {
-			add("%d unresolved wikilinks exceed the limit of %d: %s",
-				len(unresolved), limit, strings.Join(unresolved, ", "))
+	if opts.KnownSlugs != nil && !opts.DeferLinkCheck {
+		if v, bad := checkLinks(p, opts.KnownSlugs, limit); bad {
+			out = append(out, v)
 		}
 	}
 
 	return out
+}
+
+// CheckLinks resolves every page's wikilinks against the run's final slug
+// set, for callers that deferred the check during generation. Concurrent
+// units cannot see each other's pages while they run, so a link to a page
+// another unit is writing looks dangling until every unit has landed --
+// checking here rather than mid-flight is what lets one unit link to
+// another's output.
+func CheckLinks(pages []*Page, known map[string]bool, maxUnresolved int) []Violation {
+	if maxUnresolved == 0 {
+		maxUnresolved = DefaultMaxUnresolvedLinks
+	}
+	var out []Violation
+	for _, p := range pages {
+		if v, bad := checkLinks(p, known, maxUnresolved); bad {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func checkLinks(p *Page, known map[string]bool, limit int) (Violation, bool) {
+	_, unresolved := ResolveLinks(p.Body, known)
+	if len(unresolved) <= limit {
+		return Violation{}, false
+	}
+	return Violation{Path: p.Path, Reason: fmt.Sprintf(
+		"%d unresolved wikilinks exceed the limit of %d: %s",
+		len(unresolved), limit, strings.Join(unresolved, ", "))}, true
 }
 
 // checkPath rejects anything that could escape the wiki directory or land

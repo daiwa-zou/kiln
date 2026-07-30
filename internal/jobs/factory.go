@@ -27,8 +27,9 @@ func NewPipeline(cfg *config.Config, st Store, runner agent.Runner, log *slog.Lo
 		AnalyzeModel:  cfg.Agent.AnalyzeModel,
 		FallbackModel: cfg.Agent.FallbackModel,
 		Timeout:       cfg.Agent.Timeout,
-		MaxRetries:    1,
-		WarnTurns:     cfg.Agent.WarnTurns,
+		MaxRetries:      1,
+		WarnTurns:       cfg.Agent.WarnTurns,
+		UnitConcurrency: cfg.Agent.UnitConcurrency,
 	}
 }
 

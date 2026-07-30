@@ -192,6 +192,12 @@ type Agent struct {
 	PageBudgetUSD    float64 `mapstructure:"page_budget_usd"`
 	RunBudgetUSD     float64 `mapstructure:"run_budget_usd"`
 	MaxPagesPerRun   int     `mapstructure:"max_pages_per_run"`
+	// UnitConcurrency is how many of a run's units may generate at once.
+	// One -- the default -- keeps a run's model calls strictly sequential.
+	// Raising it is what makes a large bench build in minutes rather than
+	// hours, at the cost of that many calls in flight against the run
+	// budget, which stays a hard ceiling either way.
+	UnitConcurrency int `mapstructure:"unit_concurrency"`
 	// BudgetWindow is the rolling window a workspace's budget_usd cap applies
 	// to, enforced when runs are enqueued. Zero disables window enforcement.
 	BudgetWindow time.Duration `mapstructure:"budget_window"`
