@@ -67,6 +67,32 @@ reverse proxy in front of kiln needs its body limit raised to match (nginx:
 
 Planned, not yet built: a Next.js frontend in its own container.
 
+## Deploying
+
+One image runs every role; the reading UI is embedded in the binary, so there
+is no separate frontend to serve. Anything that can run a container and reach
+Postgres and an S3-compatible bucket can run kiln — AWS, GCP, Azure, bare-metal
+Kubernetes, or a single VM.
+
+```bash
+cp .env.example .env          # set KILN_MASTER_KEY and KILN_ANTHROPIC_API_KEY
+docker compose up -d
+docker compose exec api kiln admin token create --login you --scopes read,write,admin --admin
+open http://localhost:8080
+```
+
+Builds scale by adding workers, independently of the API:
+
+```bash
+docker compose up -d --scale worker=4
+```
+
+For Kubernetes there is a Helm chart at [deploy/helm/kiln](deploy/helm/kiln)
+(separate API and worker Deployments, autoscaling, a migration hook, and a
+restricted pod security context) and [deploy/kubernetes](deploy/kubernetes) for
+plain manifests. Configuration, upgrades, backups, and operating notes are in
+[docs/deployment.md](docs/deployment.md).
+
 ## Development
 
 Requires Go 1.25 and Postgres 16. The `claude` CLI is only needed when

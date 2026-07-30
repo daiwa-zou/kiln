@@ -1,0 +1,197 @@
+# Default values for kiln.
+#
+# The two roles -- the API and the build workers -- are configured separately
+# because they scale on different signals. The API scales with readers; the
+# workers scale with how much building you want done at once.
+
+image:
+  repository: ghcr.io/daiwa-zou/kiln
+  # Overrides the chart's appVersion. Pin a digest in production:
+  #   tag: ""
+  #   digest: sha256:...
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# --- application configuration ----------------------------------------------
+config:
+  # External URL, used for OAuth callbacks and generated links.
+  publicURL: ""
+  logLevel: info
+  # "token" is the only defensible deployment value: "none" makes every caller
+  # an admin, and kiln refuses it on a non-loopback bind anyway.
+  authMode: token
+  corsOrigins: []
+
+  database:
+    # Either a full URL (via existingSecret, preferably) or discrete fields.
+    host: ""
+    port: 5432
+    name: kiln
+    user: kiln
+    sslmode: require
+    maxConns: 20
+    workerMaxConns: 6
+
+  storage:
+    # s3 for anything multi-node: a worker cannot stage a document written to
+    # another node's filesystem. fs is single-node only.
+    backend: s3
+    bucket: kiln
+    region: us-east-1
+    endpoint: ""
+    # Leave access/secret keys unset to use the pod's identity -- IRSA on EKS,
+    # Workload Identity on GKE, or an instance role. That is the right answer
+    # on every managed cloud, and one fewer secret to rotate.
+    pathStyle: false
+    useSSL: true
+    # Only for backend: fs.
+    fsPath: /var/lib/kiln/blobs
+
+  agent:
+    runner: api
+    model: ""
+    runBudgetUSD: 5.00
+    maxPagesPerRun: 25
+    budgetWindow: 720h
+
+  worker:
+    pollInterval: 5s
+    staleAfter: 15m
+    # SIGTERM starts a drain rather than an abort; give an in-flight build
+    # room to land. Keep terminationGracePeriodSeconds above this.
+    drainGrace: 4m
+    sourcePollInterval: 10m
+    # Allowlist for local-path connectors. Empty denies every local path,
+    # which is the right default: connector configs are API-writable data.
+    permittedSourceRoots: []
+
+  github:
+    clientID: ""
+    appID: ""
+    appSlug: ""
+
+# --- secrets ----------------------------------------------------------------
+# Strongly prefer an existing secret managed by your platform (External
+# Secrets, Sealed Secrets, a cloud secret manager CSI driver) over inline
+# values, which land in the release and in `helm get values`.
+secrets:
+  # A secret with any of: master-key, anthropic-api-key, database-url,
+  # database-password, storage-secret-key, github-client-secret,
+  # github-private-key, github-webhook-secret.
+  existingSecret: ""
+  # Inline fallback for evaluation only. Rendered into a Secret object.
+  create: false
+  masterKey: ""
+  anthropicAPIKey: ""
+  databaseURL: ""
+  databasePassword: ""
+  storageSecretKey: ""
+
+# --- API --------------------------------------------------------------------
+api:
+  replicaCount: 2
+  # The API is stateless -- sessions live in Postgres -- so replicas need no
+  # affinity and any pod can serve any request.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  # Uploads stream up to 32 MiB; the route already runs outside the standard
+  # request timeout. Raise your ingress body limit to match.
+  maxUploadMB: 33
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-body-size: 33m
+  hosts:
+    - host: kiln.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# --- workers ----------------------------------------------------------------
+worker:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 20
+    # CPU is a poor proxy for a queue of LLM-bound builds -- a waiting worker
+    # is idle, not busy. Scale on queue depth instead once kiln's /metrics is
+    # scraped and adapted; see docs/deployment.md.
+    targetCPUUtilizationPercentage: 70
+  # Above worker.drainGrace, so a rolling update lets in-flight builds land
+  # instead of requeueing paid-for work.
+  terminationGracePeriodSeconds: 300
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+# --- migrations -------------------------------------------------------------
+migrations:
+  # Runs `kiln admin migrate` as a pre-install/pre-upgrade hook. API and
+  # workers refuse to start against an unexpected schema version, so this must
+  # succeed before they roll.
+  enabled: true
+  backoffLimit: 3
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# --- pod security -----------------------------------------------------------
+# Defaults satisfy the "restricted" Pod Security Standard. The image runs as
+# uid 65532 and needs no write access outside its temp dirs.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+serviceAccount:
+  create: true
+  name: ""
+  # For IRSA / Workload Identity:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::...:role/kiln
+  annotations: {}

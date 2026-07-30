@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -19,7 +22,67 @@ func newAdminCmd(g *globalFlags) *cobra.Command {
 		Use:   "admin",
 		Short: "Operational commands: migrations, diagnostics, tokens",
 	}
-	cmd.AddCommand(newMigrateCmd(g), newDoctorCmd(g), newTokenCmd(g), newRotateKeyCmd(g))
+	cmd.AddCommand(newMigrateCmd(g), newDoctorCmd(g), newTokenCmd(g), newRotateKeyCmd(g),
+		newHealthCmd())
+	return cmd
+}
+
+// newHealthCmd probes a running server's readiness endpoint. It exists so a
+// container healthcheck is `kiln admin health` rather than a curl the image
+// would otherwise have to ship purely to check on itself -- the same reason
+// distroless deployments end up with bespoke probe binaries. It needs no
+// configuration and no database of its own: the server it asks already has
+// both.
+func newHealthCmd() *cobra.Command {
+	var (
+		addr    string
+		timeout time.Duration
+		live    bool
+	)
+	cmd := &cobra.Command{
+		Use:   "health",
+		Short: "Probe a running server's health endpoint",
+		Long: `Exits 0 when the server is ready and non-zero otherwise, for container
+healthchecks and orchestrator probes.
+
+Readiness (the default) reports whether the database is reachable, which is
+what should gate traffic. --live probes liveness instead: it answers even
+while the database is down, so an orchestrator does not kill a process that is
+merely waiting on Postgres.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			path := "/readyz"
+			if live {
+				path = "/healthz"
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+				strings.TrimSuffix(addr, "/")+path, nil)
+			if err != nil {
+				return err
+			}
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("kiln: health probe: %w", err)
+			}
+			defer res.Body.Close()
+			// Bound the read: a probe must not be a memory sink if something
+			// answers this path with a stream.
+			body, _ := io.ReadAll(io.LimitReader(res.Body, 4<<10))
+
+			if res.StatusCode != http.StatusOK {
+				return fmt.Errorf("kiln: %s returned %s: %s",
+					path, res.Status, strings.TrimSpace(string(body)))
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s OK\n", path)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&addr, "addr", "http://127.0.0.1:8080", "base URL of the server to probe")
+	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Second, "probe timeout")
+	cmd.Flags().BoolVar(&live, "live", false, "probe liveness (/healthz) instead of readiness (/readyz)")
 	return cmd
 }
 

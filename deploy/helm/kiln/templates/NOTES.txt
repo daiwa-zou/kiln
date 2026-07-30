@@ -1,0 +1,45 @@
+kiln {{ .Chart.AppVersion }} is deploying as {{ include "kiln.fullname" . }}.
+
+  API:      {{ .Values.api.replicaCount }} replica(s)
+  Workers:  {{ .Values.worker.replicaCount }} replica(s){{ if .Values.worker.autoscaling.enabled }} (autoscaling {{ .Values.worker.autoscaling.minReplicas }}-{{ .Values.worker.autoscaling.maxReplicas }}){{ end }}
+  Storage:  {{ .Values.config.storage.backend }}{{ if eq .Values.config.storage.backend "s3" }} ({{ .Values.config.storage.bucket }}){{ end }}
+
+1. Wait for the rollout:
+
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "kiln.fullname" . }}-api
+
+2. Mint the first token — the API requires one:
+
+     kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "kiln.fullname" . }}-api -- \
+       kiln admin token create --login you --scopes read,write,admin --admin
+
+3. Reach it:
+{{- if .Values.ingress.enabled }}
+
+     https://{{ (first .Values.ingress.hosts).host }}
+{{- else }}
+
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kiln.fullname" . }} 8080:{{ .Values.service.port }}
+     open http://localhost:8080
+{{- end }}
+
+Then add a source on the Ingestion page and press Ingest now.
+
+{{- if eq .Values.config.storage.backend "fs" }}
+
+WARNING: storage.backend is "fs", which keeps uploaded documents on a pod's
+own filesystem. Any worker scheduled elsewhere cannot read them, and the
+emptyDir vanishes with the pod. Use s3 for anything beyond a single-node trial.
+{{- end }}
+{{- if ne .Values.config.authMode "token" }}
+
+WARNING: config.authMode is "{{ .Values.config.authMode }}". Every caller is an
+admin. kiln refuses this on a non-loopback bind, so the pods will not start.
+{{- end }}
+{{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+
+NOTE: secrets were rendered from values, so they are recoverable from the Helm
+release and from `helm get values`. For production, point secrets.existingSecret
+at a Secret managed by External Secrets, Sealed Secrets, or a cloud secret
+manager CSI driver.
+{{- end }}

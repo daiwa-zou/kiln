@@ -1,0 +1,84 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kiln.serviceAccountName" . }}
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+# kiln talks to Postgres and object storage, never to the Kubernetes API, so
+# it needs no RBAC and no mounted token. The annotations above are the one
+# reason this object exists: cloud identity binding (IRSA, Workload Identity)
+# so object storage needs no static credentials.
+automountServiceAccountToken: false
+{{- end }}
+{{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "kiln.fullname" . }}
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  {{- if not .Values.secrets.masterKey }}
+  {{- fail "secrets.masterKey is required when secrets.create is true (openssl rand -hex 32)" }}
+  {{- end }}
+  master-key: {{ .Values.secrets.masterKey | quote }}
+  {{- with .Values.secrets.anthropicAPIKey }}
+  anthropic-api-key: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.secrets.databaseURL }}
+  database-url: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.secrets.databasePassword }}
+  database-password: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.secrets.storageSecretKey }}
+  storage-secret-key: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "kiln.fullname" . }}
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+  annotations:
+    # Document uploads stream up to 32 MiB. An ingress that caps bodies lower
+    # rejects them before kiln ever sees the request, which reads to the user
+    # as a broken upload rather than a policy.
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ printf "%dm" (int .Values.api.maxUploadMB) | quote }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "kiln.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}

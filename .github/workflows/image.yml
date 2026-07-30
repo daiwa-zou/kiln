@@ -1,0 +1,105 @@
+# Container image publishing. Split from `release` because the two answer to
+# different triggers: binaries ship on tags, while the image also needs an
+# :edge that tracks main so a staging cluster can run today's code, and needs
+# to be built (though not pushed) on pull requests so a broken Dockerfile
+# fails review rather than the release.
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless signing
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Pull requests build to verify the Dockerfile, but never push: a fork's
+      # PR must not be able to publish under this repository's namespace.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=edge,branch=main
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=kiln
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # amd64 for the common cloud node, arm64 for Graviton/Ampere fleets
+          # and Apple silicon workstations.
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || format('edge-{0}', github.sha) }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      # A published image should be verifiable. Keyless signing binds the
+      # digest to this workflow's identity, so consumers can require that
+      # kiln images came from this repository and not merely from someone with
+      # push rights to the registry.
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the image
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do
+            cosign sign --yes "${tag%%:*}@${DIGEST}"
+          done
+
+      # The image is the deployment artifact for every cloud target, so a
+      # smoke test that it actually runs belongs here rather than in a later
+      # surprise. Single-arch load, because buildx cannot load a manifest list.
+      - name: Smoke test
+        run: |
+          docker buildx build --load --platform linux/amd64 -t kiln:smoke .
+          docker run --rm kiln:smoke version
+          docker run --rm --entrypoint git kiln:smoke --version
+          docker run --rm --entrypoint pdftotext kiln:smoke -v 2>&1 | head -1
+          docker run --rm --entrypoint pandoc kiln:smoke --version | head -1
+          # Non-root by construction; a root container would fail most
+          # enterprise admission policies.
+          test "$(docker run --rm --entrypoint id kiln:smoke -u)" = "65532"

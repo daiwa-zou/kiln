@@ -1,0 +1,26 @@
+# The build needs source and go.mod/go.sum; everything else only slows the
+# context upload and busts the layer cache.
+.git
+.github
+.claude
+bin/
+dist/
+/kiln
+.dev/
+blobs/
+coverage.*
+*.test
+node_modules/
+web/.next/
+web/out/
+web/.turbo/
+.env
+.env.local
+*.local.toml
+.DS_Store
+.idea/
+*.swp
+deploy/
+docs/
+*.md
+!README.md

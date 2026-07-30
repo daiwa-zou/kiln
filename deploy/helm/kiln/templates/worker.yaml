@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kiln.fullname" . }}-worker
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
+  replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "kiln.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  strategy:
+    # Recreate-free rolling update with no surge pressure on the queue: a new
+    # worker can start claiming while an old one drains, because claims are
+    # row-level (FOR UPDATE SKIP LOCKED) and cannot collide.
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        {{- include "kiln.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      {{- with .Values.worker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "kiln.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # The drain is the whole point of this number. SIGTERM stops claiming
+      # immediately, but the run in flight keeps going for worker.drainGrace
+      # so paid-for agent work lands instead of being requeued. Cutting this
+      # below drainGrace turns every deploy into wasted spend.
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      containers:
+        - name: worker
+          image: {{ include "kiln.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["worker"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            {{- include "kiln.env" . | nindent 12 }}
+            {{- include "kiln.secretEnv" . | nindent 12 }}
+            - name: KILN_WORKER_POLL_INTERVAL
+              value: {{ .Values.config.worker.pollInterval | quote }}
+            - name: KILN_WORKER_STALE_AFTER
+              value: {{ .Values.config.worker.staleAfter | quote }}
+            - name: KILN_WORKER_DRAIN_GRACE
+              value: {{ .Values.config.worker.drainGrace | quote }}
+            - name: KILN_WORKER_SOURCE_POLL_INTERVAL
+              value: {{ .Values.config.worker.sourcePollInterval | quote }}
+            {{- with .Values.config.worker.permittedSourceRoots }}
+            - name: KILN_WORKER_PERMITTED_SOURCE_ROOTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            # Databases size differently per role: the API issues many short
+            # queries, a worker holds a few long transactions during import.
+            - name: KILN_DATABASE_MAX_CONNS
+              value: {{ .Values.config.database.workerMaxConns | quote }}
+          # No probes: a worker holds no listener, and "healthy" for it means
+          # "claiming", which the queue already reports. A liveness probe here
+          # could only kill a process mid-build.
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "kiln.volumeMounts" . | nindent 12 }}
+            {{- if eq .Values.config.storage.backend "fs" }}
+            - name: blobs
+              mountPath: {{ .Values.config.storage.fsPath }}
+            {{- end }}
+      volumes:
+        {{- include "kiln.volumes" . | nindent 8 }}
+        {{- if eq .Values.config.storage.backend "fs" }}
+        # Single-node only: with more than one node, a worker cannot stage a
+        # document that landed on another node's disk. Use s3 instead.
+        - name: blobs
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.worker.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "kiln.fullname" . }}-worker
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "kiln.fullname" . }}-worker
+  minReplicas: {{ .Values.worker.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.worker.autoscaling.maxReplicas }}
+  behavior:
+    scaleDown:
+      # Builds are long. Scaling down eagerly would evict workers mid-run and
+      # pay for the same pages twice.
+      stabilizationWindowSeconds: 600
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.worker.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
