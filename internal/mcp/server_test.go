@@ -93,6 +93,29 @@ func fakeKiln(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/api/v1/workspaces/kiln/gaps", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, []Gap{{Slug: "missing-page", WantedBy: []string{"jobs"}}})
 	})
+	mux.HandleFunc("/api/v1/workspaces/kiln/pages", func(w http.ResponseWriter, r *http.Request) {
+		// Echo the paging arguments back as a page, so a test can prove the
+		// tool actually forwarded them.
+		writeJSON(w, []PageSummary{
+			{Path: "entities/jobs.md", Slug: "jobs", Type: "entity", Title: "internal/jobs"},
+			{
+				Path: "concepts/limit.md", Slug: "limit-" + r.URL.Query().Get("limit"),
+				Type: "concept", Title: "offset-" + r.URL.Query().Get("offset"),
+			},
+		})
+	})
+	mux.HandleFunc("/api/v1/workspaces/kiln/overview", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, artifact{Kind: "overview", Body: "# Overview\n\nKnowledge base for kiln."})
+	})
+	mux.HandleFunc("/api/v1/workspaces/kiln/index", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, artifact{Kind: "index", Body: "# Wiki Index\n\n## Entities\n\n- internal/jobs"})
+	})
+	mux.HandleFunc("/api/v1/workspaces/kiln/backlinks/jobs", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, []PageSummary{{Path: "concepts/pipeline.md", Slug: "pipeline", Type: "concept", Title: "Pipeline"}})
+	})
+	mux.HandleFunc("/api/v1/workspaces/kiln/backlinks/orphan", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, []PageSummary{})
+	})
 	// Everything else is a 404, which is also how kiln answers for a bench the
 	// caller cannot see.
 	return httptest.NewServer(mux)
@@ -219,6 +242,55 @@ func TestToolsReadTheWiki(t *testing.T) {
 		}
 		if !strings.Contains(out, "list_benches") {
 			t.Errorf("error does not point at list_benches:\n%s", out)
+		}
+	})
+
+	t.Run("overview joins the two artifacts", func(t *testing.T) {
+		out, isErr := call(t, s, "wiki_overview", map[string]any{})
+		if isErr {
+			t.Fatalf("unexpected error: %s", out)
+		}
+		// Orientation needs both: what the bench is about, and what is in it.
+		if !strings.Contains(out, "Knowledge base for kiln") {
+			t.Errorf("overview body missing:\n%s", out)
+		}
+		if !strings.Contains(out, "Wiki Index") {
+			t.Errorf("index missing, so the agent cannot see what pages exist:\n%s", out)
+		}
+	})
+
+	t.Run("list_pages forwards paging and offers the next page", func(t *testing.T) {
+		out, isErr := call(t, s, "list_pages", map[string]any{"limit": 2, "offset": 10})
+		if isErr {
+			t.Fatalf("unexpected error: %s", out)
+		}
+		// The fake echoes the arguments into the row it returns, which is how
+		// this proves they were actually sent rather than defaulted.
+		if !strings.Contains(out, "limit-2") || !strings.Contains(out, "offset-10") {
+			t.Errorf("paging arguments were not forwarded:\n%s", out)
+		}
+		// A full page means there may be more; saying so beats the agent
+		// assuming it has seen the whole bench.
+		if !strings.Contains(out, "offset=12") {
+			t.Errorf("no continuation offered on a full page:\n%s", out)
+		}
+	})
+
+	t.Run("backlinks lists referrers, and says so when there are none", func(t *testing.T) {
+		out, isErr := call(t, s, "page_backlinks", map[string]any{"page": "jobs"})
+		if isErr {
+			t.Fatalf("unexpected error: %s", out)
+		}
+		if !strings.Contains(out, "pipeline") {
+			t.Errorf("referring page missing:\n%s", out)
+		}
+
+		out, isErr = call(t, s, "page_backlinks", map[string]any{"page": "orphan"})
+		if isErr {
+			t.Fatalf("no backlinks is not an error: %s", out)
+		}
+		if !strings.Contains(out, "Nothing") {
+			t.Errorf("empty backlinks should say so plainly:\n%s", out)
 		}
 	})
 
