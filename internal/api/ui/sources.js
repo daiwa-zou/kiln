@@ -745,3 +745,156 @@ async function showSources() {
     if (!err.handled) view.done(banner(err));
   }
 }
+
+// ---- first run ---------------------------------------------------------------
+// A bench with no pages has nothing to read, so the reading views are all
+// dead ends: before this, a brand-new bench greeted its creator with "Run
+// kiln build <path>" -- a CLI instruction to someone who just made the bench
+// in a browser. This replaces that with the actual next step.
+
+// benchProgress reads where the bench actually is, so the checklist reflects
+// state rather than assuming a happy path.
+async function benchProgress(ws) {
+  const [connRes, filesRes, runsRes] = await Promise.allSettled([
+    api(`/workspaces/${ws}/connectors`),
+    api(`/workspaces/${ws}/files`),
+    api(`/workspaces/${ws}/runs?limit=5`),
+  ]);
+  for (const r of [connRes, filesRes, runsRes]) {
+    if (r.status === "rejected" && r.reason?.handled) return null;
+  }
+  const connectors = connRes.status === "fulfilled" ? connRes.value : [];
+  const files = filesRes.status === "fulfilled" ? filesRes.value : [];
+  const runs = runsRes.status === "fulfilled" ? runsRes.value : [];
+  // An upload connector with no documents is plumbing, not a source: it
+  // ingests nothing, so counting it would mark the step done prematurely.
+  const realSources = connectors.filter(
+    (c) => c.enabled && (c.kind !== "upload" || files.length > 0));
+  return {
+    canAdmin: connRes.status === "fulfilled",
+    hasSource: realSources.length > 0,
+    sourceCount: realSources.length,
+    files,
+    connectors,
+    runs,
+    active: runs.some((r) => r.status === "queued" || r.status === "running"),
+    everRan: runs.some((r) => r.status !== "queued"),
+  };
+}
+
+const stepIcon = (state) =>
+  state === "done" ? `<span class="step-mark done" aria-hidden="true">✓</span>`
+  : state === "now" ? `<span class="step-mark now" aria-hidden="true">→</span>`
+  : `<span class="step-mark" aria-hidden="true">•</span>`;
+
+// showGetStarted is the overview of a bench that has not been built yet: a
+// checklist that knows which step you are on, with the button for that step
+// right there rather than a page away.
+async function showGetStarted() {
+  const view = beginView("Get started", "overview");
+  const ws = encodeURIComponent(state.workspace);
+  try {
+    const p = await benchProgress(ws);
+    if (!p) return;
+
+    const sourceState = p.hasSource ? "done" : "now";
+    const ingestState = !p.hasSource ? "todo" : (p.active || p.everRan ? "done" : "now");
+    const readState = "todo";
+
+    const sourceDetail = p.hasSource
+      ? `${p.sourceCount} source${p.sourceCount === 1 ? "" : "s"} connected`
+      : "A repository, web pages, or documents you upload.";
+    const ingestDetail = p.active
+      ? "Ingesting now — this page becomes your wiki when it finishes."
+      : p.everRan
+        ? "Ingested. If no pages appeared, check Ingestion for what the run reported."
+        : "Reads every source and writes the pages. Only changed sources cost anything.";
+
+    if (!view.done(`<h1>Get started</h1>
+      <p class="hint">A bench compiles a wiki from the sources you connect, and
+      keeps it current as they change. Three steps, then it reads itself.</p>
+
+      <ol class="steps">
+        <li class="step done">
+          ${stepIcon("done")}
+          <div><strong>Bench created</strong>
+          <span class="hint">${esc(state.workspace)}</span></div>
+        </li>
+        <li class="step ${sourceState}">
+          ${stepIcon(sourceState)}
+          <div><strong>Add a source</strong>
+            <span class="hint">${esc(sourceDetail)}</span>
+            ${p.canAdmin
+              ? `<div class="meta"><button class="btn" id="gs-add">+ Add source</button></div>`
+              : `<div class="hint">Ask an owner of this bench's org to connect one.</div>`}
+          </div>
+        </li>
+        <li class="step ${ingestState}">
+          ${stepIcon(ingestState)}
+          <div><strong>Ingest</strong>
+            <span class="hint">${esc(ingestDetail)}</span>
+            ${p.hasSource && !p.active
+              ? `<div class="meta"><button class="btn ${p.everRan ? "quiet" : ""}" id="gs-ingest">Ingest now</button>
+                 <span class="hint" id="gs-note" role="status"></span></div>`
+              : ""}
+          </div>
+        </li>
+        <li class="step ${readState}">
+          ${stepIcon(readState)}
+          <div><strong>Read the wiki</strong>
+          <span class="hint">Pages appear in the sidebar, and this page becomes the overview.</span></div>
+        </li>
+      </ol>
+
+      <details class="panel">
+        <summary>What can a bench read?</summary>
+        <div class="detail">
+          <p><strong>A repository</strong> — an https remote or a directory the
+          worker can reach. Code becomes pages per module, with an architecture
+          overview across them.</p>
+          <p><strong>Web pages</strong> — https addresses fetched and folded in,
+          re-checked on a schedule.</p>
+          <p><strong>Documents</strong> — PDFs, Office files, markdown, and HTML
+          uploaded from your browser.</p>
+          <p class="hint">All three fire into one wiki whose pages link across
+          the boundary.</p>
+        </div>
+      </details>`)) return;
+
+    const addBtn = $("gs-add");
+    if (addBtn) addBtn.addEventListener("click", () => openSourceWizard({
+      ws,
+      credentials: [],
+      hasUpload: p.connectors.some((c) => c.kind === "upload" && c.enabled),
+      refresh: () => { if (view.current()) showGetStarted(); },
+    }));
+
+    const ingestBtn = $("gs-ingest");
+    if (ingestBtn) once(ingestBtn, async () => {
+      try {
+        const res = await api(`/workspaces/${ws}/runs`, { method: "POST", body: {} });
+        toast(res.created ? "Ingesting — pages appear as it finishes" : "A run was already waiting — joined it");
+        showGetStarted();
+      } catch (err) {
+        if (err.handled) return;
+        const n = $("gs-note");
+        if (n) { n.textContent = err.message; n.classList.add("error"); }
+      }
+    });
+
+    // While a run is moving, keep the checklist honest and pick up the pages
+    // the moment they land -- the payoff should not need a manual refresh.
+    if (p.active) {
+      setTimeout(async () => {
+        if (!view.current()) return;
+        try {
+          const pages = await api(`/workspaces/${ws}/pages`);
+          if (pages.length) { location.reload(); return; }
+        } catch { /* fall through to another tick */ }
+        showGetStarted();
+      }, 5000);
+    }
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
+}

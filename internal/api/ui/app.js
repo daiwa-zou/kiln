@@ -475,7 +475,7 @@ function renderTree(active) {
     html += treeGroup(type, TYPE_LABELS[type],
       sorted.map((p) => treeLink(p, active)), collapsed.has(type));
   }
-  $("tree").innerHTML = html || `<div class="hint">No pages yet.</div>`;
+  $("tree").innerHTML = html || `<div class="hint tree-empty">Pages appear here after the first ingest.</div>`;
 
   // Persist collapse state -- but never while a filter forces groups open.
   for (const det of $("tree").querySelectorAll("details.tree-group")) {
@@ -493,6 +493,22 @@ function setNav(view) {
   for (const a of document.querySelectorAll(".nav a")) {
     if (a.dataset.view === view) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
+  }
+  syncNavForEmptyBench();
+}
+
+// On a bench with nothing built, "Overview" is a promise the app cannot keep
+// and the reading views lead nowhere. The entry says what it does instead,
+// and the views that cannot have content yet are visibly inert rather than
+// silently empty -- a disabled-looking link the user can still click beats
+// four identical empty pages they have to discover one by one.
+function syncNavForEmptyBench() {
+  const empty = state.workspace && !state.pages.length;
+  const overview = document.querySelector('.nav a[data-view="overview"]');
+  if (overview) overview.textContent = empty ? "Get started" : "Overview";
+  for (const view of ["index", "graph", "gaps", "log"]) {
+    const a = document.querySelector(`.nav a[data-view="${view}"]`);
+    if (a) a.classList.toggle("nav-waiting", Boolean(empty));
   }
 }
 
@@ -876,8 +892,10 @@ async function showArtifact(kind) {
   try {
     const { body } = await api(`/workspaces/${encodeURIComponent(state.workspace)}/${kind}`);
     if (!body.trim()) {
-      view.done(`<div class="empty">
-        No ${kind} yet. Run <code>kiln build &lt;path&gt;</code> to generate one.</div>`);
+      // The reader is here because they clicked a nav entry, not because
+      // they have a terminal open: name the step that produces this.
+      view.done(`<div class="empty">No ${kind} yet — it is written by the first
+        ingest. <a href="#/overview">Start here</a>.</div>`);
       return;
     }
     // Artifacts carry their own # heading, so no offset: it becomes the h1.
@@ -893,7 +911,9 @@ async function showGaps() {
     const gaps = await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`);
     if (!gaps.length) {
       view.done(`<h1>Gaps</h1><div class="empty">
-        No gaps — every link resolves to an existing page.</div>`);
+        ${state.pages.length
+          ? "No gaps — every link resolves to an existing page."
+          : `Nothing to check yet — gaps are links the wiki wants and does not have. <a href="#/overview">Start here</a>.`}</div>`);
       return;
     }
     view.done(`<h1>Gaps</h1>
@@ -993,7 +1013,8 @@ async function showGraph() {
   try {
     const { nodes, edges, totalPages } = await api(`/workspaces/${encodeURIComponent(state.workspace)}/graph`);
     if (!nodes.length) {
-      view.done(`<h1>Graph</h1><div class="empty">No pages yet.</div>`);
+      view.done(`<h1>Graph</h1><div class="empty">No pages yet — the graph draws
+        itself once this bench has been ingested. <a href="#/overview">Start here</a>.</div>`);
       return;
     }
 
@@ -1611,7 +1632,7 @@ function route() {
   const hash = location.hash.replace(/^#\//, "");
   if (hash.startsWith("page/")) return showPage(decodeURIComponent(hash.slice(5)));
   if (hash.startsWith("search/")) return showSearch(decodeURIComponent(hash.slice(7)));
-  if (["index", "overview", "log"].includes(hash)) return showArtifact(hash);
+  if (["index", "overview", "log"].includes(hash)) return overviewOrGetStarted(hash);
   if (hash === "gaps") return showGaps();
   if (hash === "graph") return showGraph();
   if (hash === "reviews") return showReviews(false);
@@ -1621,7 +1642,16 @@ function route() {
   if (hash === "ingestion" || hash === "sources" || hash === "runs") return showSources();
   if (hash === "members") return showMembers();
   if (hash === "steering") return showSteering();
-  return showArtifact("overview");
+  // The default landing, and the explicit one, both route through the same
+  // check -- an empty hash is the common case on first load.
+  return overviewOrGetStarted("overview");
+}
+
+// A bench with no pages has no overview to show. Rather than an empty
+// artifact, it gets the checklist that leads to one.
+function overviewOrGetStarted(kind) {
+  if (kind === "overview" && !state.pages.length) return showGetStarted();
+  return showArtifact(kind);
 }
 
 function setDrawer(open) {
@@ -1733,9 +1763,14 @@ function wireBenchCreate(nameID, buttonID, noteID, onDone) {
       await api("/workspaces", { method: "POST", body: { slug, name } });
       toast(`Created ${name}`);
       onDone?.();
+      // Land *in* the bench that was just created, not back in whichever one
+      // was open before: creating a bench is a statement of where you want
+      // to be. The stored slug is what boot() restores after the reload.
+      localStorage.setItem(WORKSPACE_KEY, slug);
       // Reload rather than patch state: a first bench changes the whole
       // shell, and a fresh boot is simpler than reconciling it in place.
-      location.hash = "#/ingestion";
+      // It lands on Get started, which is the next thing to do.
+      location.hash = "#/overview";
       location.reload();
     } catch (err) {
       if (!err.handled) note(err.message);
