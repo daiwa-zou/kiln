@@ -181,13 +181,19 @@
     transition: transform var(--dur) var(--ease);
   }
   .tree-group[open] summary::before { transform: rotate(90deg); }
-  .tree-group .count { color: var(--ink-faint); font-size: 10px; font-weight: 400; }
+  /* --ink-dim, not --ink-faint: at 10px on the sidebar surface the faint
+     token measures 4.28:1, under the 4.5:1 WCAG AA floor for body text.
+     --ink-faint stays reserved for the dead-wikilink token, which pairs low
+     contrast with a dashed underline so "absent" is never color alone. */
+  .tree-group .count { color: var(--ink-dim); font-size: 10px; font-weight: 400; }
   .tree a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
   .tree a[aria-current="page"] { background: var(--ember-soft); color: var(--ink); }
+  /* --ink-dim rather than --ink-faint, and a target tall enough to hit:
+     12px faint text measured 4.28:1 on the sidebar, under the AA floor. */
   .signout {
-    margin-top: 18px; font-size: 12px; color: var(--ink-faint);
-    background: none; border: none; padding: 2px 0; cursor: pointer;
-    text-decoration: underline; font-family: var(--sans);
+    margin-top: 18px; font-size: 12px; color: var(--ink-dim);
+    background: none; border: none; padding: 4px 0; cursor: pointer;
+    min-height: 24px; text-decoration: underline; font-family: var(--sans);
   }
   .signout:hover { color: var(--oxide); }
 
@@ -216,6 +222,14 @@
   /* Freshness as temperature: a page built from current sources reads warm and
      cools toward ash as it falls behind. The text labels carry the meaning;
      color reinforces but never carries it alone. */
+  /* A chip that is a button is a pointer target, and WCAG 2.2 AA puts the
+     floor at 24x24. Text chips stay compact: the rule exempts anything that
+     is not actionable, and the graph legend is where this bit. */
+  button.chip {
+    min-height: 24px; min-width: 24px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+
   .chip.fresh { border-color: var(--ember); color: var(--ember); }
   .chip.stale { border-color: var(--ash); color: var(--ash); }
 
