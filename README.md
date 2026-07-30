@@ -92,7 +92,9 @@ For Kubernetes there is a Helm chart at [deploy/helm/kiln](deploy/helm/kiln)
 restricted pod security context) and [deploy/kubernetes](deploy/kubernetes) for
 plain manifests. Configuration, upgrades, backups, and operating notes are in
 [docs/deployment.md](docs/deployment.md); metrics, alerts, and health endpoints
-are in [docs/observability.md](docs/observability.md).
+are in [docs/observability.md](docs/observability.md). The reading UI targets
+WCAG 2.2 AA; what that means here and what was measured is in
+[docs/accessibility.md](docs/accessibility.md).
 
 ## Development
 
