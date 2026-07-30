@@ -146,12 +146,25 @@
     font-size: 11px; text-align: center;
   }
   .nav a:hover { background: var(--bg); color: var(--ink); text-decoration: none; }
+  /* The nav's clusters take the same tiny uppercase headers the page tree
+     below uses, so one sidebar speaks one language. Tighter above than the
+     tree's, since these sit between short lists rather than long ones. */
+  /* A rule above each cluster label divides the groups; the first needs
+     none, since the search box above it already closes that edge. */
+  .nav .group-label {
+    margin: 12px 0 2px; padding: 11px 0 0 10px;
+    border-top: 1px solid var(--border);
+  }
+  .nav .group-label:first-child { margin-top: 0; padding-top: 0; border-top: none; }
   .nav a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
   .nav a[aria-current="page"] .badge { background: var(--on-ember); color: var(--ember); }
 
+  /* Section headers must outrank the items beneath them. Sharing the items'
+     dim color made them recede instead: full ink and semibold is what makes
+     a small uppercase label read as a heading rather than a faint aside. */
   .group-label {
-    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
-    color: var(--ink-dim); margin: 16px 0 5px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    font-weight: 600; color: var(--ink); margin: 16px 0 5px;
   }
   .tree a {
     display: block; padding: 3px 7px; border-radius: 5px;
@@ -397,6 +410,8 @@
   .run-dot.run-no_changes { background: var(--border); }
   .run-dot.run-running, .run-dot.run-queued { background: var(--ember); }
   .run-dot.run-failed, .run-dot.run-over_budget { background: #b3261e; }
+  /* A chip that carries an explanation invites the hover that reveals it. */
+  .chip.help { cursor: help; border-style: dashed; }
   .run-units { margin: 2px 0 8px 17px; }
   .run-units summary { cursor: pointer; color: var(--ink-dim); font-size: 12.5px; }
   .run-units .detail { font-size: 13px; color: var(--ink-dim); }

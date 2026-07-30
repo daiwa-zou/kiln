@@ -1637,11 +1637,10 @@ function setDrawer(open) {
 // the palette's last row hands off to it.
 const VIEW_COMMANDS = [
   { title: "Overview", hash: "#/overview" }, { title: "Index", hash: "#/index" },
-  { title: "Graph", hash: "#/graph" },
-  { title: "Gaps", hash: "#/gaps" }, { title: "Reviews", hash: "#/reviews" },
-  { title: "Ingestion", hash: "#/ingestion" },
-  { title: "Members", hash: "#/members" },
-  { title: "Log", hash: "#/log" }, { title: "Steering", hash: "#/steering" },
+  { title: "Graph", hash: "#/graph" }, { title: "Gaps", hash: "#/gaps" },
+  { title: "Ingestion", hash: "#/ingestion" }, { title: "Log", hash: "#/log" },
+  { title: "Reviews", hash: "#/reviews" },
+  { title: "Steering", hash: "#/steering" }, { title: "Members", hash: "#/members" },
 ];
 let closePalette = null, palRows = [], palSelection = 0;
 
