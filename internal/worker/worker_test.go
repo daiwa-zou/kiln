@@ -51,6 +51,9 @@ func (f *fakeStore) EnqueueRun(context.Context, string, string, string) (string,
 func (f *fakeStore) ListFiles(context.Context, string) ([]store.FileRow, error) {
 	return f.files, nil
 }
+func (f *fakeStore) QueueDepth(context.Context) (map[string]int, error) {
+	return map[string]int{"queued": 0, "running": 0}, nil
+}
 func (f *fakeStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) { return nil, nil }
 func (f *fakeStore) LastSuccessfulRef(context.Context, string) (string, error)    { return "", nil }
 func (f *fakeStore) RequeueRun(context.Context, string) error                     { return nil }

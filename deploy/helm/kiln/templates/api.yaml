@@ -46,6 +46,11 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- if .Values.config.metricsAddr }}
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+            {{- end }}
           # Readiness and liveness are deliberately different endpoints.
           # /readyz reports database reachability, so a pod that cannot serve
           # leaves the Service. /healthz answers even while Postgres is down,

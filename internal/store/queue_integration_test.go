@@ -366,3 +366,44 @@ func TestFailRunAndRequeueStale(t *testing.T) {
 		t.Errorf("reclaim after requeue: %+v err=%v", reclaimed, err)
 	}
 }
+
+func TestQueueDepthCountsUnfinishedRuns(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	freshSchema(t, pool)
+	s := NewWikiStore(pool)
+
+	ws, err := s.EnsureWorkspace(ctx, "local", "bench", "bench")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// An empty queue must report zeros rather than an empty map: a gauge that
+	// stops being published reads as "no data", which an autoscaler and an
+	// alert both treat differently from "nothing waiting".
+	depth, err := s.QueueDepth(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if depth["queued"] != 0 || depth["running"] != 0 {
+		t.Fatalf("empty queue depth = %+v, want zeros", depth)
+	}
+
+	if _, _, err := s.EnqueueRun(ctx, ws, "manual", ""); err != nil {
+		t.Fatal(err)
+	}
+	depth, _ = s.QueueDepth(ctx)
+	if depth["queued"] != 1 {
+		t.Errorf("queued = %d, want 1", depth["queued"])
+	}
+
+	// Claiming moves it from queued to running, which is what tells an
+	// operator whether the backlog is stuck or merely deep.
+	if _, err := s.ClaimNextRun(ctx, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	depth, _ = s.QueueDepth(ctx)
+	if depth["queued"] != 0 || depth["running"] != 1 {
+		t.Errorf("after claim = %+v, want running 1", depth)
+	}
+}

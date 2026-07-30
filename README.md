@@ -91,7 +91,8 @@ For Kubernetes there is a Helm chart at [deploy/helm/kiln](deploy/helm/kiln)
 (separate API and worker Deployments, autoscaling, a migration hook, and a
 restricted pod security context) and [deploy/kubernetes](deploy/kubernetes) for
 plain manifests. Configuration, upgrades, backups, and operating notes are in
-[docs/deployment.md](docs/deployment.md).
+[docs/deployment.md](docs/deployment.md); metrics, alerts, and health endpoints
+are in [docs/observability.md](docs/observability.md).
 
 ## Development
 

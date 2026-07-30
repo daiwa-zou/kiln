@@ -71,6 +71,12 @@ func (l *loopStore) ListFiles(context.Context, string) ([]store.FileRow, error) 
 	return nil, nil
 }
 
+func (l *loopStore) QueueDepth(context.Context) (map[string]int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return map[string]int{"queued": len(l.queue), "running": 0}, nil
+}
+
 func (l *loopStore) FailRun(_ context.Context, runID, msg string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

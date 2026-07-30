@@ -66,7 +66,15 @@ spec:
             # queries, a worker holds a few long transactions during import.
             - name: KILN_DATABASE_MAX_CONNS
               value: {{ .Values.config.database.workerMaxConns | quote }}
-          # No probes: a worker holds no listener, and "healthy" for it means
+          {{- if .Values.config.metricsAddr }}
+          ports:
+            # A worker's only listener. Scrape it for queue depth, build
+            # outcomes, and spend -- there is no API port here to ask.
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          {{- end }}
+          # No readiness or liveness probes: a worker holds no serving listener, and "healthy" for it means
           # "claiming", which the queue already reports. A liveness probe here
           # could only kill a process mid-build.
           resources:

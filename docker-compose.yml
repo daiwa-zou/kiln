@@ -45,6 +45,10 @@ x-kiln-env: &kiln-env
   KILN_AGENT_RUN_BUDGET_USD: ${KILN_AGENT_RUN_BUDGET_USD:-}
   KILN_AGENT_MAX_PAGES_PER_RUN: ${KILN_AGENT_MAX_PAGES_PER_RUN:-}
   KILN_AGENT_BUDGET_WINDOW: ${KILN_AGENT_BUDGET_WINDOW:-}
+  # Prometheus metrics on a second listener, deliberately not published to the
+  # host: scrape it from inside the compose network, or publish it yourself
+  # once you know who can reach it.
+  KILN_METRICS_ADDR: ${KILN_METRICS_ADDR:-:9090}
 
 services:
   postgres:

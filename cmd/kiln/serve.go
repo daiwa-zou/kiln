@@ -75,6 +75,12 @@ processes separately so builds scale independently of the API.`,
 				return err
 			}
 
+			// One registry per process. With --with-worker the API and the
+			// worker record into the same one and a single listener exposes
+			// both, rather than two halves of the picture fighting over a
+			// port.
+			metrics := observability.NewMetrics()
+
 			ws := store.NewWikiStore(db.Pool)
 			srv := &api.Server{
 				Store:              ws,
@@ -88,6 +94,7 @@ processes separately so builds scale independently of the API.`,
 				DB:                 db,
 				Log:                log,
 				CORSOrigins:        cfg.CORSOrigins,
+				Metrics:            metrics,
 			}
 			// Without object storage the upload route answers 503 with the
 			// fix; file listing and deletion keep working.
@@ -143,12 +150,28 @@ processes separately so builds scale independently of the API.`,
 
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "kiln %s listening on %s\n", observability.Version, cfg.HTTPAddr)
+			// Metrics listen on their own port so the API's ingress never
+			// publishes them. Failing to bind must not take the server down:
+			// serving the wiki matters more than reporting on it.
+			var metricsDone chan struct{}
+			if cfg.MetricsAddr != "" {
+				fmt.Fprintf(out, "  metrics at %s/metrics\n", cfg.MetricsAddr)
+				metricsDone = make(chan struct{})
+				go func() {
+					defer close(metricsDone)
+					if err := metrics.ServeMetrics(ctx, cfg.MetricsAddr); err != nil {
+						log.Error("metrics listener stopped", "error", err)
+					}
+				}()
+			}
+
 			var workerDone chan struct{}
 			if withWorker {
 				w, err := newWorker(cfg, db, log)
 				if err != nil {
 					return err
 				}
+				w.Metrics = metrics
 				fmt.Fprintln(out, "  build worker running in-process (--with-worker)")
 				workerDone = make(chan struct{})
 				go func() {
@@ -159,6 +182,9 @@ processes separately so builds scale independently of the API.`,
 			fmt.Fprintln(out, "  press ctrl-c to stop")
 
 			err = srv.Serve(ctx, cfg.HTTPAddr)
+			if metricsDone != nil {
+				<-metricsDone
+			}
 			if workerDone != nil {
 				// The worker drains: it stops claiming immediately but may
 				// hold an in-flight build for its grace window, and exiting
