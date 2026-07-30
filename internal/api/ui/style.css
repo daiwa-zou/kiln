@@ -129,6 +129,11 @@
     color: var(--ink); font-family: var(--sans); font-size: 14px; cursor: pointer;
   }
   .bench-list button:hover { background: var(--ember-soft); }
+  /* Separated from the bench entries: it creates rather than selects. */
+  .bench-list .bench-new {
+    padding-left: 9px; margin-top: 2px; color: var(--ember);
+    border-top: 1px solid var(--border); border-radius: 0 0 5px 5px;
+  }
   .bench-list button[aria-current="true"]::before {
     content: "\2713"; position: absolute; left: 9px; color: var(--ember);
   }

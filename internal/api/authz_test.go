@@ -66,10 +66,11 @@ func authedServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, string, *mutab
 	}
 	srv := httptest.NewServer((&Server{
 		Store: js, Writes: js, Runs: js, Admin: js, Members: js, Files: js,
-		Keyring: keyring,
-		Blobs:   newMemBlobs(),
-		DB:      &store.DB{Pool: pool},
-		Auth:    &auth.Middleware{Source: src},
+		Workspaces: js,
+		Keyring:    keyring,
+		Blobs:      newMemBlobs(),
+		DB:         &store.DB{Pool: pool},
+		Auth:       &auth.Middleware{Source: src},
 	}).Router())
 	t.Cleanup(srv.Close)
 	return srv, pool, wsID, src

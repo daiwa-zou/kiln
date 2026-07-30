@@ -91,6 +91,9 @@ type Server struct {
 	Admin AdminStore
 	// Files backs the uploaded-documents routes. Nil leaves them unmounted.
 	Files FileStore
+	// Workspaces backs self-serve bench creation. Nil leaves it unmounted,
+	// which keeps a read-only embed unable to create anything.
+	Workspaces WorkspaceCreator
 	// Blobs stores uploaded file content. Nil (object storage unconfigured)
 	// keeps listing and deletion working but answers uploads with 503.
 	Blobs blob.Store
@@ -229,6 +232,10 @@ func (s *Server) mountRoutes(r chi.Router) {
 				r.Get("/me", s.handleMe)
 			}
 			r.Get("/workspaces", s.handleWorkspaces)
+			if s.Workspaces != nil {
+				r.With(writeLimiter(s.writeLimit)).
+					Post("/workspaces", s.handleWorkspaceCreate)
+			}
 
 			r.Route("/workspaces/{workspace}", func(r chi.Router) {
 				r.Get("/", s.handleWorkspace)
