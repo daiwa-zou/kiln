@@ -514,12 +514,14 @@ async function showSources() {
 
     const money = (v) => `$${Number(v || 0).toFixed(2)}`;
     // Trigger values are queue internals; runs started by hand carry no
-    // chip at all (that is the normal case), automatic ones say why.
-    const triggerLabel = {
-      webhook: "repo push",
-      upload: "documents changed",
-      poll: "scheduled check",
-      continuation: "finishing the previous run",
+    // chip at all (that is the normal case), automatic ones say why they
+    // started, with the longer explanation a hover away.
+    const triggerChip = {
+      webhook: ["repo push", "A push to the connected repository started this run."],
+      upload: ["documents changed", "Documents were uploaded or removed, so a run was queued."],
+      poll: ["scheduled check", "The poll schedule came due and re-read the source."],
+      continuation: ["leftover pages",
+        "The previous run reached its per-run page cap; this run built the pages it had to defer."],
     };
     // Each run reads as one sentence about what happened, not a ledger row.
     const runOutcome = (r) => {
@@ -539,7 +541,10 @@ async function showSources() {
       <div class="row" title="${esc(r.created)}">
         <span><span class="run-dot run-${esc(r.status)}" aria-hidden="true"></span>${esc(runOutcome(r))}</span>
         <span>
-          ${r.trigger && r.trigger !== "manual" ? `<span class="chip">${esc(triggerLabel[r.trigger] || r.trigger)}</span>` : ""}
+          ${r.trigger && r.trigger !== "manual" ? (() => {
+            const [label, why] = triggerChip[r.trigger] || [r.trigger, ""];
+            return `<span class="chip help" title="${esc(why)}">${esc(label)}</span>`;
+          })() : ""}
           ${r.ref ? `<span class="count mono">${esc(r.ref)}</span>` : ""}
           ${r.costUsd > 0 ? `<span class="count">${money(r.costUsd)}</span>` : ""}
         </span>

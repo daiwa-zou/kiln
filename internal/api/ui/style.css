@@ -410,6 +410,8 @@
   .run-dot.run-no_changes { background: var(--border); }
   .run-dot.run-running, .run-dot.run-queued { background: var(--ember); }
   .run-dot.run-failed, .run-dot.run-over_budget { background: #b3261e; }
+  /* A chip that carries an explanation invites the hover that reveals it. */
+  .chip.help { cursor: help; border-style: dashed; }
   .run-units { margin: 2px 0 8px 17px; }
   .run-units summary { cursor: pointer; color: var(--ink-dim); font-size: 12.5px; }
   .run-units .detail { font-size: 13px; color: var(--ink-dim); }
