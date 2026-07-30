@@ -154,9 +154,12 @@
   .nav a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
   .nav a[aria-current="page"] .badge { background: var(--on-ember); color: var(--ember); }
 
+  /* Section headers must outrank the items beneath them. Sharing the items'
+     dim color made them recede instead: full ink and semibold is what makes
+     a small uppercase label read as a heading rather than a faint aside. */
   .group-label {
-    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
-    color: var(--ink-dim); margin: 16px 0 5px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    font-weight: 600; color: var(--ink); margin: 16px 0 5px;
   }
   .tree a {
     display: block; padding: 3px 7px; border-radius: 5px;
