@@ -159,6 +159,96 @@ the permissive `member`-writes default (members write content; owners shape
 connectors, credentials, and membership -- the split holds, but the default
 role granted on sign-in deserves a second look).
 
+## M9 — Make Builds Parallel
+
+*Designed 2026-07-30 from a scaling review. The roles are already split and
+already scale independently; what does not scale is one bench. A run walks
+its units in a plain loop, the run is capped at twelve, and the partial
+unique index allows one active run per workspace — so a 120-unit first
+build is 240 sequential model calls pinned to a single worker, and adding
+workers does nothing for it. Nothing in this milestone changes the
+topology; every item pays off at the shipped two-role deployment.*
+
+1. **Connection pooler first** — the API pool is 20 per replica against an
+   untuned Postgres default of 100, and the configured autoscaling ceilings
+   (10 API, 20 worker) demand 320. PgBouncer in transaction mode, plus
+   single-digit per-replica pools. This gates everything below it: every
+   later item adds pods, and adding pods today buys `FATAL: sorry, too many
+   clients already`.
+2. **Real client addresses** — `limiterKey` falls back to `r.RemoteAddr`
+   with no `RealIP` middleware anywhere, so behind an ingress every
+   unauthenticated caller shares one bucket. `/hooks/github` sits outside
+   `auth.Wrap` by design and always takes that path, so one repo's push
+   storm 429s every other tenant's webhooks. Add trusted-proxy `RealIP`,
+   and key webhook limiting on the delivering installation id — the correct
+   tenant boundary regardless of replica count.
+3. **Intra-run unit fan-out** — the milestone's reason to exist. Generate
+   units concurrently against a snapshot with a bounded per-workspace pool,
+   then run collision detection, link validation, and `Import` serially.
+   Validating wikilinks after every unit lands is not just a concession to
+   concurrency: today unit 3 cannot link to a page unit 7 is about to
+   write, and resolving against the full run fixes that.
+4. **The budget gate survives concurrency** — landing with item 3, not
+   after it. The run budget is enforced by a sequential accumulator: each
+   unit is handed `RunUSD - spent` and stops itself there. With C units in
+   flight against one snapshot of `spent`, worst-case overshoot is C times
+   the per-unit budget. A shared atomic reservation taken before each call,
+   not after it, keeps the ceiling a ceiling.
+5. **Scheduler as a singleton role** — `requeueStale`, `pollSources`,
+   `sweep`, and `sampleQueueDepth` run inside every worker's claim loop on
+   in-process timers. At thirty workers that is thirty concurrent hourly GC
+   sweeps racing the same rows and a requeue query every five seconds per
+   pod. Extend the existing `config.Role` enum with a scheduler role at
+   `replicas=1`; workers become claim-and-build only.
+
+**Verification:** a 60-unit run at concurrency 8 finishes in roughly an
+eighth of the wall clock of the same run at concurrency 1, proven by
+`run_items` timestamps, with byte-identical pages; two units claiming one
+page path still fails the later unit and leaves the earlier page intact; a
+wikilink to a page written by another unit of the same run resolves rather
+than validating as dead; a run canceled mid-flight still imports completed
+units in one transaction and is still ledgered; a run with `run_budget_usd`
+set never exceeds it at any concurrency, checked against the ledger rather
+than the summary; with the scheduler running and workers at zero, the
+queue-depth gauge is still published; with N workers, exactly one GC sweep
+occurs per hour.
+
+## M10 — Split the Serving Tier
+
+*Only worth starting once M9 lands — the pooler is the prerequisite, and
+the fan-out is the larger win. `serve` currently answers page reads, 32 MiB
+uploads, webhook bursts, OAuth, and the embedded UI from one process and
+one pool, so a slow upload and a page view contend for the same resources.
+The split is deployment profiles of one binary, not new services: one
+schema, one atomic `Import`, one queue.*
+
+1. **Identity cache** — `auth.Wrap` resolves an identity from Postgres on
+   every request, deliberately, so revocation is immediate. A 5–10s cache
+   with an explicit revocation bump keeps that property and removes most of
+   the read tier's load.
+2. **Content caching** — pages change only when a build imports them.
+   `Cache-Control` keyed on the workspace's last run id lets a CDN or
+   reverse proxy absorb the reading traffic; UI assets are already
+   content-hashed with ETags computed at init, so they need only be fronted.
+3. **Route-subtree roles** — `serve --role=reader|control|ingress`
+   selecting mount subtrees, then three Deployments with their own limits
+   and HPA policies. Uploads likely deserve a fourth profile: they hold a
+   connection for 32 MiB at a time.
+4. **Queue-depth autoscaling** — the signal `values.yaml` already
+   recommends and the HPA does not yet use. Safe only once the scheduler
+   (M9) publishes the gauge, since today it comes from the very pods being
+   scaled and vanishes at low replica counts.
+5. **Workload classes** — a `runs.class` column and a claim-query filter,
+   giving small and large worker pools so one large bench cannot monopolize
+   the fleet. Deferred within the milestone until it is a real complaint.
+
+**Verification:** a sustained read load against the reader profile shows
+auth queries falling by roughly the cache hit rate with no change in
+revocation latency past the TTL; a 32 MiB upload in flight does not raise
+page-read latency on the reader pods; a webhook storm against one
+installation does not 429 another's; queue depth drives worker replicas up
+from zero and back down without evicting an in-flight build.
+
 ## Deferred decisions
 
 | Item | Trigger to revisit |
@@ -166,3 +256,5 @@ role granted on sign-in deserves a second look).
 | Framework frontend | SaaS onboarding flows (M8) making server-driven UI painful |
 | `workspaces.model` / per-bench model override | First user who needs Opus on one bench and Sonnet on the rest |
 | Incremental doc/web change detection | A docs source large enough that full re-extraction is the slow step |
+| External broker for the run queue | Postgres queue contention that `SKIP LOCKED` and workload classes cannot absorb. Costs the transactional debounce and exactly-once claim, so the contention has to be measured first |
+| Per-domain services with their own datastores | A domain whose write volume genuinely cannot share Postgres. Costs the atomic `Import` — pages, sources, index, overview, and log in one transaction — which is what makes navigation unable to drift |
