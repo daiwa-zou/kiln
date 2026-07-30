@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,9 +30,14 @@ type scriptedRunner struct {
 	// cross-unit collision check makes shared paths a failure, as it should).
 	filesBySession map[string]map[int]map[string]string
 	attempts       map[string]int
-	costPerCall    float64
-	failWith       error
-	errEnvelope    bool
+	costPerCall float64
+	failWith    error
+	// failWithCost returns a costed result *alongside* failWith, the way the
+	// CLI runner does when the process exits non-zero despite a success
+	// envelope. The call really ran and really billed, so the run must
+	// account for it even though it failed.
+	failWithCost bool
+	errEnvelope  bool
 }
 
 func newScriptedRunner() *scriptedRunner {
@@ -49,6 +55,12 @@ func (s *scriptedRunner) Run(_ context.Context, req agent.Request) (*agent.Resul
 	s.calls = append(s.calls, req)
 
 	if s.failWith != nil {
+		if s.failWithCost {
+			return &agent.Result{
+				Subtype: "success", TerminalReason: "completed",
+				SessionID: req.SessionID, NumTurns: 1, TotalCostUSD: s.costPerCall,
+			}, s.failWith
+		}
 		return nil, s.failWith
 	}
 	if s.errEnvelope {
@@ -283,6 +295,50 @@ func TestBuildNoChangesCostsNothing(t *testing.T) {
 	}
 	if res.Summary.CostUSD != 0 {
 		t.Errorf("CostUSD = %v, want 0", res.Summary.CostUSD)
+	}
+}
+
+// A runner can fail and still hand back a costed result -- the CLI runner
+// does exactly that when the process exits non-zero despite a success
+// envelope. That money was spent, so the run has to record it. Counting only
+// on the success path left the run summary reporting $0 for a call the
+// budget ledger had already settled, and the workspace budget window reads
+// the summary.
+func TestBuildRecordsCostOfAFailedAgentCall(t *testing.T) {
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.failWith = errors.New("exited non-zero despite a success envelope")
+	runner.failWithCost = true
+
+	p := testPipeline(store, runner)
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"})
+	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
+
+	res, err := p.Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if len(runner.calls) == 0 {
+		t.Fatal("the agent was never called")
+	}
+	want := float64(len(runner.calls)) * runner.costPerCall
+	if res.Summary.CostUSD != want {
+		t.Errorf("CostUSD = %v, want %v (%d billed calls dropped from the summary)",
+			res.Summary.CostUSD, want, len(runner.calls))
+	}
+
+	// The cost must also reach the item, which is where a run's spend is
+	// attributed back to the unit that incurred it.
+	var itemCost float64
+	for _, it := range res.Summary.Items {
+		itemCost += it.CostUSD
+		if it.Status != StatusFailed {
+			t.Errorf("item %s status = %q, want %q", it.Key, it.Status, StatusFailed)
+		}
+	}
+	if itemCost != want {
+		t.Errorf("item costs sum to %v, want %v", itemCost, want)
 	}
 }
 

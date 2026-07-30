@@ -321,11 +321,17 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		w.warnNearBudget(ctx, run.WorkspaceID, log)
 		w.enqueueContinuation(ctx, run, res, log)
 	}
+	// Terminal bookkeeping, so it outlives cancellation like the requeue and
+	// the run record do. On the interrupted path ctx is already canceled by
+	// definition -- writing through it meant the one message that branch
+	// composes ("interrupted by shutdown; requeued") could never reach the
+	// connector, and every drain logged a failure for it instead.
+	syncCtx := context.WithoutCancel(ctx)
 	for _, id := range []string{connectors.Git, connectors.Upload, connectors.Web} {
 		if id == "" {
 			continue
 		}
-		if merr := w.Store.MarkConnectorSync(ctx, id, syncErr); merr != nil {
+		if merr := w.Store.MarkConnectorSync(syncCtx, id, syncErr); merr != nil {
 			log.Error("mark connector sync failed", "error", merr)
 		}
 	}
@@ -551,6 +557,14 @@ func (w *Worker) reportUnreadableDocuments(ctx context.Context, run *store.Queue
 }
 
 // stageBlob copies one stored file into the staging jail.
+//
+// A copy that fails partway takes its half-written file with it. The caller
+// treats a staging failure as "this document could not be read" and carries
+// on building without it -- but the extractor reads the staging directory,
+// not the file list, so a truncated file left behind would be ingested as
+// though it were the whole document. The bench would then hold a page
+// written from half a document while the review queue reported that same
+// document as skipped.
 func stageBlob(ctx context.Context, blobs blob.Store, root *os.Root, f store.FileRow) error {
 	rc, err := blobs.Get(ctx, f.BlobKey)
 	if err != nil {
@@ -558,20 +572,26 @@ func stageBlob(ctx context.Context, blobs blob.Store, root *os.Root, f store.Fil
 	}
 	defer rc.Close()
 
-	if parent := filepath.Dir(filepath.FromSlash(f.Path)); parent != "." {
+	name := filepath.FromSlash(f.Path)
+	if parent := filepath.Dir(name); parent != "." {
 		if err := root.MkdirAll(parent, 0o755); err != nil {
 			return err
 		}
 	}
-	dst, err := root.Create(filepath.FromSlash(f.Path))
+	dst, err := root.Create(name)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(dst, rc); err != nil {
-		dst.Close()
+		_ = dst.Close()
+		_ = root.Remove(name)
 		return err
 	}
-	return dst.Close()
+	if err := dst.Close(); err != nil {
+		_ = root.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // cloneRemote materializes a shallow clone of a connector's https remote.
@@ -657,15 +677,28 @@ func (w *Worker) failRun(ctx context.Context, runID string, cause error, log *sl
 }
 
 // enqueueContinuation keeps a bench converging without operator attention.
-// Two cases: units deferred by the per-run page cap always get a follow-up
-// (the deferral strictly shrinks each round, so the chain terminates), and a
+// Two cases: units deferred by the per-run page cap get a follow-up, and a
 // partial run gets exactly one retry — a continuation that goes partial
 // again stops, because retrying a persistent failure in a loop is a bill,
 // not a fix. Continuations carry no ref: the full hash-gated route is what
 // rescues units an incremental range would no longer visit.
+//
+// A deferral only earns its follow-up when the run landed something. The
+// chain terminates because each round strictly shrinks the stale set, but
+// only success shrinks it: a failed unit keeps its old hash and is planned
+// again next time. A run where nothing succeeded would therefore defer the
+// same units, enqueue the same continuation, and fail the same way -- an
+// unbounded chain of paid runs converging on nothing. Zero progress is
+// exactly the case where the next round is provably identical to this one,
+// so it is where the chain has to stop and ask for a human.
 func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, res *jobs.BuildResult, log *slog.Logger) {
 	retryPartial := res.Summary.Status == jobs.StatusPartial && run.Trigger != "continuation"
-	if res.Deferred == 0 && !retryPartial {
+	continueDeferred := res.Deferred > 0 && progressed(res)
+	if res.Deferred > 0 && !continueDeferred {
+		log.Warn("run deferred work but completed no unit; not continuing",
+			"deferred", res.Deferred, "status", res.Summary.Status)
+	}
+	if !continueDeferred && !retryPartial {
 		return
 	}
 	if _, created, err := w.Store.EnqueueRun(ctx, run.WorkspaceID, "continuation", run.ConnectorID); err != nil {
@@ -673,6 +706,18 @@ func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, 
 	} else if created {
 		log.Info("continuation enqueued", "deferred", res.Deferred, "retry_partial", retryPartial)
 	}
+}
+
+// progressed reports whether any unit succeeded. That is what advances a
+// source record's input hash, and so the only thing that makes the next
+// run's plan smaller than this one's.
+func progressed(res *jobs.BuildResult) bool {
+	for _, it := range res.Summary.Items {
+		if it.Status == jobs.StatusSucceeded {
+			return true
+		}
+	}
+	return false
 }
 
 // warnNearBudget files a review when a workspace has spent 80% or more of
