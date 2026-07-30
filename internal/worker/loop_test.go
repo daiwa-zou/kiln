@@ -316,17 +316,37 @@ func TestPollSchedulerDisabledByZeroInterval(t *testing.T) {
 }
 
 func TestContinuationRuns(t *testing.T) {
+	// items models what the run actually completed, which is what decides
+	// whether a deferral can shrink: only a succeeded unit advances its
+	// source hash, so a run of nothing but failures plans the same work again.
+	succeeded := []jobs.ItemSummary{{Key: "a", Status: jobs.StatusSucceeded}}
+	failed := []jobs.ItemSummary{{Key: "a", Status: jobs.StatusFailed}}
+	mixed := []jobs.ItemSummary{
+		{Key: "a", Status: jobs.StatusSucceeded},
+		{Key: "b", Status: jobs.StatusFailed},
+	}
+
 	cases := []struct {
 		name     string
 		status   string
 		deferred int
+		items    []jobs.ItemSummary
 		trigger  string
 		want     int
 	}{
-		{"deferred always continues", jobs.StatusSucceeded, 3, "continuation", 1},
-		{"partial retries once", jobs.StatusPartial, 0, "webhook", 1},
-		{"partial continuation stops", jobs.StatusPartial, 0, "continuation", 0},
-		{"clean run stops", jobs.StatusSucceeded, 0, "webhook", 0},
+		{"deferred with progress continues", jobs.StatusSucceeded, 3, succeeded, "continuation", 1},
+		{"partial retries once", jobs.StatusPartial, 0, mixed, "webhook", 1},
+		{"partial continuation stops", jobs.StatusPartial, 0, mixed, "continuation", 0},
+		{"clean run stops", jobs.StatusSucceeded, 0, succeeded, "webhook", 0},
+
+		// Without the progress gate these chain forever: the deferral is
+		// unchanged, so every continuation re-plans the same failing units
+		// and enqueues the next one, paying for each round.
+		{"deferred without progress stops", jobs.StatusFailed, 3, failed, "continuation", 0},
+		{"deferred over budget without progress stops", jobs.StatusOverBudget, 5, failed, "webhook", 0},
+		{"deferred with no items stops", jobs.StatusFailed, 3, nil, "continuation", 0},
+		// Partial still continues while it is shrinking: some unit landed.
+		{"deferred partial with progress continues", jobs.StatusPartial, 3, mixed, "continuation", 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -336,6 +356,7 @@ func TestContinuationRuns(t *testing.T) {
 				Trigger: tc.trigger, ConnectorID: "c1"}
 			res := &jobs.BuildResult{Deferred: tc.deferred}
 			res.Summary.Status = tc.status
+			res.Summary.Items = tc.items
 
 			w.enqueueContinuation(context.Background(), run, res, w.logger())
 

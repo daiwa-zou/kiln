@@ -276,6 +276,90 @@ func TestSourceSpecFilesModeSurvivesUnreadableBlob(t *testing.T) {
 	}
 }
 
+// truncatingBlobs serves one key through a reader that fails partway, the way
+// a connection dropped mid-download does. The bytes delivered before the
+// failure are real, which is what makes the half-written file convincing.
+type truncatingBlobs struct {
+	memBlobs
+	failKey string
+}
+
+func (b truncatingBlobs) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	rc, err := b.memBlobs.Get(ctx, key)
+	if err != nil || key != b.failKey {
+		return rc, err
+	}
+	return io.NopCloser(io.MultiReader(
+		io.LimitReader(rc, 8),
+		errReader{fmt.Errorf("connection reset mid-download")},
+	)), nil
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+// A blob whose download dies partway must leave nothing behind. The extractor
+// reads the staging directory rather than the file list, so a half-written
+// file would be ingested as if it were the whole document -- and the bench
+// would end up holding a page written from a fragment while the review queue
+// reported that same document as skipped.
+func TestSourceSpecFilesModeDiscardsATruncatedBlob(t *testing.T) {
+	blobs := truncatingBlobs{
+		memBlobs: memBlobs{
+			"ws/ws1/uploads/ok":   []byte("# Present\n\nThis one downloads cleanly.\n"),
+			"ws/ws1/uploads/half": []byte("# Truncated\n\nEverything past the first few bytes never arrives.\n"),
+		},
+		failKey: "ws/ws1/uploads/half",
+	}
+	st := &fakeStore{
+		connectors: []store.ConnectorRow{
+			{ID: "c2", Kind: "upload", Name: "documents", Config: map[string]any{}},
+		},
+		files: []store.FileRow{
+			{ID: "f1", Path: "present.md", BlobKey: "ws/ws1/uploads/ok", Enabled: true},
+			{ID: "f2", Path: "truncated.md", BlobKey: "ws/ws1/uploads/half", Enabled: true},
+		},
+	}
+	w := &Worker{Store: st, Blobs: blobs}
+
+	spec, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		t.Fatalf("a truncated blob failed the whole resolution: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(spec.DocsDir, "truncated.md")); !os.IsNotExist(err) {
+		t.Errorf("truncated document survived in staging (stat err = %v); "+
+			"it would be extracted as a complete document", err)
+	}
+	// The healthy document is untouched by its neighbor's failure.
+	if _, err := os.Stat(filepath.Join(spec.DocsDir, "present.md")); err != nil {
+		t.Errorf("healthy document not staged: %v", err)
+	}
+
+	// And the truncated one is accounted for the same way any unreadable
+	// document is: skipped, not missing, so the cascade leaves its pages be.
+	want := diff.DocKey(diff.UploadOrigin("truncated.md"))
+	var found bool
+	for _, k := range spec.SkippedKeys {
+		if k == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("SkippedKeys = %v, want it to contain %s", spec.SkippedKeys, want)
+	}
+	if _, ok := spec.BlobKeys[string(want)]; ok {
+		t.Error("truncated document was attributed to the sync")
+	}
+	if len(st.reviews) != 1 {
+		t.Errorf("reviews = %v, want one storage review", st.reviews)
+	}
+}
+
 func TestSourceSpecFilesModeWithZeroFilesIsEmptySync(t *testing.T) {
 	w := &Worker{
 		Store: &fakeStore{connectors: []store.ConnectorRow{

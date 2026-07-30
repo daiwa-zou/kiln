@@ -468,6 +468,28 @@ func costOf(res *agent.Result) float64 {
 	return res.TotalCostUSD
 }
 
+// account folds one agent call's telemetry into the unit, and is called
+// before the caller decides whether that call failed.
+//
+// A failing runner can still return a populated result: the CLI runner does
+// exactly that when the process exits non-zero despite a success envelope,
+// and the envelope carries the cost of work that was really performed and
+// really billed. Counting only on the success path dropped that money from
+// the run summary while the ledger settled it correctly, so the run budget
+// and the recorded spend disagreed about the same call -- and the workspace
+// budget window, which reads what was recorded, undercounted it forever.
+//
+// Nil-safe, because the other failure mode is no result at all.
+func (p *Pipeline) account(res *unitResult, key diff.Key, call *agent.Result) {
+	if call == nil {
+		return
+	}
+	res.CostUSD += call.TotalCostUSD
+	res.Turns += call.NumTurns
+	res.Tokens += call.Usage.Total()
+	p.noteAgentEvents(key, call)
+}
+
 // generateUnit runs analyze once and then generate for one unit, retrying
 // generation on validation failure with the errors stated back to the agent.
 // The analysis is not re-run on retry: only generation failed, and the plan
@@ -516,14 +538,11 @@ func (p *Pipeline) generateUnit(
 		JSONSchema:       AnalysisSchema,
 	})
 	sc.ledger.settle(want, costOf(analyzeRes))
+	p.account(&res, key, analyzeRes)
 	if aerr != nil {
 		res.Err = aerr
 		return res
 	}
-	res.CostUSD += analyzeRes.TotalCostUSD
-	res.Turns += analyzeRes.NumTurns
-	res.Tokens += analyzeRes.Usage.Total()
-	p.noteAgentEvents(key, analyzeRes)
 	if err := analyzeRes.Err(); err != nil {
 		res.Err = err
 		return res
@@ -558,14 +577,11 @@ func (p *Pipeline) generateUnit(
 			Prompt:           generatePrompt(key, unit, req.SourceDir, sc.steering, plan, attempt, lastViolations),
 		})
 		sc.ledger.settle(want, costOf(genRes))
+		p.account(&res, key, genRes)
 		if gerr != nil {
 			res.Err = gerr
 			return res
 		}
-		res.CostUSD += genRes.TotalCostUSD
-		res.Turns += genRes.NumTurns
-		res.Tokens += genRes.Usage.Total()
-		p.noteAgentEvents(key, genRes)
 		if err := genRes.Err(); err != nil {
 			res.Err = err
 			return res
