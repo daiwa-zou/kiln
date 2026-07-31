@@ -24,6 +24,21 @@ All four roadmap milestones have shipped — the human loop and reader (M1), ser
 (M2), the multi-tenant SaaS shell with GitHub sign-in and webhooks (M3), and the web connector,
 graph view, and cost attribution (M4). See [ROADMAP.md](ROADMAP.md) for what each contains.
 
+## What it reads, and what you get
+
+A **bench** is one wiki with its own sources. Three kinds feed it, and they merge
+into a single wiki whose pages can link across the boundary:
+
+| Source | What it ingests |
+| --- | --- |
+| **Repositories** | A local path or an https remote, cloned shallow. Partitioned into modules, with a dependency graph extracted deterministically. |
+| **Documents** | Uploaded or from a folder — `.md`, `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.epub`, `.html` and more. Long documents split into chapters that regenerate independently. |
+| **Web pages** | Fetched URLs, extracted to text. |
+
+Out comes an interlinked markdown wiki: six page types (`entity`, `concept`,
+`source`, `query`, `comparison`, `synthesis`) plus three documents kiln maintains
+itself — an index, an overview, and a build log.
+
 ## How it works
 
 ```
@@ -37,6 +52,13 @@ sync → extract → map → plan → generate → validate → import → post-
 
 The LLM never writes the index, overview, or log — those are rebuilt from page frontmatter on every
 run, so navigation can't drift.
+
+**Only changed work costs anything.** A per-unit content hash gates regeneration,
+so a run over unchanged sources makes no model calls at all. On webhook builds,
+commit-range routing narrows the plan further, and cosmetic files (images,
+lockfiles, editor chrome) never trigger a rebuild on their own. Spend is bounded
+at six independent layers, from that hash gate down to a per-run ledger that
+reserves before it spends and a rolling per-bench budget window.
 
 ## The human loop
 
@@ -57,12 +79,20 @@ A full walkthrough — topology, the build pipeline stage by stage, how material
 flows through it, where cost is bounded, the data model, and every configurable —
 is in [docs/architecture.md](docs/architecture.md). The short version:
 
-Modular monolith: one Go binary against Postgres. `kiln serve` runs the HTTP API and the
-embedded reading UI; `kiln build` runs the generation pipeline against a local directory;
-`kiln worker` claims queued runs from the database and builds them through the same pipeline
-(`kiln serve --with-worker` runs both in one process for single-node deployments). Builds
-scale by adding worker processes — the queue is the runs table itself, claimed with
-`FOR UPDATE SKIP LOCKED`, one active run per bench.
+Modular monolith: one Go binary, four roles, against Postgres.
+
+| Command | Role |
+| --- | --- |
+| `kiln serve` | HTTP API and the embedded reading UI. `--with-worker` also builds, which is the right shape for one node. |
+| `kiln worker` | Claims queued runs and builds them. Scale by adding processes. |
+| `kiln build` | Runs the pipeline against a local directory — no server, no database. |
+| `kiln mcp` | Serves a bench to agents over MCP. Reads through the API. |
+| `kiln admin` | Tokens, migrations, key rotation, `doctor`. |
+
+Builds scale by adding worker processes — the queue is the runs table itself,
+claimed with `FOR UPDATE SKIP LOCKED`, one active run per bench. There is no
+external broker.
+
 The API requires a bearer token by default — mint one with `kiln admin token create`.
 Uploaded documents land in object storage (`storage.*`: S3/MinIO, or a mounted
 volume via the fs backend); document uploads accept up to 32 MiB per file, so a
@@ -70,6 +100,59 @@ reverse proxy in front of kiln needs its body limit raised to match (nginx:
 `client_max_body_size 34m`).
 
 Planned, not yet built: a Next.js frontend in its own container.
+
+## Agents can read it
+
+`kiln mcp` serves a bench to any MCP-capable agent over stdio, so an agent
+answers from the compiled wiki instead of re-reading your sources every time.
+
+```json
+{
+  "mcpServers": {
+    "kiln": {
+      "command": "kiln",
+      "args": ["mcp", "--url", "http://127.0.0.1:8080", "--workspace", "my-bench"],
+      "env": {"KILN_TOKEN": "..."}
+    }
+  }
+}
+```
+
+Seven tools: `search_wiki` and `read_page` carry most traffic, with
+`wiki_overview` for orientation, `list_benches` and `list_pages` for
+enumeration, `page_backlinks` for context, and `wiki_gaps` — which is what
+lets an agent tell *"the wiki says nothing about X"* from *"the wiki has not
+covered X yet"*.
+
+It reads over the HTTP API rather than the database, so it needs no Postgres
+credentials and works against an instance running anywhere; the token decides
+which benches it can see. Omit `--workspace` and every tool takes a `bench`
+argument instead.
+
+## Configuring it
+
+Every setting lives in a TOML file or an environment variable: the config key,
+`KILN_` prefixed, dots as underscores — `agent.model` is `KILN_AGENT_MODEL`. An
+empty variable is ignored rather than applied, so an unset one keeps kiln's
+default. Secrets also take a `_FILE` suffix pointing at a mounted file, which is
+how Docker and Kubernetes secrets should deliver them.
+
+The knobs worth knowing before anything else:
+
+| Setting | Default | Why you'd touch it |
+| --- | --- | --- |
+| `agent.model` | `claude-sonnet-5` | The model that writes pages. |
+| `agent.run_budget_usd` | `6.00` | Hard ceiling per run, at any concurrency. |
+| `agent.max_pages_per_run` | `12` | Caps one run; the remainder is deferred to a follow-up. |
+| `agent.unit_concurrency` | `1` | Raise it to build a large bench in minutes rather than hours. |
+| `agent.runner` | `api` | `fake` runs the whole pipeline with zero spend. |
+| `auth.mode` | `token` | `none` is refused on any non-loopback bind. |
+| `worker.permitted_source_roots` | *(empty)* | Allowlist for local-path sources. Empty denies every one. |
+
+Every key, with defaults, is in
+[docs/architecture.md](docs/architecture.md#configuration-reference).
+`kiln admin doctor` checks configuration, database reachability, and schema
+version in one pass.
 
 ## Deploying
 
@@ -175,6 +258,16 @@ enough to watch state transitions.
 
 `make lint` needs golangci-lint **v2** (`brew install golangci-lint`); the v1 series
 cannot read `.golangci.yml`.
+
+## Documentation
+
+| Document | What it covers |
+| --- | --- |
+| [docs/architecture.md](docs/architecture.md) | How the whole system works: topology, the pipeline stage by stage, data flow, cost control, the data model, the MCP server, failure modes, and every configurable. Start here. |
+| [docs/deployment.md](docs/deployment.md) | Running it: requirements, Compose and Kubernetes, upgrades, backups, operating notes. |
+| [docs/observability.md](docs/observability.md) | Metrics, alerts, and the health endpoints. |
+| [docs/accessibility.md](docs/accessibility.md) | What WCAG 2.2 AA means for the reading UI, and what was measured. |
+| [ROADMAP.md](ROADMAP.md) | What each shipped milestone contained. |
 
 ## CI
 

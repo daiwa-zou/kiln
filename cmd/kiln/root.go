@@ -43,6 +43,7 @@ run over unchanged sources costs nothing.`,
 		newBuildCmd(&g),
 		newServeCmd(&g),
 		newWorkerCmd(&g),
+		newMCPCmd(&g),
 	)
 
 	return cmd

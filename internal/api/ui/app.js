@@ -1958,10 +1958,15 @@ async function boot() {
       });
     }
 
-    // The workspace choice survives a reload; a remembered slug that no
-    // longer exists falls back to the first.
+    // The workspace choice survives a reload. A remembered slug that no longer
+    // exists falls back to the first bench that actually has pages, rather
+    // than the first alphabetically: landing on an empty bench shows the
+    // first-run screen and its dead controls to someone whose instance is
+    // fully built, which reads as "my wiki is gone".
     const stored = localStorage.getItem(WORKSPACE_KEY);
-    const initial = workspaces.some((w) => w.slug === stored) ? stored : workspaces[0].slug;
+    const initial = workspaces.some((w) => w.slug === stored)
+      ? stored
+      : (workspaces.find((w) => w.pageCount > 0) ?? workspaces[0]).slug;
     await loadWorkspace(initial);
   } catch (err) {
     if (err.handled) return;

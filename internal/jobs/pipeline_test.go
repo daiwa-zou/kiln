@@ -273,6 +273,44 @@ func TestBuildValidatesStructuredOutputToo(t *testing.T) {
 	}
 }
 
+// The overview is the first page anyone opens, and it names the bench it
+// describes. Naming it with the workspace UUID labelled every wiki with a
+// string that identifies nothing to a reader.
+func TestBuildOverviewNamesTheBenchNotItsUUID(t *testing.T) {
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.filesByAttempt[0] = map[string]string{
+		"entities/ripple.md": validPage("entity", "Ripple"),
+	}
+
+	p := testPipeline(store, runner)
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"})
+	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
+	req.WorkspaceID = "23f3db5b-a891-4f9b-9bda-9a3674db0c1b"
+	req.WorkspaceSlug = "paper-shed"
+
+	if _, err := p.Build(context.Background(), req); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	imp := store.lastImport()
+	if imp == nil {
+		t.Fatal("nothing was imported")
+	}
+	if !strings.Contains(imp.Overview, "paper-shed") {
+		t.Errorf("overview does not name the bench:\n%s", imp.Overview)
+	}
+	if strings.Contains(imp.Overview, req.WorkspaceID) {
+		t.Errorf("overview still shows the raw UUID:\n%s", imp.Overview)
+	}
+
+	// A request without a slug still has to render something, so the id
+	// remains the fallback rather than leaving the label blank.
+	req.WorkspaceSlug = ""
+	if got := req.workspaceLabel(); got != req.WorkspaceID {
+		t.Errorf("workspaceLabel() = %q, want the id as fallback", got)
+	}
+}
+
 func TestBuildNoChangesCostsNothing(t *testing.T) {
 	store := newMemStore()
 	runner := newScriptedRunner()
