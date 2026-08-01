@@ -320,3 +320,55 @@ func TestSearchReturnsSnippets(t *testing.T) {
 		t.Errorf("snippet %q carries no [[[match]]] marker", hits[0].Snippet)
 	}
 }
+
+// A question is not a keyword list. plainto_tsquery ANDs every lexeme, so one
+// incidental word from a sentence -- present in the question, absent from the
+// page -- used to sink an otherwise perfect match and return nothing at all.
+func TestSearchAnswersQuestionsNotJustKeywords(t *testing.T) {
+	js, ws := jobStore(t)
+	ctx := context.Background()
+
+	pages := []wiki.Page{
+		page("entities/worker.md", "worker", "entity", "Worker",
+			"# Worker\n\nA worker dies mid-build and its run returns to the queue after the stale deadline.\n"),
+		page("concepts/budget.md", "budget", "concept", "Budget",
+			"# Budget\n\nThe ledger reserves before each call so the run ceiling holds at any concurrency.\n"),
+	}
+	if err := js.Import(ctx, jobs.ImportRequest{WorkspaceID: ws, UpsertPages: pages}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	// "happens" and "when" appear nowhere in the worker page; under AND
+	// semantics this returned zero rows.
+	hits, err := js.Search(ctx, ws, "what happens when a worker dies", 10, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("a question matching a page on every meaningful term returned nothing")
+	}
+	if hits[0].Slug != "worker" {
+		t.Errorf("top hit = %q, want worker", hits[0].Slug)
+	}
+
+	// Ordering is the other half of the change: a page matching every term
+	// must still outrank one matching only some, or keyword search regresses
+	// to keep question search working.
+	hits, err = js.Search(ctx, ws, "ledger reserves", 10, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) == 0 || hits[0].Slug != "budget" {
+		t.Errorf("hits = %+v, want budget ranked first on an all-terms match", hits)
+	}
+
+	// A query sharing no vocabulary with the corpus still finds nothing --
+	// widening membership must not turn search into "everything, ranked".
+	hits, err = js.Search(ctx, ws, "kubernetes ingress certificates", 10, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("unrelated query returned %d hit(s): %+v", len(hits), hits)
+	}
+}

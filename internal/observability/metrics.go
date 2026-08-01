@@ -42,6 +42,13 @@ type Metrics struct {
 	// a scrape must not become a database query multiplier when several
 	// Prometheus replicas point at several kiln replicas.
 	queueDepth *prometheus.GaugeVec
+
+	// Searches by outcome. Deliberately a counter with a coarse label rather
+	// than a log of queries: how often search comes back empty is the number
+	// that decides whether lexical matching is good enough or whether the
+	// wiki needs semantic retrieval, and it answers that without recording
+	// what anyone asked.
+	searches *prometheus.CounterVec
 }
 
 // NewMetrics builds the registry and every collector.
@@ -111,12 +118,17 @@ func NewMetrics() *Metrics {
 			Name: "kiln_queue_depth",
 			Help: "Runs waiting or executing, by status. The signal to scale workers on.",
 		}, []string{"status"}),
+
+		searches: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kiln_searches_total",
+			Help: "Searches by outcome. A rising empty rate means retrieval is failing its callers, not that nobody is asking.",
+		}, []string{"outcome"}),
 	}
 
 	reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.httpInFlight,
 		m.runsStarted, m.runsFinished, m.runDuration, m.runCost,
-		m.unitsBuilt, m.pagesWritten, m.activeRuns, m.queueDepth,
+		m.unitsBuilt, m.pagesWritten, m.activeRuns, m.queueDepth, m.searches,
 		// Go runtime and process collectors: the questions "is it leaking"
 		// and "is it being throttled" are asked of every service, and
 		// answering them here costs nothing.
@@ -194,6 +206,20 @@ func (m *Metrics) SetQueueDepth(byStatus map[string]int) {
 	for status, n := range byStatus {
 		m.queueDepth.WithLabelValues(status).Set(float64(n))
 	}
+}
+
+// SearchObserved records one search by whether it found anything.
+//
+// The empty rate is the decision input for whether lexical matching suffices:
+// full-text search ranks what matches but cannot match what it has no word in
+// common with, and only the rate of empty results says how often that is
+// actually costing a caller an answer.
+func (m *Metrics) SearchObserved(hits int) {
+	outcome := "hit"
+	if hits == 0 {
+		outcome = "empty"
+	}
+	m.searches.WithLabelValues(outcome).Inc()
 }
 
 // ServeMetrics runs the metrics listener until the context is canceled.

@@ -176,22 +176,46 @@ func (s *WikiStore) LoadPage(ctx context.Context, workspaceID, ref string) (wiki
 }
 
 // Search runs weighted full-text search over live pages.
+//
+// Two queries are built from the input, and the difference is what makes this
+// usable by something that asks questions rather than typing keywords.
+// plainto_tsquery ANDs every lexeme, so "what happens when a worker dies"
+// requires `happen` as much as `worker` -- and a page containing the sentence
+// "worker dies mid-build" matches nothing, because one incidental word from the
+// question is missing. Every term ANDed is the right default for a keyword box
+// and the wrong one for a sentence.
+//
+// So the AND query still decides *order* -- a page matching every term ranks
+// above one matching some, and keyword searches return what they always did --
+// while the OR query decides *membership*. Nothing that used to rank first
+// stops ranking first; results simply continue past where they used to stop.
+//
+// Rewriting `&` to `|` textually is safe: plainto_tsquery has already parsed
+// and sanitized the input, and its output is a well-formed tsquery containing
+// no other operators (phrase distance comes from phraseto_tsquery, negation
+// from to_tsquery, and neither is used here).
 func (s *WikiStore) Search(ctx context.Context, workspaceID, query string, limit, offset int) ([]SearchHit, error) {
 	// The headline marker is [[[match]]] rather than HTML: the UI escapes all
 	// content before rendering, so an HTML marker would arrive escaped and
 	// useless, while a bracket marker survives escaping and is swapped for a
 	// highlight span afterwards.
 	rows, err := s.pool.Query(ctx, `
+		WITH q AS (
+		    SELECT plainto_tsquery('english', $2) AS strict,
+		           CAST(replace(CAST(plainto_tsquery('english', $2) AS text),
+		                        ' & ', ' | ') AS tsquery) AS loose
+		)
 		SELECT p.path, p.slug, p.type, p.title,
-		       ts_rank(p.search, plainto_tsquery('english', $2)) AS rank,
-		       ts_headline('english', p.body, plainto_tsquery('english', $2),
+		       ts_rank(p.search, q.loose) AS rank,
+		       ts_headline('english', p.body, q.loose,
 		                   'StartSel=[[[, StopSel=]]], MaxWords=25, MinWords=10, MaxFragments=1')
 		FROM pages p
 		JOIN wikis w ON w.id = p.wiki_id
+		CROSS JOIN q
 		WHERE w.workspace_id = $1
 		  AND p.deleted_at IS NULL
-		  AND p.search @@ plainto_tsquery('english', $2)
-		ORDER BY rank DESC, p.slug
+		  AND p.search @@ q.loose
+		ORDER BY (p.search @@ q.strict) DESC, rank DESC, p.slug
 		LIMIT $3 OFFSET $4`, workspaceID, query, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("store: search: %w", err)

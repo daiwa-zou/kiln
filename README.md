@@ -265,6 +265,7 @@ cannot read `.golangci.yml`.
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | How the whole system works: topology, the pipeline stage by stage, data flow, cost control, the data model, the MCP server, failure modes, and every configurable. Start here. |
 | [docs/deployment.md](docs/deployment.md) | Running it: requirements, Compose and Kubernetes, upgrades, backups, operating notes. |
+| [docs/storage-and-retrieval.md](docs/storage-and-retrieval.md) | Why Postgres stays the primary store, where full-text search falls down for agent queries, and what to do about it. |
 | [docs/observability.md](docs/observability.md) | Metrics, alerts, and the health endpoints. |
 | [docs/accessibility.md](docs/accessibility.md) | What WCAG 2.2 AA means for the reading UI, and what was measured. |
 | [ROADMAP.md](ROADMAP.md) | What each shipped milestone contained. |
