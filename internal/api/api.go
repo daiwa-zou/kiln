@@ -510,8 +510,13 @@ type SearchHit struct {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	// Results are a pure function of (workspace revision, query), so they are
+	// exactly as cacheable as the page list -- and the ETag already mixes the
+	// query string in. This matters more than it used to: search is the most
+	// expensive read and the one agents hit most, and a polling agent that
+	// re-asks the same question should get a 304 rather than a fresh scan.
 	ws, ok := s.resolve(w, r)
-	if !ok {
+	if !ok || notModified(w, r, ws) {
 		return
 	}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -525,6 +530,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	// Only the first page is counted: paging past the end of a result set is
+	// not a search that found nothing, and counting it would make the empty
+	// rate a function of how far callers scroll.
+	if s.Metrics != nil && offset == 0 {
+		s.Metrics.SearchObserved(len(hits))
 	}
 	out := make([]SearchHit, 0, len(hits))
 	for _, h := range hits {

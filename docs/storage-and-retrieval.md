@@ -130,15 +130,25 @@ pgvector; the change is the image in `docker-compose.yml` and the Helm chart.
 
 **Keep Postgres. Fix retrieval, in three steps, stopping when it is good enough.**
 
-1. **Now — OR + rank, and an ETag on search.** Removes the empty-result failure
-   entirely and makes the most-hit agent endpoint cacheable. No migration, no
-   new dependency, no image change.
-2. **Then — measure.** Log MCP queries that return zero or single-digit results.
-   That data says whether semantic search is actually needed or whether step 1
-   covered it, and it is cheap to collect.
+1. **OR + rank, and an ETag on search — done.** The AND query now decides
+   *order* and the OR query decides *membership*, so a page matching every term
+   still ranks above one matching some: keyword search returns exactly what it
+   did, and question-shaped queries continue past where they used to stop dead.
+   Search also sends an ETag now, which it alone among the read handlers did
+   not. No migration, no dependency, no image change.
+2. **Measure — done.** `kiln_searches_total{outcome="hit"|"empty"}` counts the
+   empty rate without recording what anyone asked. Deliberately a counter with
+   a coarse label rather than a query log: the rate is the decision input, the
+   text is a privacy liability. Only first pages are counted, so paging past
+   the end of a result set does not inflate it.
 3. **When the data says so — pgvector hybrid.** Embed page bodies at import,
    gated by the same content hash that gates generation; fuse FTS and vector
    ranks. Stays inside Postgres and inside the existing cost model.
+
+Step 3 is deliberately not built yet. It is the largest of the three and the
+only one that cannot be justified from first principles — the empty rate from
+step 2 is what says whether it is needed, and shipping an embedding pipeline
+before that number exists would be guessing expensively.
 
 Do not migrate the primary store. The properties the design leans on — atomic
 import, the queue, the cascade, tenancy — are the ones a different engine would
