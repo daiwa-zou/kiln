@@ -194,16 +194,31 @@ func (s *WikiStore) LoadPage(ctx context.Context, workspaceID, ref string) (wiki
 // and sanitized the input, and its output is a well-formed tsquery containing
 // no other operators (phrase distance comes from phraseto_tsquery, negation
 // from to_tsquery, and neither is used here).
-func (s *WikiStore) Search(ctx context.Context, workspaceID, query string, limit, offset int) ([]SearchHit, error) {
+//
+// prefix matches the final lexeme as a prefix, which is what a search box being
+// typed into needs and what a finished query does not. Mid-word, every keystroke
+// is a term no document contains -- "kuber" is not "kubernetes" -- so an
+// as-you-type search without it spends most of its keystrokes showing nothing
+// and only settles once a word happens to end. Only the last lexeme is widened:
+// the earlier words are ones the user finished typing and meant. Callers that
+// submit a completed query leave it off, so the endpoint agents use keeps its
+// exact-term meaning.
+func (s *WikiStore) Search(ctx context.Context, workspaceID, query string, limit, offset int, prefix bool) ([]SearchHit, error) {
 	// The headline marker is [[[match]]] rather than HTML: the UI escapes all
 	// content before rendering, so an HTML marker would arrive escaped and
 	// useless, while a bracket marker survives escaping and is swapped for a
 	// highlight span afterwards.
 	rows, err := s.pool.Query(ctx, `
-		WITH q AS (
-		    SELECT plainto_tsquery('english', $2) AS strict,
-		           CAST(replace(CAST(plainto_tsquery('english', $2) AS text),
-		                        ' & ', ' | ') AS tsquery) AS loose
+		WITH raw AS (
+		    SELECT CAST(plainto_tsquery('english', $2) AS text) AS t,
+		           CAST($5 AS boolean) AS pre
+		), q AS (
+		    SELECT CAST(CASE WHEN t = '' OR NOT pre THEN t
+		                     ELSE t || ':*' END AS tsquery) AS strict,
+		           CAST(CASE WHEN t = '' THEN t
+		                     WHEN pre THEN replace(t, ' & ', ' | ') || ':*'
+		                     ELSE replace(t, ' & ', ' | ') END AS tsquery) AS loose
+		    FROM raw
 		)
 		SELECT p.path, p.slug, p.type, p.title,
 		       ts_rank(p.search, q.loose) AS rank,
@@ -216,7 +231,7 @@ func (s *WikiStore) Search(ctx context.Context, workspaceID, query string, limit
 		  AND p.deleted_at IS NULL
 		  AND p.search @@ q.loose
 		ORDER BY (p.search @@ q.strict) DESC, rank DESC, p.slug
-		LIMIT $3 OFFSET $4`, workspaceID, query, limit, offset)
+		LIMIT $3 OFFSET $4`, workspaceID, query, limit, offset, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("store: search: %w", err)
 	}
