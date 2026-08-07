@@ -22,8 +22,10 @@ func init() {
 	RegisterProvider(ProviderFunc(string(config.RunnerCLI), func(o Options) (Runner, error) {
 		r := NewClaudeRunner(o.Binary)
 		// The subprocess reads untrusted source content; give it an explicit
-		// minimal environment so it can never inherit KILN_* secrets.
-		r.Env = MinimalChildEnv(o.APIKey)
+		// minimal environment so it can never inherit KILN_* secrets. The base
+		// URL rides along so a key valid only at a gateway authenticates here
+		// too, matching what the API runner has always done.
+		r.Env = MinimalChildEnv(o.APIKey, o.BaseURL)
 		return r, nil
 	}))
 

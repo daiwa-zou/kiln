@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Tool sets. Bash is disallowed outright: Read/Grep/Glob/Write/Edit is enough
@@ -56,8 +58,13 @@ func NewClaudeRunner(binary string) *ClaudeRunner {
 //
 // HOME is passed so a logged-in CLI session's credentials still resolve when no
 // API key is configured.
-func MinimalChildEnv(apiKey string) []string {
-	env := make([]string, 0, 6)
+//
+// baseURL redirects the CLI at a gateway or proxy, from agent.base_url. The API
+// runner has always honoured that key; without it here, the same configuration
+// silently meant two different things depending on the runner, and a key valid
+// only at a gateway failed to authenticate with no indication why.
+func MinimalChildEnv(apiKey, baseURL string) []string {
+	env := make([]string, 0, 7)
 	for _, k := range []string{"PATH", "HOME", "TMPDIR", "TERM", "LANG"} {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
@@ -65,6 +72,9 @@ func MinimalChildEnv(apiKey string) []string {
 	}
 	if apiKey != "" {
 		env = append(env, "ANTHROPIC_API_KEY="+apiKey)
+	}
+	if baseURL != "" {
+		env = append(env, "ANTHROPIC_BASE_URL="+baseURL)
 	}
 	return env
 }
@@ -182,7 +192,7 @@ func BuildArgs(req Request) []string {
 			args = append(args, "--json-schema", req.JSONSchema)
 		}
 		if req.SessionID != "" {
-			args = append(args, "--session-id", req.SessionID)
+			args = append(args, "--session-id", SessionUUID(req.SessionID))
 		}
 
 	case StepGenerate:
@@ -199,11 +209,29 @@ func BuildArgs(req Request) []string {
 		}
 		if req.SessionID != "" {
 			// Resume the analyze session so source context stays prompt-cached.
-			args = append(args, "--resume", req.SessionID)
+			args = append(args, "--resume", SessionUUID(req.SessionID))
 		}
 	}
 
 	return append(args, req.Prompt)
+}
+
+// sessionNamespace scopes the derivation below. Arbitrary but fixed: changing
+// it changes every derived id, which would orphan sessions mid-run.
+var sessionNamespace = uuid.MustParse("6f2a1c6e-6f0f-4c9e-9f5a-2b7d1c0a4e33")
+
+// SessionUUID maps a caller's session key onto the UUID the CLI requires.
+//
+// The constraint belongs here rather than upstream: Request.SessionID is an
+// opaque correlation key, and the pipeline builds a readable one
+// ("run-abc123-doc-README-md") that is useful in logs and in the fake runner.
+// Only the CLI insists on a UUID, and rejects anything else outright -- so the
+// translation happens at the boundary that cares.
+//
+// Derivation is deterministic (a version 5 UUID over the key), which is what
+// makes the generate step's --resume find the session --session-id opened.
+func SessionUUID(key string) string {
+	return uuid.NewSHA1(sessionNamespace, []byte(key)).String()
 }
 
 // ParseResult decodes the --output-format json envelope. The CLI may emit

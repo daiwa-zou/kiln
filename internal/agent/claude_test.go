@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -88,8 +90,10 @@ func TestBuildArgsAnalyze(t *testing.T) {
 	if got := flagVal(args, "--max-budget-usd"); got != "0.4" {
 		t.Errorf("--max-budget-usd = %q, want 0.4", got)
 	}
-	if got := flagVal(args, "--session-id"); got != "abc" {
-		t.Errorf("--session-id = %q", got)
+	// The CLI rejects a session id that is not a UUID, so the key is derived
+	// rather than passed through.
+	if got := flagVal(args, "--session-id"); got != SessionUUID("abc") {
+		t.Errorf("--session-id = %q, want %q", got, SessionUUID("abc"))
 	}
 	if containsArg(args, "--add-dir") {
 		t.Error("analyze must not be granted a writable directory")
@@ -124,12 +128,36 @@ func TestBuildArgsGenerate(t *testing.T) {
 	if got := flagVal(args, "--permission-mode"); got != "acceptEdits" {
 		t.Errorf("--permission-mode = %q", got)
 	}
-	// Resuming keeps the source context prompt-cached across the two steps.
-	if got := flagVal(args, "--resume"); got != "abc" {
-		t.Errorf("--resume = %q", got)
+	// Resuming keeps the source context prompt-cached across the two steps, so
+	// it must derive the same id the analyze step opened.
+	if got := flagVal(args, "--resume"); got != SessionUUID("abc") {
+		t.Errorf("--resume = %q, want %q", got, SessionUUID("abc"))
 	}
 	if containsArg(args, "--session-id") {
 		t.Error("generate should resume, not open a new session")
+	}
+}
+
+// The CLI validates --session-id as a UUID and exits non-zero on anything
+// else, which turned every unit of a CLI-runner build into "analyze step
+// failed: exit status 1". The pipeline's readable key ("run-abc-doc-README-md")
+// is not one, so it is derived here.
+func TestSessionUUID(t *testing.T) {
+	const key = "run-bff86c822909b88f-doc-README-md"
+
+	got := SessionUUID(key)
+	if _, err := uuid.Parse(got); err != nil {
+		t.Fatalf("SessionUUID(%q) = %q, which is not a UUID: %v", key, got, err)
+	}
+
+	// Determinism is load-bearing: the generate step resumes by the same id.
+	if again := SessionUUID(key); again != got {
+		t.Errorf("SessionUUID is not deterministic: %q then %q", got, again)
+	}
+	// Two units of one run must not collide onto the same session, or the
+	// second would resume the first's context.
+	if other := SessionUUID(key + "-2"); other == got {
+		t.Error("distinct keys derived the same session id")
 	}
 }
 
@@ -173,8 +201,10 @@ func TestRunParsesEnvelope(t *testing.T) {
 	if res.Usage.Total() == 0 {
 		t.Error("usage was not parsed")
 	}
-	if res.SessionID != "s-1" {
-		t.Errorf("SessionID = %q, want s-1", res.SessionID)
+	// The envelope reports the session the CLI actually ran, which is the
+	// derived UUID rather than the caller's key.
+	if want := SessionUUID("s-1"); res.SessionID != want {
+		t.Errorf("SessionID = %q, want %q", res.SessionID, want)
 	}
 	if err := res.Err(); err != nil {
 		t.Errorf("Err() = %v, want nil", err)
@@ -226,7 +256,7 @@ func TestRunChildEnvExcludesSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	env := MinimalChildEnv("sk-test")
+	env := MinimalChildEnv("sk-test", "")
 	// The fake needs its script; the production env never carries it.
 	env = append(env, "KILN_FAKE_SCRIPT="+string(script))
 
@@ -260,10 +290,33 @@ func TestRunChildEnvExcludesSecrets(t *testing.T) {
 	}
 }
 
+// agent.base_url has always redirected the API runner. Passing it here too is
+// what stops one configuration key meaning two different things depending on
+// which runner is selected -- a key valid only at a gateway would otherwise
+// fail to authenticate through the CLI with nothing to explain why.
+func TestMinimalChildEnvPassesBaseURL(t *testing.T) {
+	const url = "https://gateway.example.com"
+
+	var saw bool
+	for _, kv := range MinimalChildEnv("sk-test", url) {
+		if kv == "ANTHROPIC_BASE_URL="+url {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("ANTHROPIC_BASE_URL=%s did not reach the child environment", url)
+	}
+}
+
 func TestMinimalChildEnvOmitsUnsetKey(t *testing.T) {
-	for _, kv := range MinimalChildEnv("") {
+	for _, kv := range MinimalChildEnv("", "") {
 		if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
 			t.Errorf("empty key should be omitted, got %s", kv)
+		}
+		// An unset base URL must be absent rather than empty: the CLI reads an
+		// empty ANTHROPIC_BASE_URL as a value, not as "use the default".
+		if strings.HasPrefix(kv, "ANTHROPIC_BASE_URL=") {
+			t.Errorf("empty base URL should be omitted, got %s", kv)
 		}
 		if strings.HasPrefix(kv, "KILN_") {
 			t.Errorf("KILN_* variable in minimal env: %s", kv)

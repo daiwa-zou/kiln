@@ -41,6 +41,20 @@ type Store interface {
 	// raised -- questions it wants a human to judge rather than guess at.
 	RecordRun(ctx context.Context, run RunSummary) error
 
+	// SeedRunItems records the plan as pending items before any unit runs, and
+	// MarkRunItem settles one as the run reaches it. Together they are what
+	// makes a build in flight watchable: without them the only observable
+	// states are "running" and "finished", and a bench ingesting a large
+	// repository looks the same five seconds and five minutes in.
+	//
+	// Both are best-effort by contract. Progress reporting must never fail a
+	// build that is otherwise fine, so the pipeline logs their errors and
+	// carries on; RecordRun remains the authority on what actually happened.
+	// Implementations may no-op for runs that have no row yet -- a CLI build
+	// creates its run only at the end, so there is nothing to attach to.
+	SeedRunItems(ctx context.Context, runID string, keys []diff.Key, estCostUSD float64) error
+	MarkRunItem(ctx context.Context, runID string, item ItemSummary) error
+
 	// LoadApprovedDeletions returns source keys whose removal a human approved
 	// through the review queue. Deletion is never automatic: a suspended token
 	// and a genuine deletion look identical at the sync layer, so the cascade
@@ -152,4 +166,9 @@ const (
 	StatusPartial    = "partial"
 	StatusOverBudget = "over_budget"
 	StatusCanceled   = "canceled"
+	// StatusDeferred is a unit that was planned but never reached: the page cap
+	// held it back, or the run stopped early. Only ever a run *item* status. It
+	// exists so a finished run has no items still claiming to be pending, which
+	// would read as work in progress on a run that ended.
+	StatusDeferred = "deferred"
 )

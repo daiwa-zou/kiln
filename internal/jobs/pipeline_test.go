@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -38,6 +39,9 @@ type scriptedRunner struct {
 	// account for it even though it failed.
 	failWithCost bool
 	errEnvelope  bool
+	// workDirExisted records which working directories were real directories at
+	// the moment of the call, for the tests that care that one was.
+	workDirExisted map[string]bool
 }
 
 func newScriptedRunner() *scriptedRunner {
@@ -53,6 +57,15 @@ func (s *scriptedRunner) Run(_ context.Context, req agent.Request) (*agent.Resul
 	defer s.mu.Unlock()
 
 	s.calls = append(s.calls, req)
+	// Recorded here rather than asserted after Build: a working directory the
+	// run created for itself is cleaned up when the run ends, so by then the
+	// only observable difference between "existed" and "never existed" is gone.
+	if fi, err := os.Stat(req.WorkDir); err == nil && fi.IsDir() {
+		if s.workDirExisted == nil {
+			s.workDirExisted = map[string]bool{}
+		}
+		s.workDirExisted[req.WorkDir] = true
+	}
 
 	if s.failWith != nil {
 		if s.failWithCost {
@@ -482,6 +495,162 @@ func TestBuildResumesSessionAcrossSteps(t *testing.T) {
 	}
 	if analyzeID == "" || analyzeID != generateID {
 		t.Errorf("session IDs differ: analyze=%q generate=%q", analyzeID, generateID)
+	}
+}
+
+// A bench of only uploaded documents has no checkout, so the run's SourceDir is
+// empty and the unit's own staged root is the only working directory there is.
+// Passing the run's instead sent the CLI runner an empty WorkDir, which it
+// rejects outright -- every unit of a documents-only bench failed with
+// "agent: WorkDir is required" before it made a single call.
+func TestBuildUsesTheUnitsRootAsWorkDir(t *testing.T) {
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.filesByAttempt[0] = map[string]string{
+		"sources/slides.md": validPage("source", "Slides"),
+	}
+
+	staging := t.TempDir()
+	p := testPipeline(store, runner)
+	m := &mapper.WorkspaceMap{Kind: "upload", Units: []mapper.Unit{{
+		Key: "doc:upload:slides.pdf", Slug: "slides", Hash: "h",
+		Meta: map[string]any{mapper.MetaRoot: staging},
+	}}}
+
+	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
+	// No repository was synced, so no checkout and no module routes -- which is
+	// also why no architecture synthesis is planned (see diff.Router.Plan).
+	req.SourceDir = ""
+	req.Router = diff.Router{DocPaths: map[string]diff.Key{
+		"upload:slides.pdf": "doc:upload:slides.pdf",
+	}}
+
+	if _, err := p.Build(context.Background(), req); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if len(runner.calls) == 0 {
+		t.Fatal("no agent calls were made")
+	}
+	for _, c := range runner.calls {
+		if c.WorkDir != staging {
+			t.Errorf("%s WorkDir = %q, want the unit's staged root %q", c.Step, c.WorkDir, staging)
+		}
+		if !runner.workDirExisted[c.WorkDir] {
+			t.Errorf("%s WorkDir %q was not a directory when called", c.Step, c.WorkDir)
+		}
+	}
+}
+
+// With both a repository and documents in one bench there is a SourceDir, but
+// it is still the wrong directory for a document unit: pointing the agent's
+// Read and Grep at the checkout while asking it about a PDF finds nothing.
+func TestBuildWorkDirFollowsTheUnitNotTheRun(t *testing.T) {
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.filesByAttempt[0] = map[string]string{
+		"entities/ripple.md": validPage("entity", "Ripple"),
+	}
+
+	staging := t.TempDir()
+	p := testPipeline(store, runner)
+	m := testMap(
+		mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"},
+		mapper.Unit{
+			Key: "doc:upload:slides.pdf", Slug: "slides", Hash: "h2",
+			Meta: map[string]any{mapper.MetaRoot: staging},
+		},
+	)
+	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
+
+	if _, err := p.Build(context.Background(), req); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// Session ids embed the unit key, which is how a call is attributed here.
+	for _, c := range runner.calls {
+		want := req.SourceDir
+		if strings.Contains(c.SessionID, sanitize("doc:upload:slides.pdf")) {
+			want = staging
+		}
+		if c.WorkDir != want {
+			t.Errorf("session %q: WorkDir = %q, want %q", c.SessionID, c.WorkDir, want)
+		}
+	}
+}
+
+// A build has to be watchable while it runs, not only reportable once it ends.
+// Items were written in the transaction that finished the run, so the whole
+// plan appeared at once, after the fact -- a bench ingesting a large
+// repository looked identical five seconds and five minutes in.
+func TestBuildPublishesPlanBeforeGenerating(t *testing.T) {
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.filesBySession = map[string]map[int]map[string]string{
+		"module_ripple": {0: {"entities/ripple.md": validPage("entity", "Ripple")}},
+		"module_beta":   {0: {"entities/beta.md": validPage("entity", "Beta")}},
+	}
+
+	p := testPipeline(store, runner)
+	m := testMap(
+		mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h1"},
+		mapper.Unit{Key: "module:beta", Slug: "beta", Hash: "h2"},
+	)
+	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
+	req.Router.ModuleDirs["apps/beta"] = diff.ModuleKey("beta")
+
+	if _, err := p.Build(context.Background(), req); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// Every planned unit is announced up front, so "what is still coming" is
+	// answerable from the moment the plan exists.
+	if len(store.seeded) == 0 {
+		t.Fatal("the plan was never published; a build in flight shows nothing")
+	}
+	seeded := map[diff.Key]bool{}
+	for _, k := range store.seeded {
+		seeded[k] = true
+	}
+	for _, want := range []diff.Key{"module:ripple", "module:beta"} {
+		if !seeded[want] {
+			t.Errorf("%s was planned but never published as pending", want)
+		}
+	}
+
+	// And each one reports starting before it reports finishing, which is what
+	// distinguishes "in progress" from "queued" while the run is live.
+	got := store.marksFor("module:ripple")
+	if len(got) < 2 || got[0] != StatusRunning {
+		t.Errorf("module:ripple transitions = %v, want running first", got)
+	}
+	if last := got[len(got)-1]; last != StatusSucceeded {
+		t.Errorf("module:ripple settled as %q, want %q", last, StatusSucceeded)
+	}
+}
+
+// Progress is reporting, not the product. A build whose pages are correct must
+// not fail because the database would not take a status update.
+func TestBuildSurvivesProgressReportingFailure(t *testing.T) {
+	store := newMemStore()
+	store.failProgress = errors.New("progress table unavailable")
+	runner := newScriptedRunner()
+	runner.filesByAttempt[0] = map[string]string{
+		"entities/ripple.md": validPage("entity", "Ripple"),
+	}
+
+	p := testPipeline(store, runner)
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"})
+
+	res, err := p.Build(context.Background(), testRequest(t, m, diff.ChangeSet{FullRebuild: true}))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.Summary.Status == StatusFailed {
+		t.Errorf("build failed because progress could not be recorded: %s", res.Summary.Err)
+	}
+	if len(store.runs) == 0 {
+		t.Fatal("the run was never recorded")
 	}
 }
 

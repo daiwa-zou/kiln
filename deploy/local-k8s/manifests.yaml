@@ -1,0 +1,600 @@
+# Local Kubernetes stack, rendered and applied by scripts/k8s-local.sh.
+#
+# Placeholders (__NAMESPACE__, __IMAGE__, ...) are substituted by that script.
+# Applying this file directly will not work, and is not meant to -- the node
+# pin and the image tag are discovered at run time. Use `make k8s-up`.
+#
+# This is a development stack, not a small production one. Two things are
+# deliberately different from deploy/helm/kiln:
+#
+#   * Postgres runs in the cluster, on a PersistentVolumeClaim. The chart
+#     assumes a managed database because that is the right answer for a real
+#     deployment; a laptop has no such thing.
+#   * Every kiln workload is pinned to one node. Docker Desktop's Kubernetes is
+#     a multi-node cluster whose nodes do not share the host's image store, so
+#     a locally built image has to be loaded into a node explicitly, and the
+#     default local-path StorageClass binds a volume to whichever node claimed
+#     it. One node makes both facts stop mattering, and lets the blob volume be
+#     a plain ReadWriteOnce claim shared by the API and the worker -- a
+#     restriction that is per-node, not per-pod.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/part-of: kiln-local
+---
+# Non-secret configuration, shared by every role so the API, the worker and the
+# migration can never disagree about what they are pointed at. Secrets are
+# referenced from kiln-secrets in the pod specs instead, so they never land in
+# a ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kiln-config
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+data:
+  KILN_LOG_LEVEL: "__LOG_LEVEL__"
+  # Token auth is not optional here. Inside a pod the server must bind every
+  # interface to be reachable at all, and kiln refuses to serve a wide-open
+  # bind with auth disabled -- there the pod boundary, not the listen address,
+  # is what limits reach, and the process cannot tell the two apart.
+  KILN_AUTH_MODE: "token"
+  KILN_METRICS_ADDR: ":9090"
+  KILN_STORAGE_BACKEND: "fs"
+  KILN_STORAGE_PATH: "/var/lib/kiln/blobs"
+  # The point of this stack: page prose is written by the Claude Code CLI,
+  # shelled out to as `claude -p`, rather than by a direct Messages API call.
+  # The binary is layered onto the runtime image by
+  # deploy/local-k8s/Dockerfile; the stock image does not carry it.
+  KILN_AGENT_RUNNER: "cli"
+  KILN_AGENT_BINARY: "claude"
+  KILN_AGENT_MODEL: "__MODEL__"
+  # Reaches the CLI subprocess as ANTHROPIC_BASE_URL. Empty uses the default
+  # endpoint; set it when the key is only valid at a gateway or proxy.
+  KILN_AGENT_BASE_URL: "__BASE_URL__"
+  KILN_AGENT_RUN_BUDGET_USD: "__RUN_BUDGET_USD__"
+  KILN_AGENT_MAX_PAGES_PER_RUN: "__MAX_PAGES_PER_RUN__"
+  # Per-call ceilings, distinct from the per-run one and enforced by the CLI
+  # itself via --max-budget-usd. They matter more here than in a repository
+  # build: a unit's source text rides in the prompt, so one large document --
+  # a slide deck, a long PDF -- can exceed the stock $0.40 analyze ceiling on
+  # its first call and fail the unit with "budget_exhausted" before it has
+  # written anything. Raised accordingly, and still under the run budget,
+  # which the ledger reserves against before every call.
+  KILN_AGENT_ANALYZE_BUDGET_USD: "__ANALYZE_BUDGET_USD__"
+  KILN_AGENT_PAGE_BUDGET_USD: "__PAGE_BUDGET_USD__"
+---
+# Blob storage for uploads and run artifacts. The fs backend rather than MinIO:
+# one fewer moving part, and with every consumer on one node the objection to
+# fs (a worker cannot read a document that landed on another node's disk) does
+# not apply.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kiln-blobs
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: storage
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Staging area for local repositories and documents pushed in with
+# `make k8s-sync SRC=<path>`. It exists because hostPath does not help here:
+# the cluster's nodes are containers that do not see the host's filesystem, so
+# a local source has to be copied in rather than mounted.
+# The worker's HOME, and a volume rather than an emptyDir for one reason: an
+# OAuth session credential rotates. The CLI spends the refresh token and writes
+# a new pair back, so an ephemeral HOME means every pod restart reverts to the
+# exported file whose refresh token has already been spent -- which surfaces as
+# "OAuth session expired and could not be refreshed" on the second deploy, not
+# the first. An API key needs none of this; it does not rotate.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kiln-home
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: worker
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kiln-sources
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: sources
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: postgres
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kiln
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kiln
+        app.kubernetes.io/component: postgres
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: __NODE__
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              value: kiln
+            - name: POSTGRES_DB
+              value: kiln
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kiln-secrets
+                  key: postgres-password
+            # A subdirectory rather than the mount root: some volume drivers
+            # leave the root non-empty, and initdb refuses a dirty directory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            # The real user and database, not just an open port: an
+            # initializing Postgres accepts connections before it is usable.
+            exec:
+              command: ["pg_isready", "-U", "kiln", "-d", "kiln"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  # Deliberately a volumeClaimTemplate: deleting the StatefulSet leaves the
+  # claim behind, which is what makes `make k8s-down` non-destructive.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 8Gi
+---
+# Migrations run as their own object, before the API and workers roll: both
+# refuse to start against an unexpected schema version. The advisory lock in
+# `kiln admin migrate` makes a re-run safe, so the script recreates this Job on
+# every `up`.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kiln-migrate
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kiln
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: __NODE__
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres -U kiln -d kiln; do sleep 2; done
+      containers:
+        - name: migrate
+          image: __IMAGE__
+          imagePullPolicy: Never
+          args: ["admin", "migrate"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - configMapRef:
+                name: kiln-config
+          env:
+            - name: KILN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: kiln-secrets
+                  key: database-url
+            - name: KILN_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kiln-secrets
+                  key: master-key
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+# @stage workloads
+#
+# Everything above is applied and waited on first: the database, its schema,
+# and the volumes. Everything below refuses to start until that is true --
+# both roles check the schema version on boot and exit if it is not the one
+# they were built against -- so applying them together only produces a
+# CrashLoopBackOff that resolves itself a minute later. scripts/k8s-local.sh
+# splits the file on this line.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kiln
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: api
+spec:
+  # LoadBalancer, not NodePort. Docker Desktop publishes a LoadBalancer's port
+  # on the host; on its multi-node cluster a NodePort is reachable only from
+  # inside the cluster network, so the UI would be unreachable from a browser.
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: __PORT__
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kiln-api
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kiln
+      app.kubernetes.io/component: api
+  strategy:
+    # The blob claim is ReadWriteOnce. A surging replacement pod would sit
+    # Pending on the volume while the old one holds it, so replace in place.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kiln
+        app.kubernetes.io/component: api
+      annotations:
+        # The tag is fixed, so the pod spec would otherwise not change when the
+        # image is rebuilt and the Deployment would keep the stale pod. This
+        # makes a rebuild a spec change, which rolls it.
+        kiln.local/image-id: "__IMAGE_ID__"
+        # Secrets reach these pods as environment variables, which Kubernetes
+        # resolves once at pod creation and never refreshes. Without this,
+        # supplying an API key to a stack that is already up would update the
+        # Secret, change no pod spec, roll nothing, and leave the worker running
+        # with the old value -- while `k8s-up` reported success.
+        kiln.local/secret-hash: "__SECRET_HASH__"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: __NODE__
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: api
+          image: __IMAGE__
+          imagePullPolicy: Never
+          args: ["serve"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - configMapRef:
+                name: kiln-config
+          env:
+            - name: KILN_HTTP_ADDR
+              value: ":8080"
+            - name: KILN_PUBLIC_URL
+              value: "http://localhost:__PORT__"
+            - name: KILN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: kiln-secrets
+                  key: database-url
+            - name: KILN_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kiln-secrets
+                  key: master-key
+            - name: KILN_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kiln-secrets
+                  key: anthropic-api-key
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          readinessProbe:
+            # /readyz reports database reachability; /healthz answers even when
+            # the database is down, which is deliberately not the same question.
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: blobs
+              mountPath: /var/lib/kiln/blobs
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: blobs
+          persistentVolumeClaim:
+            claimName: kiln-blobs
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kiln-worker
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: kiln
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kiln
+      app.kubernetes.io/component: worker
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kiln
+        app.kubernetes.io/component: worker
+      annotations:
+        kiln.local/image-id: "__IMAGE_ID__"
+        # Secrets reach these pods as environment variables, which Kubernetes
+        # resolves once at pod creation and never refreshes. Without this,
+        # supplying an API key to a stack that is already up would update the
+        # Secret, change no pod spec, roll nothing, and leave the worker running
+        # with the old value -- while `k8s-up` reported success.
+        kiln.local/secret-hash: "__SECRET_HASH__"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: __NODE__
+      # Above worker.drain_grace, so SIGTERM lets an in-flight build land
+      # instead of requeueing work the model was already paid for.
+      terminationGracePeriodSeconds: 300
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      initContainers:
+        # Copies the optional Claude Code credential into HOME rather than
+        # mounting it there. A secret volume is read-only, and an OAuth session
+        # credential is not read-only data: the access token in it is short
+        # lived, and the CLI is expected to spend the refresh token and write
+        # the new pair back. Mounted directly, the first expiry became a hard
+        # "OAuth access token has expired. Re-authenticate to continue" that no
+        # amount of restarting could clear. Copied, the CLI refreshes in place
+        # and the pod keeps working.
+        #
+        # The refresh does not outlive the pod -- HOME is an emptyDir -- so a
+        # restart falls back to the exported file and refreshes again.
+        - name: seed-claude-credentials
+          image: __IMAGE__
+          imagePullPolicy: Never
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              src=/var/run/kiln/claude/.credentials.json
+              dst=/home/kiln/.claude/.credentials.json
+              # The secret is optional; no file means the API key is in use.
+              [ -f "$src" ] || exit 0
+              # Never overwrite: HOME persists, so what is already there has
+              # been refreshed by the CLI and is newer than the export. Copying
+              # over it would reinstate a spent refresh token on every restart,
+              # which is the exact failure this seeding exists to avoid.
+              # `make k8s-reauth` clears it to take a fresh export.
+              [ -f "$dst" ] && exit 0
+              mkdir -p /home/kiln/.claude
+              cp "$src" "$dst"
+              chmod 600 "$dst"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: home
+              mountPath: /home/kiln
+            - name: claude-credentials
+              mountPath: /var/run/kiln/claude
+              readOnly: true
+      containers:
+        - name: worker
+          image: __IMAGE__
+          imagePullPolicy: Never
+          args: ["worker"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - configMapRef:
+                name: kiln-config
+          env:
+            # kiln hands the subprocess a minimal environment -- PATH, HOME,
+            # TMPDIR, TERM, LANG and the API key, and nothing else -- so that a
+            # process reading untrusted source content can never inherit
+            # KILN_* secrets. Both paths below must therefore be writable: the
+            # CLI keeps its state under HOME and stages work under TMPDIR.
+            - name: HOME
+              value: /home/kiln
+            - name: TMPDIR
+              value: /tmp
+            # Allowlist for local-path connectors. Only the staging volume, so
+            # a connector config -- which is API-writable data -- cannot point
+            # the worker at the rest of the container.
+            - name: KILN_WORKER_PERMITTED_SOURCE_ROOTS
+              value: /sources
+            - name: KILN_WORKER_POLL_INTERVAL
+              value: 2s
+            - name: KILN_DATABASE_MAX_CONNS
+              value: "6"
+            - name: KILN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: kiln-secrets
+                  key: database-url
+            - name: KILN_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kiln-secrets
+                  key: master-key
+            - name: KILN_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kiln-secrets
+                  key: anthropic-api-key
+                  optional: true
+          ports:
+            - name: metrics
+              containerPort: 9090
+          # No probes: a worker holds no serving listener, "healthy" for it
+          # means "claiming", and a liveness probe could only kill it mid-build.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/kiln
+            - name: blobs
+              mountPath: /var/lib/kiln/blobs
+            - name: sources
+              mountPath: /sources
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: home
+          persistentVolumeClaim:
+            claimName: kiln-home
+        - name: blobs
+          persistentVolumeClaim:
+            claimName: kiln-blobs
+        - name: sources
+          persistentVolumeClaim:
+            claimName: kiln-sources
+        - name: claude-credentials
+          secret:
+            secretName: kiln-claude-credentials
+            optional: true
+            # Secret volumes are owned by root:fsGroup, so 0440 is what "the
+            # kiln user can read this and nobody else" costs here. The init
+            # container re-writes it as 0600 in HOME, which is what the CLI
+            # expects of a credential it owns.
+            defaultMode: 0440
+            items:
+              - key: credentials.json
+                path: .credentials.json

@@ -109,6 +109,15 @@ See [`deploy/kubernetes/`](../deploy/kubernetes) for manifests and
   gets its grace window before being requeued. Cutting that short turns
   paid-for work into a requeue.
 
+Neither is meant for a laptop: the chart assumes a managed Postgres and an
+S3-compatible bucket, and its `fs` storage backend is an `emptyDir` that does
+not survive a pod. For a persistent single-machine instance on Docker Desktop's
+Kubernetes there is `make k8s-up`, described in
+[`deploy/local-k8s/`](../deploy/local-k8s). It runs Postgres and the blob store
+on PersistentVolumeClaims, pins everything to one node, and generates through
+the Claude Code CLI rather than the Messages API. It is a development stack, not
+a small production one.
+
 ## Observability
 
 Prometheus metrics are served on a separate port (`:9090` by default) by both

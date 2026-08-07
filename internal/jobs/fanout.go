@@ -112,7 +112,20 @@ func (p *Pipeline) generateUnits(
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			p.markItem(ctx, req.RunID, ItemSummary{Key: key, Status: StatusRunning}, log)
+
 			out := p.generateUnit(ctx, req, key, units[string(key)], base)
+
+			// Settled here rather than only in mergeOutcomes, which runs after
+			// every unit has finished: at concurrency 1 a twelve-unit build
+			// would otherwise show nothing until the last one landed. What is
+			// written here is provisional -- mergeOutcomes still applies the
+			// cross-unit checks and RecordRun remains the authority -- but it
+			// is right for the common case and visible immediately.
+			p.markItem(ctx, req.RunID, ItemSummary{
+				Key: key, Status: itemStatus(out), CostUSD: out.CostUSD,
+				Turns: out.Turns, Err: errText(out.Err),
+			}, log)
 
 			if errors.Is(out.Err, errRunBudgetExhausted) {
 				log.Warn("run budget exhausted; remaining units stay stale",
@@ -132,6 +145,37 @@ func (p *Pipeline) generateUnits(
 
 	wg.Wait()
 	return outcomes, halted
+}
+
+// markItem publishes one unit's state mid-run, for anything watching the
+// build. Failures are logged and swallowed: this is reporting, and a build
+// whose pages are correct must not fail because its progress was not recorded.
+func (p *Pipeline) markItem(ctx context.Context, runID string, item ItemSummary, log *slog.Logger) {
+	// context.WithoutCancel so the final state of a unit still lands when the
+	// run is being canceled. Otherwise a Ctrl-C leaves its last unit stuck
+	// reading "running" forever.
+	if err := p.Store.MarkRunItem(context.WithoutCancel(ctx), runID, item); err != nil {
+		log.Warn("could not record unit progress", "key", item.Key, "err", err)
+	}
+}
+
+// itemStatus is the provisional verdict on a unit, from what generateUnit
+// alone can see. mergeOutcomes reaches a final one later using the cross-unit
+// checks -- page-path and slug collisions, links to concurrently written pages
+// -- which no single unit can evaluate. The two agree except where a unit that
+// generated cleanly loses a collision, and RecordRun overwrites this with that.
+func itemStatus(out unitResult) string {
+	if out.Err != nil || len(out.Violations) > 0 {
+		return StatusFailed
+	}
+	return StatusSucceeded
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // mergeOutcomes settles every unit's result into the run: the cross-unit
