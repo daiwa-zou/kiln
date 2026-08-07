@@ -46,7 +46,13 @@ function connectorSummary(c) {
 // does the wiki next catch up with its sources? Priority order matters -- an
 // actual run in motion beats any schedule.
 function nextBuildLine(runs, connectors, pollSeconds) {
-  if (runs.some((r) => r.status === "running")) {
+  const running = runs.find((r) => r.status === "running");
+  if (running) {
+    // How far along, when that is known. A build with no plan yet has decided
+    // nothing to report, and guessing at a number would be worse than silence.
+    if (running.unitsTotal) {
+      return `A build is running now — ${running.unitsDone || 0} of ${running.unitsTotal} done.`;
+    }
     return "A build is running now.";
   }
   const queued = runs.find((r) => r.status === "queued");
@@ -460,6 +466,22 @@ async function showSources() {
     const buildActive = runs.some((r) => r.status === "queued" || r.status === "running");
     const uploadConn = connectors.find((c) => c.kind === "upload");
 
+    // A running build's units are fetched eagerly and shown inline rather than
+    // behind the expander finished runs use. Two reasons: this is the one case
+    // where the list answers "what is happening and what is left" rather than
+    // "what did it cost", and the view re-renders every five seconds while a
+    // build is live, which would collapse an expander the reader had opened.
+    const active = runs.find((r) => r.status === "running");
+    let activeUnits = [];
+    if (active) {
+      try {
+        activeUnits = await api(`/workspaces/${ws}/runs/${encodeURIComponent(active.id)}/items`);
+      } catch (err) {
+        if (err?.handled) return;
+        // The run row still renders with its counts; only the unit list is lost.
+      }
+    }
+
     // sec renders one collapsible section. Open is the default; a collapsed
     // choice is read back at render time so re-renders (including the
     // active-run refresh) respect it.
@@ -526,7 +548,13 @@ async function showSources() {
     // Each run reads as one sentence about what happened, not a ledger row.
     const runOutcome = (r) => {
       if (r.status === "queued") return "Waiting to start";
-      if (r.status === "running") return "Ingesting now…";
+      if (r.status === "running") {
+        // Before the plan exists there is genuinely nothing to count, and
+        // "0 of 0" reads as broken rather than as early.
+        if (!r.unitsTotal) return "Ingesting now…";
+        const done = r.unitsDone || 0;
+        return `Ingesting — ${done} of ${r.unitsTotal} ${r.unitsTotal === 1 ? "unit" : "units"} done`;
+      }
       if (r.status === "failed") return "Failed";
       if (r.status === "over_budget") return "Stopped at the budget cap";
       const parts = [];
@@ -536,6 +564,43 @@ async function showSources() {
       if (!parts.length) return "Nothing changed — no cost";
       const n = (r.pagesCreated || 0) + (r.pagesUpdated || 0) + (r.pagesDeleted || 0);
       return `${n === 1 ? "1 page" : `${n} pages`}: ${parts.join(", ")}`;
+    };
+    // Unit states, in the words the reader needs rather than the queue's.
+    const unitLabel = {
+      running: ["working on it", "run-running"],
+      pending: ["waiting", "run-queued"],
+      deferred: ["left for the next run", "run-queued"],
+      failed: ["failed", "run-failed"],
+    };
+    // The live list: what is being worked on, what is queued behind it, what
+    // already landed. Ordered by the API so the first rows are the ones that
+    // answer "is anything happening".
+    const liveUnits = (items) => {
+      if (!items.length) return "";
+      return `<div class="detail run-live-units">${items.map((it) => {
+        const [label, cls] = unitLabel[it.status] || ["done", "run-succeeded"];
+        return `<div class="row">
+          <span class="mono">${esc(it.key)}</span>
+          <span>
+            <span class="chip ${cls}">${esc(label)}</span>
+            ${it.costUsd > 0 ? `<span class="count">${money(it.costUsd)}</span>` : ""}
+          </span>
+        </div>`;
+      }).join("")}</div>`;
+    };
+    // A real <progress>: it is announced to screen readers as a progress bar
+    // with its value, which a styled div is not.
+    const runProgress = (r) => {
+      if (r.status !== "running" || !r.unitsTotal) return "";
+      const done = r.unitsDone || 0;
+      const left = (r.unitsPending || 0) + (r.unitsRunning || 0);
+      return `<div class="detail run-progress">
+        <progress max="${r.unitsTotal}" value="${done}"
+          aria-label="Ingest progress: ${done} of ${r.unitsTotal} units done"></progress>
+        <span class="hint">${left
+          ? `${left} still to go${r.unitsRunning ? `, ${r.unitsRunning} being written now` : ""}`
+          : "finishing up"}</span>
+      </div>`;
     };
     const runRow = (r) => `
       <div class="row" title="${esc(r.created)}">
@@ -550,7 +615,9 @@ async function showSources() {
         </span>
       </div>
       ${r.error ? `<div class="detail hint error">${esc(r.error)}</div>` : ""}
-      ${r.costUsd > 0 ? `<details class="run-units" data-run-items="${esc(r.id)}">
+      ${runProgress(r)}
+      ${r.status === "running" ? liveUnits(activeUnits) : ""}
+      ${r.status !== "running" && r.costUsd > 0 ? `<details class="run-units" data-run-items="${esc(r.id)}">
         <summary>cost by unit</summary>
         <div class="detail">loading…</div>
       </details>` : ""}`;
@@ -804,11 +871,23 @@ async function showGetStarted() {
     const sourceDetail = p.hasSource
       ? `${p.sourceCount} source${p.sourceCount === 1 ? "" : "s"} connected`
       : "A repository, web pages, or documents you upload.";
+    // The first ingest is the longest wait a bench ever imposes, and it is
+    // watched from here on an otherwise empty page. Saying how far along it is
+    // costs one number and answers the only question the reader has.
+    const running = p.runs.find((r) => r.status === "running");
     const ingestDetail = p.active
-      ? "Ingesting now — this page becomes your wiki when it finishes."
+      ? (running && running.unitsTotal
+        ? `Ingesting — ${running.unitsDone || 0} of ${running.unitsTotal} done. This page becomes your wiki when it finishes.`
+        : "Ingesting now — this page becomes your wiki when it finishes.")
       : p.everRan
         ? "Ingested. If no pages appeared, check Ingestion for what the run reported."
         : "Reads every source and writes the pages. Only changed sources cost anything.";
+    const ingestBar = running && running.unitsTotal
+      ? `<div class="run-progress">
+          <progress max="${running.unitsTotal}" value="${running.unitsDone || 0}"
+            aria-label="Ingest progress: ${running.unitsDone || 0} of ${running.unitsTotal} units done"></progress>
+        </div>`
+      : "";
 
     if (!view.done(`<h1>Get started</h1>
       <p class="hint">A bench compiles a wiki from the sources you connect, and
@@ -833,6 +912,7 @@ async function showGetStarted() {
           ${stepIcon(ingestState)}
           <div><strong>Ingest</strong>
             <span class="hint">${esc(ingestDetail)}</span>
+            ${ingestBar}
             ${p.hasSource && !p.active
               ? `<div class="meta"><button class="btn ${p.everRan ? "quiet" : ""}" id="gs-ingest">Ingest now</button>
                  <span class="hint" id="gs-note" role="status"></span></div>`

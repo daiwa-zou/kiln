@@ -199,6 +199,7 @@ make migrate           # apply schema (advisory-lock guarded, safe to run concur
 make dev-up            # one command: database, schema, a built wiki, then the server
 make dev               # just the server + worker, against a wiki that already exists
 make db-up / db-down   # manage the test Postgres container
+make k8s-up            # a persistent local instance on Docker Desktop's Kubernetes
 ```
 
 Integration tests key off `KILN_TEST_DATABASE_URL` and skip themselves when it is
@@ -248,7 +249,9 @@ curl -X POST localhost:8080/api/v1/workspaces/kiln/connectors \
 curl -X POST localhost:8080/api/v1/workspaces/kiln/runs
 ```
 
-then watch it on the Runs view. The Sources view also takes document uploads
+then watch it on the Runs view, which reports the plan as it executes — how many
+units are done, which one is being written now, and what is still queued behind
+it. `KILN_AGENT_FAKE_LATENCY=2s` slows calls enough to watch that happen. The Sources view also takes document uploads
 (drag-and-drop; stored via `storage.*`, fs-backed in dev) and web page sources,
 and a bench fed only by documents or web pages builds without any repository. The fake runner
 charges a synthetic $0.01/call so cost columns, estimates, and budget windows
@@ -258,6 +261,34 @@ enough to watch state transitions.
 
 `make lint` needs golangci-lint **v2** (`brew install golangci-lint`); the v1 series
 cannot read `.golangci.yml`.
+
+### Local Kubernetes, generating through the Claude Code CLI
+
+`make dev-up` proves the pipeline; it does not prove generation, because the
+fake runner writes the prose. For that there is a persistent instance on the
+Kubernetes built into Docker Desktop, with `agent.runner = "cli"` — the worker
+shells out to `claude -p` against the real sources:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... make k8s-up       # then open http://localhost:8080
+```
+
+Postgres, the blob store, and a staging area for local sources are all on
+PersistentVolumeClaims, so `make k8s-down` stops the workloads without losing
+the wiki and `make k8s-up` picks it back up. `make k8s-purge` is the destructive
+one. Unlike `make dev-up`, **this spends real money on every build**; the run
+budget and page cap default low for that reason.
+
+A local repository is copied in rather than mounted — the cluster's nodes are
+containers that cannot see your filesystem:
+
+```bash
+make k8s-sync SRC=~/code/my-project     # ingest it as /sources/my-project
+```
+
+What it creates, how it is configured, and why it is shaped the way it is:
+[deploy/local-k8s/README.md](deploy/local-k8s/README.md). It is a development
+stack, not a small production one — for that, use the Helm chart.
 
 ## Documentation
 

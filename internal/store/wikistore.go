@@ -488,15 +488,38 @@ func (s *WikiStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 		}
 	}
 
+	// Upsert, not insert: a queued run seeded its plan as pending items before
+	// generating anything, so most of these rows already exist. This settles
+	// them, and remains correct for a CLI run whose items are all new.
 	for _, item := range run.Items {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, est_cost_usd, turns, error, finished_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())`,
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
+			ON CONFLICT (run_id, cache_key) DO UPDATE SET
+			    status       = EXCLUDED.status,
+			    cost_usd     = EXCLUDED.cost_usd,
+			    est_cost_usd = COALESCE(EXCLUDED.est_cost_usd, run_items.est_cost_usd),
+			    turns        = EXCLUDED.turns,
+			    error        = EXCLUDED.error,
+			    finished_at  = EXCLUDED.finished_at`,
 			runID, item.Key.Prefix(), string(item.Key), item.Status,
 			item.CostUSD, nullableFloat(item.EstCostUSD), item.Turns, nullable(item.Err),
 		); err != nil {
-			return fmt.Errorf("store: insert run item %s: %w", item.Key, err)
+			return fmt.Errorf("store: record run item %s: %w", item.Key, err)
 		}
+	}
+
+	// Anything still pending or running when the run ends was planned and never
+	// reached -- held back by the page cap, or dropped when the run stopped
+	// early. Left alone it would read as work in progress on a finished run,
+	// which is worse than saying nothing: it is a progress bar that never
+	// completes. The units keep their stale hashes and are picked up next run.
+	if _, err := tx.Exec(ctx, `
+		UPDATE run_items SET status = $2, finished_at = now()
+		WHERE run_id = $1 AND status IN ('pending', 'running')`,
+		runID, jobs.StatusDeferred,
+	); err != nil {
+		return fmt.Errorf("store: settle unreached run items: %w", err)
 	}
 
 	// Agent-raised review flags land with the run that raised them.

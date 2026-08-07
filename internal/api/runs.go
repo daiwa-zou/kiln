@@ -18,6 +18,7 @@ import (
 type RunStore interface {
 	ListRuns(ctx context.Context, workspaceID string, limit, offset int) ([]store.RunRow, error)
 	ListRunItems(ctx context.Context, workspaceID, runID string) ([]store.RunItemRow, error)
+	RunProgressFor(ctx context.Context, workspaceID string, runIDs []string) (map[string]store.RunProgress, error)
 	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (runID string, created bool, err error)
 	EnqueueRunOpts(ctx context.Context, workspaceID, trigger, connectorID string, opts store.EnqueueOptions) (runID string, created bool, err error)
 	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
@@ -45,6 +46,14 @@ type RunSummaryJSON struct {
 	// NotBefore is when a debounced queued run becomes claimable, so the UI
 	// can say when the next build starts rather than shrugging.
 	NotBefore string `json:"notBefore,omitempty"`
+
+	// Unit counts, so a run in flight reports how far along it is without the
+	// dashboard fetching every item of every listed run. Absent on a run whose
+	// plan does not exist yet -- a queued run has decided nothing.
+	UnitsTotal   int `json:"unitsTotal,omitempty"`
+	UnitsDone    int `json:"unitsDone,omitempty"`
+	UnitsRunning int `json:"unitsRunning,omitempty"`
+	UnitsPending int `json:"unitsPending,omitempty"`
 }
 
 // handleRunsList returns a workspace's runs, newest first. Deliberately not
@@ -62,18 +71,39 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// One aggregate for the whole page rather than a query per run: the
+	// dashboard lists ten at a time and polls while a build is live.
+	ids := make([]string, 0, len(rows))
+	for _, run := range rows {
+		ids = append(ids, run.ID)
+	}
+	progress, err := s.Runs.RunProgressFor(r.Context(), ws.ID, ids)
+	if err != nil {
+		// A run's outcome is worth more than its progress bar. Losing the
+		// counts degrades the view; failing the request empties it.
+		if s.Log != nil {
+			s.Log.Error("loading run progress failed", "err", err)
+		}
+		progress = nil
+	}
+
 	out := make([]RunSummaryJSON, 0, len(rows))
 	for _, run := range rows {
+		p := progress[run.ID]
 		out = append(out, RunSummaryJSON{
 			ID: run.ID, Trigger: run.Trigger, Ref: run.Ref, Status: run.Status,
 			CostUSD:      run.CostUSD,
 			PagesCreated: run.PagesCreated, PagesUpdated: run.PagesUpdated,
 			PagesDeleted: run.PagesDeleted,
 			Error:        run.Error, ClaimedBy: run.ClaimedBy,
-			Created:   run.CreatedAt.UTC().Format(time.RFC3339),
-			Started:   timeOrEmpty(run.StartedAt),
-			Finished:  timeOrEmpty(run.FinishedAt),
-			NotBefore: timeOrEmpty(run.NotBefore),
+			Created:      run.CreatedAt.UTC().Format(time.RFC3339),
+			Started:      timeOrEmpty(run.StartedAt),
+			Finished:     timeOrEmpty(run.FinishedAt),
+			NotBefore:    timeOrEmpty(run.NotBefore),
+			UnitsTotal:   p.Total,
+			UnitsDone:    p.Done,
+			UnitsRunning: p.Running,
+			UnitsPending: p.Pending,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
