@@ -37,7 +37,7 @@ type FakeRunner struct {
 // enforcement means, which is "derived from a pricing table that may not have
 // an entry for this model". Claiming otherwise makes every dev build demand a
 // pricing entry for whatever placeholder model name is configured.
-func (r *FakeRunner) Capabilities() Capabilities {
+func (f *FakeRunner) Capabilities() Capabilities {
 	return Capabilities{WritesFiles: false, EstimatesCost: false}
 }
 
