@@ -294,7 +294,7 @@ func (errStore) LoadPageSummaries(context.Context, string, int, int) ([]store.Pa
 func (errStore) LoadPage(context.Context, string, string) (wiki.Page, error) {
 	return wiki.Page{}, errLeaky
 }
-func (errStore) Search(context.Context, string, string, int, int) ([]store.SearchHit, error) {
+func (errStore) Search(context.Context, string, string, int, int, bool) ([]store.SearchHit, error) {
 	return nil, errLeaky
 }
 func (errStore) Gaps(context.Context, string, int, int) ([]store.Gap, error) { return nil, errLeaky }

@@ -238,6 +238,23 @@ func TestSearch(t *testing.T) {
 	if len(empty) != 0 {
 		t.Errorf("empty query returned %d hits", len(empty))
 	}
+
+	// The UI searches on every keystroke, so it asks for the trailing word to
+	// be matched as a prefix. Without the flag the same half-word is an exact
+	// term that matches nothing -- the pair is what keeps as-you-type results
+	// from being empty while leaving the default meaning intact.
+	var typing []SearchHit
+	if code := get(t, srv, "/api/v1/workspaces/demo/search?q=dispat&prefix=1", &typing); code != http.StatusOK {
+		t.Fatalf("prefix search status = %d", code)
+	}
+	if len(typing) == 0 {
+		t.Error("prefix=1 found nothing for a half-typed word")
+	}
+	var exact []SearchHit
+	get(t, srv, "/api/v1/workspaces/demo/search?q=dispat", &exact)
+	if len(exact) != 0 {
+		t.Errorf("half-typed word matched %d hit(s) without prefix=1", len(exact))
+	}
 }
 
 func TestGapsListsUnresolvedLinks(t *testing.T) {

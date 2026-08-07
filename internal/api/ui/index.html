@@ -39,9 +39,15 @@
       <summary id="bench-name" aria-label="Bench"></summary>
       <div class="bench-list" id="bench-list"></div>
     </details>
-    <div role="search">
-      <input id="search" type="search" placeholder="Full-text search…" aria-label="Full-text search"
-             enterkeyhint="search" autocomplete="off">
+    <div role="search" class="searchbox">
+      <input id="search" type="search" placeholder="Search…" aria-label="Search"
+             role="combobox" aria-expanded="false" aria-controls="suggest"
+             aria-autocomplete="list" aria-describedby="suggest-help"
+             enterkeyhint="search" autocomplete="off" spellcheck="false">
+      <ul id="suggest" role="listbox" aria-label="Suggestions" hidden></ul>
+      <span class="sr-only" id="suggest-help">Results appear as you type. Use the arrow keys to
+        review them and Enter to open one.</span>
+      <span class="sr-only" id="suggest-status" role="status"></span>
     </div>
     <nav class="nav" aria-labelledby="nav-explore">
       <div class="group-label" id="nav-explore">Explore</div>

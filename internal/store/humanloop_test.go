@@ -307,7 +307,7 @@ func TestSearchReturnsSnippets(t *testing.T) {
 		t.Fatalf("Import: %v", err)
 	}
 
-	hits, err := js.Search(ctx, ws, "retry queue", 10, 0)
+	hits, err := js.Search(ctx, ws, "retry queue", 10, 0, false)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestSearchAnswersQuestionsNotJustKeywords(t *testing.T) {
 
 	// "happens" and "when" appear nowhere in the worker page; under AND
 	// semantics this returned zero rows.
-	hits, err := js.Search(ctx, ws, "what happens when a worker dies", 10, 0)
+	hits, err := js.Search(ctx, ws, "what happens when a worker dies", 10, 0, false)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestSearchAnswersQuestionsNotJustKeywords(t *testing.T) {
 	// Ordering is the other half of the change: a page matching every term
 	// must still outrank one matching only some, or keyword search regresses
 	// to keep question search working.
-	hits, err = js.Search(ctx, ws, "ledger reserves", 10, 0)
+	hits, err = js.Search(ctx, ws, "ledger reserves", 10, 0, false)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -364,11 +364,69 @@ func TestSearchAnswersQuestionsNotJustKeywords(t *testing.T) {
 
 	// A query sharing no vocabulary with the corpus still finds nothing --
 	// widening membership must not turn search into "everything, ranked".
-	hits, err = js.Search(ctx, ws, "kubernetes ingress certificates", 10, 0)
+	hits, err = js.Search(ctx, ws, "kubernetes ingress certificates", 10, 0, false)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(hits) != 0 {
 		t.Errorf("unrelated query returned %d hit(s): %+v", len(hits), hits)
+	}
+}
+
+// A search box being typed into asks a question a keystroke at a time, and
+// every intermediate keystroke is a word no page contains. Without prefix
+// matching the results panel is empty for all but the last character of each
+// word, which reads as "there is nothing here" rather than "keep typing".
+func TestSearchMatchesTheWordStillBeingTyped(t *testing.T) {
+	js, ws := jobStore(t)
+	ctx := context.Background()
+
+	pages := []wiki.Page{
+		page("entities/dispatcher.md", "dispatcher", "entity", "Dispatcher",
+			"# Dispatcher\n\nThe dispatcher hands each run to a worker.\n"),
+		page("concepts/budget.md", "budget", "concept", "Budget",
+			"# Budget\n\nThe ledger reserves before each call.\n"),
+	}
+	if err := js.Import(ctx, jobs.ImportRequest{WorkspaceID: ws, UpsertPages: pages}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	hits, err := js.Search(ctx, ws, "dispat", 10, 0, true)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) == 0 || hits[0].Slug != "dispatcher" {
+		t.Errorf("hits = %+v, want dispatcher for a half-typed word", hits)
+	}
+
+	// The same half-word without the flag still finds nothing: the endpoint an
+	// agent submits a finished query to keeps meaning exact terms.
+	hits, err = js.Search(ctx, ws, "dispat", 10, 0, false)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("prefix matching leaked into the default: %+v", hits)
+	}
+
+	// Only the trailing word is widened. "ledger" is finished and absent from
+	// the dispatcher page, so it must still exclude it rather than degrade to
+	// an OR over prefixes of everything.
+	hits, err = js.Search(ctx, ws, "ledger reser", 10, 0, true)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) == 0 || hits[0].Slug != "budget" {
+		t.Errorf("hits = %+v, want budget ranked first while its last word is typed", hits)
+	}
+
+	// A query of nothing but stopwords reduces to an empty tsquery; appending a
+	// prefix marker to that is a syntax error, not a search.
+	hits, err = js.Search(ctx, ws, "the", 10, 0, true)
+	if err != nil {
+		t.Fatalf("Search on a stopword-only query: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("stopword-only query returned %+v", hits)
 	}
 }

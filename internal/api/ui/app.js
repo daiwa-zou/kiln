@@ -202,7 +202,17 @@ const api = async (path, opts = {}) => {
   const cached = method === "GET" ? etagCache.get(path) : null;
   if (cached) headers["If-None-Match"] = cached.etag;
 
-  const res = await fetch(`/api/v1${path}`, { method, headers, body });
+  // Search-as-you-type abandons a request per keystroke. An abort is a normal
+  // outcome there, not a failure, so it is pre-marked handled: every existing
+  // catch already skips handled errors, and none of them should paint a banner
+  // because the user kept typing.
+  let res;
+  try {
+    res = await fetch(`/api/v1${path}`, { method, headers, body, signal: opts.signal });
+  } catch (err) {
+    if (err?.name === "AbortError") { err.aborted = true; err.handled = true; }
+    throw err;
+  }
   if (res.status === 304 && cached) return cached.data;
   if (res.status === 401) {
     showTokenForm(Boolean(token));
@@ -928,6 +938,43 @@ async function showGaps() {
   }
 }
 
+// ---- review icons -----------------------------------------------------------
+// A review list repeats the same handful of words down the page: what is being
+// asked about, and once answered, what was decided. As glyphs those two columns
+// are scannable at a glance; as text they were near-identical chips to be read
+// one by one. Drawn in currentColor like the source-row controls, aria-hidden
+// because the word rides alongside as the accessible name -- replaced on screen,
+// never actually removed. Names are distinct from sources.js's: both files are
+// classic scripts sharing one global scope, where a repeated top-level const is
+// a SyntaxError that would take down the whole UI.
+const iconSave = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M2 2h9.2L14 4.8V14H2V2zM5.2 3h4.4v3.2H5.2zM4 9h8v4H4z"/></svg>`;
+const iconDeletion = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M6 1h4v1h4v2H2V2h4V1zM3 5h10l-.8 10H3.8L3 5zm3 2v6h1V7H6zm3 0v6h1V7H9z"/></svg>`;
+const iconContradiction = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.6 5.6h10.8v1.8H2.6zM2.6 9h10.8v1.8H2.6zM10.4 1.4l1.7.9-6.5 12.4-1.7-.9z"/></svg>`;
+const iconUncertain = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6c-2.3 0-4 1.5-4.2 3.6l2 .2C5.9 4.2 6.8 3.5 8 3.5c1.2 0 2 .6 2 1.5 0 .7-.4 1.2-1.3 1.9-1.1.9-1.7 1.6-1.7 2.9v.6h2v-.5c0-.8.3-1.2 1.2-1.9C11.4 7.1 12 6.2 12 5c0-2-1.6-3.4-4-3.4zM6.9 12.1h2.2v2.3H6.9z"/></svg>`;
+const iconGap = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2h4.4v1.8H3.8v2.6H2V2zM9.6 2H14v4.4h-1.8V3.8H9.6V2zM2 9.6h1.8v2.6h2.6V14H2V9.6zM12.2 9.6H14V14H9.6v-1.8h2.6V9.6z"/></svg>`;
+const iconBudget = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M1 3h14v10H1V3zm1.8 1.8v6.4h10.4V4.8H2.8z"/><path d="M8 5.9a2.1 2.1 0 1 1 0 4.2 2.1 2.1 0 0 1 0-4.2z"/></svg>`;
+const iconStorage = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.2c3.3 0 5.8 1 5.8 2.2S11.3 5.6 8 5.6 2.2 4.6 2.2 3.4 4.7 1.2 8 1.2zM2.2 5.4c1.3.9 3.4 1.4 5.8 1.4s4.5-.5 5.8-1.4v2.4c0 1.2-2.5 2.2-5.8 2.2s-5.8-1-5.8-2.2V5.4zM2.2 9.6c1.3.9 3.4 1.4 5.8 1.4s4.5-.5 5.8-1.4V12c0 1.2-2.5 2.2-5.8 2.2S2.2 13.2 2.2 12V9.6z"/></svg>`;
+const iconApproved = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm3.5 4.6l1.2 1.2-5.6 5.6-3.8-3.8 1.2-1.2 2.6 2.6 4.4-4.4z"/></svg>`;
+const iconResolved = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM4.5 7h7v2h-7V7z"/></svg>`;
+const iconApprove = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 12.6L1.9 8.3l1.6-1.6 2.7 2.7 6.3-6.3 1.6 1.6z"/></svg>`;
+const iconKeep = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.2l5.6 2.3v3.9c0 3.3-2.3 6.1-5.6 7.4-3.3-1.3-5.6-4.1-5.6-7.4V3.5L8 1.2z"/></svg>`;
+const iconDismiss = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.7 4.7l-1.4-1.4L8 6.6 4.7 3.3 3.3 4.7 6.6 8l-3.3 3.3 1.4 1.4L8 9.4l3.3 3.3 1.4-1.4L9.4 8z"/></svg>`;
+
+const REVIEW_KIND_ICONS = {
+  deletion: iconDeletion, contradiction: iconContradiction, uncertain: iconUncertain,
+  gap: iconGap, budget: iconBudget, storage: iconStorage,
+};
+const REVIEW_STATUS_ICONS = { approved: iconApproved, resolved: iconResolved };
+const REVIEW_ACTION_ICONS = { approve: iconApprove, keep: iconKeep, dismiss: iconDismiss };
+
+// iconChip swaps a word for its glyph and keeps the word as the tooltip and the
+// accessible name. `kind` is free-form text chosen by whatever filed the review,
+// so anything unmapped falls back to the word it always was -- a chip with no
+// glyph and no label would be a decision nobody can read.
+const iconChip = (icons, name) => icons[name]
+  ? `<span class="chip icon-chip" title="${esc(name)}">${icons[name]}<span class="sr-only">${esc(name)}</span></span>`
+  : `<span class="chip">${esc(name)}</span>`;
+
 // showReviews renders the wiki's questions for its humans: contradictions and
 // uncertainties the agent flagged, and deletions awaiting approval.
 async function showReviews(all) {
@@ -955,35 +1002,29 @@ async function showReviews(all) {
       ${reviews.map((r) => `
         <div class="review">
           <div class="meta">
-            <span class="chip">${esc(r.kind)}</span>
+            ${iconChip(REVIEW_KIND_ICONS, r.kind)}
             ${r.pageSlug ? `<a class="chip" href="#/page/${encodeURIComponent(r.pageSlug)}">${esc(r.pageSlug)}</a>` : ""}
             ${timeTag(r.created)}
-            ${r.status !== "open" ? `<span class="chip">${esc(r.status)}${r.resolved ? " " + esc(r.resolved) : ""}</span>` : ""}
+            ${r.status !== "open" ? iconChip(REVIEW_STATUS_ICONS, r.status) : ""}
+            ${r.status !== "open" ? timeTag(r.resolved, "answered ") : ""}
           </div>
           <strong>${esc(r.title)}</strong>
           <div class="detail">${esc(r.detail)}</div>
           ${r.status === "open" ? (r.actions && r.actions.length ? r.actions : ["dismiss"]).map((a) =>
-            `<button class="btn ${a === "approve" ? "" : "quiet"}" data-review="${esc(r.id)}" data-action="${esc(a)}">${esc(a)}</button>`
+            `<button class="btn ${a === "approve" ? "" : "quiet"}${REVIEW_ACTION_ICONS[a] ? " icon-btn" : ""}"
+               data-review="${esc(r.id)}" data-action="${esc(a)}"
+               aria-label="${esc(a)}" title="${esc(a)}">${REVIEW_ACTION_ICONS[a] || esc(a)}</button>`
           ).join("") : ""}
         </div>`).join("")}`)) return;
 
     for (const b of document.querySelectorAll("[data-review]")) {
       once(b, async () => {
         // Approval authorizes the next build's deletion cascade -- the most
-        // consequential click in the UI gets a two-step confirm, inline.
-        if (b.dataset.action === "approve" && b.dataset.armed !== "true") {
-          b.dataset.armed = "true";
-          b.textContent = "confirm approve";
-          b.classList.add("danger");
-          setTimeout(() => {
-            if (b.isConnected) {
-              b.dataset.armed = "false";
-              b.textContent = "approve";
-              b.classList.remove("danger");
-            }
-          }, 4000);
-          return;
-        }
+        // consequential click in the UI gets a two-step confirm. Via the shared
+        // helper now that the button is a glyph: it saves and restores
+        // innerHTML, where the local copy this replaced rewrote textContent and
+        // would have disarmed into a button reading "approve" in bare text.
+        if (b.dataset.action === "approve" && !armButton(b, "approve")) return;
         try {
           await api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews/${encodeURIComponent(b.dataset.review)}/resolve`,
             { method: "POST", body: { action: b.dataset.action } });
@@ -1548,7 +1589,8 @@ async function showSteering() {
       ${["purpose", "schema"].map((k) => `
         <label class="group-label" for="steering-${k}">${esc(label[k])}</label>
         <textarea id="steering-${k}" rows="8" placeholder="${esc(placeholder[k])}">${esc(docs[k] || "")}</textarea>
-        <button class="btn" data-steer="${k}">Save ${k}</button>
+        <button class="btn icon-btn" data-steer="${k}"
+                aria-label="Save ${esc(k)}" title="Save ${esc(k)}">${iconSave}</button>
         <span class="hint" id="steering-note-${k}" role="status"></span>`).join("")}`)) return;
 
     for (const b of document.querySelectorAll("[data-steer]")) {
@@ -1571,27 +1613,94 @@ async function showSteering() {
   }
 }
 
-async function showSearch(query) {
-  const view = beginView(`Search: ${query}`, null);
-  $("search").value = query;
+// Snippets arrive with [[[match]]] markers; content is escaped first, so
+// swapping the markers for <mark> afterwards cannot introduce markup. Pairwise
+// replacement: a stray [[[ in page text stays literal.
+const snippetHTML = (s) => esc(s).replace(/\[\[\[([\s\S]*?)\]\]\]/g, "<mark>$1</mark>");
+
+// searchURL is one query string for both consumers of search, so the dropdown
+// and the results page can never disagree about what the query meant. prefix=1
+// is the as-you-type contract: the trailing word is still being typed.
+const searchURL = (query, limit) =>
+  `/workspaces/${encodeURIComponent(state.workspace)}/search?q=${encodeURIComponent(query)}` +
+  `&prefix=1${limit ? `&limit=${limit}` : ""}`;
+
+function searchHTML(query, hits) {
+  if (!query) {
+    return `<h1>Search</h1><div class="empty">Type in the search box to search every page.</div>`;
+  }
+  return `<h1>Search</h1>
+    <p class="hint" id="search-count" role="status">${hits.length} result${hits.length === 1 ? "" : "s"} for
+      <strong>${esc(query)}</strong></p>
+    <div class="hits">${hits.map((h) => `<div class="hit">
+      <a href="#/page/${encodeURIComponent(h.slug)}">${esc(h.title || h.slug)}</a>
+      <span class="count"> · ${esc(h.type)}</span>
+      ${h.snippet ? `<div class="snippet">${snippetHTML(h.snippet)}</div>` : ""}
+    </div>`).join("") || `<div class="empty">Nothing matched.</div>`}</div>`;
+}
+
+// searchSeq orders the responses a live search produces. The nav token cannot
+// do this job alone: every keystroke here belongs to the same navigation, so
+// without a second counter a slow request for "wor" would overwrite the
+// results already rendered for "worker".
+let searchSeq = 0;
+let searchAbort = null;
+
+// showSearch renders the results view, either as an arrival (a hash change, a
+// reload, a shared link) or as a live update from a keystroke. The difference
+// is deliberate and total: an arrival is a navigation -- it resets scroll, takes
+// focus, and shows a skeleton -- while a keystroke must do none of those things,
+// because the caret is in the search box and every one of them would yank it out
+// or make the list strobe.
+async function showSearch(query, live = false) {
+  const title = query ? `Search: ${query}` : "Search";
+  const view = live ? null : beginView(title, null);
+  const myNav = nav;
+  const main = $("main");
+  const paint = (html) => {
+    if (nav !== myNav) return false; // the user navigated away mid-flight
+    if (view) return view.done(html);
+    main.innerHTML = html;
+    return true;
+  };
+  if (live) {
+    setTitle(title);
+  } else {
+    $("search").value = query;
+    // beginView moved focus to the results, as it should for a navigation.
+    // This view is the exception: the next thing anyone does with a result
+    // list is refine it, and the field they refine it in is the one they just
+    // pressed Enter in. Taking the caret out of it would end the interaction
+    // the results view exists to continue.
+    $("search").focus({ preventScroll: true });
+  }
+
+  // Claim the view and drop any request still in flight BEFORE the empty-query
+  // exit. Emptying the box is a result in its own right, and a search issued
+  // for the text that was just deleted would otherwise land afterwards and
+  // paint itself back over the cleared page.
+  const my = ++searchSeq;
+  searchAbort?.abort();
+  searchAbort = null;
+  if (!query) { paint(searchHTML("", [])); return; }
+  searchAbort = new AbortController();
+  // The pending class dims the outgoing results, but only after a quarter
+  // second (the delay lives in the CSS transition). A local search answers in
+  // single-digit milliseconds; flashing a loading state at that speed is worse
+  // than showing none at all.
+  if (live) main.querySelector(".hits")?.classList.add("pending");
+
   try {
-    const hits = await api(`/workspaces/${encodeURIComponent(state.workspace)}/search?q=${encodeURIComponent(query)}`);
-    // Snippets arrive with [[[match]]] markers; content is escaped first, so
-    // swapping the markers for <mark> afterwards cannot introduce markup.
-    // Pairwise replacement: a stray [[[ in page text stays literal.
-    const snippet = (s) => esc(s).replace(/\[\[\[([\s\S]*?)\]\]\]/g, "<mark>$1</mark>");
-    view.done(`<h1>Search</h1>
-      <p class="hint">${hits.length} result${hits.length === 1 ? "" : "s"} for
-        <strong>${esc(query)}</strong></p>
-      ${hits.map((h) => `<div class="hit">
-        <a href="#/page/${encodeURIComponent(h.slug)}">${esc(h.title || h.slug)}</a>
-        <span class="count"> · ${esc(h.type)}</span>
-        ${h.snippet ? `<div class="snippet">${snippet(h.snippet)}</div>` : ""}
-      </div>`).join("") || `<div class="empty">Nothing matched.</div>`}`);
+    const hits = await api(searchURL(query), { signal: searchAbort.signal });
+    if (my !== searchSeq) return; // a later keystroke owns the view now
+    paint(searchHTML(query, hits));
   } catch (err) {
-    if (!err.handled) view.done(banner(err));
+    if (err.handled || my !== searchSeq) return;
+    paint(banner(err));
   }
 }
+
+const onSearchView = () => location.hash.startsWith("#/search/") || location.hash === "#/search";
 
 // loadAllPages pages through the summaries endpoint until it runs dry. The
 // server caps a single response; stopping at one page silently truncated the
@@ -1742,6 +1851,235 @@ function openPalette() {
   closePalette = openOverlay($("palette"), () => { closePalette = null; });
 }
 
+// ---- search suggestions -----------------------------------------------------
+// The sidebar box answers on every keystroke, from two sources that answer
+// different questions. The local pass -- "did you mean this page?" -- scores
+// titles, slugs and tags out of the corpus already in memory, so it paints
+// before the keystroke's request has left the machine. The remote pass --
+// "which pages say this?" -- follows a debounce later with snippets. They are
+// independent: a slow network delays the second half of the list, never the
+// first, so the box never feels like it stalled.
+const SUGGEST_DEBOUNCE = 160;
+const SUGGEST_PAGES = 5;
+const SUGGEST_HITS = 6;
+
+let sugRows = [], sugSel = -1, sugTimer = null, sugAbort = null, sugSeq = 0, sugQuery = "";
+
+// matchNames is name completion, deliberately not the palette's matcher. A
+// subsequence match is right for a jump list someone opened on purpose and
+// will read; in a search box it answers "retr" with internal/connector, which
+// reads as a wrong result rather than a loose one. Here the query has to
+// appear in the name, in order and unbroken.
+function matchNames(q) {
+  const needle = q.toLowerCase();
+  const out = [];
+  for (const p of state.pages) {
+    // First field to match wins the row, so a page is offered under its title
+    // where it has one and its slug or tags only when that is the actual hit.
+    for (const [field, text] of
+      [["title", p.title || ""], ["slug", p.slug], ["tags", (p.tags || []).join(" ")]]) {
+      const at = text.toLowerCase().indexOf(needle);
+      if (at < 0) continue;
+      // Word starts beat mid-word matches, and earlier beats later: "work"
+      // should offer Worker before it offers Network topology.
+      const score = (at === 0 || " -_/".includes(text[at - 1]) ? 100 : 0) - at;
+      // Indices, not a substring: fuzzyHi escapes each run separately, so the
+      // highlight can never desynchronize from the text it marks. Length comes
+      // from the needle's code units because that is what indexOf counted.
+      out.push({ p, field, text, score, idx: Array.from({ length: needle.length }, (_, i) => at + i) });
+      break;
+    }
+  }
+  return out.sort((a, b) => b.score - a.score);
+}
+
+function suggestRows(q, hits) {
+  const rows = [], bySlug = new Map();
+  for (const r of matchNames(q).slice(0, SUGGEST_PAGES)) {
+    const row = {
+      html: r.field === "title" ? fuzzyHi(r.text, r.idx) : esc(r.p.title || r.p.slug),
+      kind: r.field === "title" ? r.p.type : `${r.p.type} · ${r.field}`,
+      hash: `#/page/${encodeURIComponent(r.p.slug)}`,
+    };
+    bySlug.set(r.p.slug, row);
+    rows.push(row);
+  }
+  // A page both passes found appears once and keeps the position it was first
+  // shown in -- a row that jumps when the network answers is a row someone
+  // clicks by mistake -- but it takes the snippet with it, because "this page
+  // is named that" and "here is the sentence you asked about" are both worth
+  // knowing and only one of them was on screen.
+  for (const h of hits) {
+    const seen = bySlug.get(h.slug);
+    if (seen) { seen.snippet ??= h.snippet; continue; }
+    const row = {
+      html: esc(h.title || h.slug), kind: h.type, snippet: h.snippet,
+      hash: `#/page/${encodeURIComponent(h.slug)}`,
+    };
+    bySlug.set(h.slug, row);
+    rows.push(row);
+  }
+  // Short enough that the query itself survives the sidebar's width: the row
+  // whose whole job is to show what will be searched must not be the row that
+  // truncates the search terms away.
+  rows.push({
+    html: `All results for “${esc(q)}”`, kind: "full text",
+    hash: `#/search/${encodeURIComponent(q)}`,
+  });
+  return rows;
+}
+
+function renderSuggest(q, hits = []) {
+  // Re-anchor the selection to the row it was on, not to its index: the remote
+  // rows land in the middle of the list, so a fixed index would slide the
+  // highlight onto a different result between a keystroke and its Enter.
+  const held = sugRows[sugSel]?.hash;
+  sugRows = suggestRows(q, hits);
+  sugSel = held ? sugRows.findIndex((r) => r.hash === held) : -1;
+  $("suggest").innerHTML = sugRows.map((r, i) => `<li id="sug-opt-${i}" role="option"
+      aria-selected="${i === sugSel}"${i === sugSel ? ' class="active"' : ""}>
+      <span class="sug-line"><span>${r.html}</span><span class="kind">${esc(r.kind)}</span></span>
+      ${r.snippet ? `<span class="snippet">${snippetHTML(r.snippet)}</span>` : ""}
+    </li>`).join("");
+  $("suggest").hidden = false;
+  $("search").setAttribute("aria-expanded", "true");
+  syncSuggestActive();
+  // Rows minus the standing "search full text" row: announcing "1 suggestion"
+  // for a query that matched nothing would be a lie told once per keystroke.
+  const n = sugRows.length - 1;
+  $("suggest-status").textContent = n ? `${n} suggestion${n === 1 ? "" : "s"}` : "";
+}
+
+function closeSuggest() {
+  clearTimeout(sugTimer);
+  sugAbort?.abort();
+  sugRows = [];
+  sugSel = -1;
+  $("suggest").hidden = true;
+  $("suggest").innerHTML = "";
+  $("suggest-status").textContent = "";
+  $("search").setAttribute("aria-expanded", "false");
+  $("search").removeAttribute("aria-activedescendant");
+}
+
+function syncSuggestActive() {
+  const list = $("suggest");
+  [...list.children].forEach((li, i) => {
+    li.classList.toggle("active", i === sugSel);
+    li.setAttribute("aria-selected", String(i === sugSel));
+  });
+  if (sugSel < 0) {
+    $("search").removeAttribute("aria-activedescendant");
+    return;
+  }
+  $("search").setAttribute("aria-activedescendant", `sug-opt-${sugSel}`);
+  list.children[sugSel]?.scrollIntoView({ block: "nearest" });
+}
+
+// -1 is the typed query itself. Arrowing off either end returns to it, which
+// is the only way back to "search for exactly what I wrote" once the list has
+// been walked into.
+function moveSuggest(delta) {
+  if (!sugRows.length) return;
+  sugSel += delta;
+  if (sugSel < -1) sugSel = sugRows.length - 1;
+  if (sugSel >= sugRows.length) sugSel = -1;
+  syncSuggestActive();
+}
+
+function pickSuggest(i) {
+  const row = sugRows[i];
+  if (!row) return;
+  closeSuggest();
+  if (location.hash === row.hash) route();
+  else location.hash = row.hash;
+}
+
+async function fetchSuggestions(q) {
+  const my = ++sugSeq;
+  sugAbort?.abort();
+  sugAbort = new AbortController();
+  try {
+    const hits = await api(searchURL(q, SUGGEST_HITS), { signal: sugAbort.signal });
+    // Two guards, because they catch different things: the sequence number
+    // drops a response overtaken by a later one, and the query check drops one
+    // whose box has since been cleared or navigated away from.
+    if (my === sugSeq && sugQuery === q && !$("suggest").hidden) renderSuggest(q, hits);
+  } catch { /* the local matches stand, and Enter still runs the real search */ }
+}
+
+// Where a keystroke's answer goes depends on what the main pane already shows.
+// On the results view it goes there: those results are richer, they are the
+// thing being looked at, and a dropdown over them would be a second and poorer
+// copy of the same answer. Everywhere else the dropdown is the only place an
+// answer can go without throwing away the page being read.
+function onSearchInput() {
+  const q = $("search").value.trim();
+  const inline = onSearchView();
+  sugQuery = q;
+  clearTimeout(sugTimer);
+  if (inline || !q) closeSuggest();
+  else renderSuggest(q); // instant, local, no network
+
+  if (!q) {
+    if (inline) { history.replaceState(null, "", "#/search/"); showSearch("", true); }
+    return;
+  }
+  sugTimer = setTimeout(() => {
+    if (sugQuery !== q) return;
+    if (!onSearchView()) { fetchSuggestions(q); return; }
+    // replaceState rather than assigning the hash: the URL has to keep up with
+    // the box so a reload or a copied link lands on what is on screen, but one
+    // history entry per keystroke would turn Back into a spellcheck of
+    // everything the user typed on the way here.
+    history.replaceState(null, "", `#/search/${encodeURIComponent(q)}`);
+    showSearch(q, true);
+  }, SUGGEST_DEBOUNCE);
+}
+
+function wireSearchBox() {
+  const input = $("search");
+  input.addEventListener("input", onSearchInput);
+  // Returning to a box that still holds a query reopens what it was showing,
+  // without spending a request to do it -- unless the results view is up, which
+  // is already showing more than the dropdown could.
+  input.addEventListener("focus", () => {
+    if (input.value.trim() && !onSearchView()) renderSuggest(input.value.trim());
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); moveSuggest(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveSuggest(-1); }
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      if (sugSel >= 0) { pickSuggest(sugSel); return; }
+      const q = input.value.trim();
+      // Search is a route like any other view: Back returns to the results and
+      // the query survives reload and sharing.
+      if (q) { closeSuggest(); location.hash = "#/search/" + encodeURIComponent(q); }
+    } else if (e.key === "Escape") {
+      // First Escape dismisses the list, a second clears the box. Stopped here
+      // so neither ever reaches the document handler and closes the mobile
+      // drawer out from under someone dismissing a dropdown.
+      e.stopPropagation();
+      if (!$("suggest").hidden) closeSuggest();
+      else if (input.value) { input.value = ""; onSearchInput(); }
+    }
+  });
+  // Tabbing out of the box closes the list. Picking an option never lands here:
+  // the mousedown handler below preventDefaults, so focus never leaves.
+  input.addEventListener("focusout", (e) => {
+    if (!e.relatedTarget?.closest?.(".searchbox")) closeSuggest();
+  });
+  // mousedown, not click: it wins the race against the input losing focus.
+  $("suggest").addEventListener("mousedown", (e) => {
+    const li = e.target.closest("li[role=option]");
+    if (li) { e.preventDefault(); pickSuggest([...$("suggest").children].indexOf(li)); }
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".searchbox")) closeSuggest();
+  });
+}
+
 // slugify turns a typed name into the URL-safe slug the API accepts. The
 // server validates independently; this only spares the user from having to
 // know the rule.
@@ -1870,8 +2208,9 @@ async function boot() {
     $("main").addEventListener("focusin", (e) => { const a = target(e); if (a) showPreviewFor(a); });
     $("main").addEventListener("focusout", (e) => { if (target(e)) hidePreview(); });
   }
-  // Navigation always dismisses a lingering card or pending timer.
-  window.addEventListener("hashchange", () => hidePreview());
+  // Navigation always dismisses a lingering card or pending timer, and any
+  // suggestion list still open over the page being left.
+  window.addEventListener("hashchange", () => { hidePreview(); closeSuggest(); });
 
   // Back-to-top after ~2 viewports; focus returns to main to keep tab order.
   const toTop = $("to-top");
@@ -1934,13 +2273,7 @@ async function boot() {
       loadWorkspace(b.dataset.slug);
     });
     window.addEventListener("hashchange", route);
-    $("search").addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && e.target.value.trim()) {
-        // Search is a route like any other view: Back returns to the results
-        // and the query survives reload and sharing.
-        location.hash = "#/search/" + encodeURIComponent(e.target.value.trim());
-      }
-    });
+    wireSearchBox();
     if (localStorage.getItem(TOKEN_KEY) || csrfToken()) {
       const so = $("signout");
       so.hidden = false;
