@@ -172,10 +172,19 @@ const (
 	RunnerFake AgentRunner = "fake"
 )
 
-// Agent holds settings for reaching Claude.
+// Agent holds settings for reaching the model.
 type Agent struct {
-	// Runner picks the transport. Defaults to the API.
+	// Runner names the registered provider. Defaults to the API. Not an
+	// exhaustive enum: the constants below are the providers kiln ships, and
+	// validation checks membership in the registry so a fork that registers
+	// its own needs no change here.
 	Runner AgentRunner `mapstructure:"runner"`
+	// Settings is provider-specific configuration, passed through untouched to
+	// whichever provider Runner selects. It exists so that adding a provider
+	// never means widening this struct with a field only one of them reads --
+	// the same reason a source connector carries a config blob rather than
+	// columns.
+	Settings map[string]any `mapstructure:"settings"`
 	// Binary is the claude executable, used only by the CLI runner.
 	Binary string `mapstructure:"binary"`
 	// BaseURL overrides the API endpoint, mainly for testing.

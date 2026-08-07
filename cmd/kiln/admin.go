@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/daiwa-zou/kiln/internal/agent"
 	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/crypto"
@@ -303,7 +304,9 @@ implicitly on server boot; run this as a one-shot step before starting servers.`
 }
 
 func newDoctorCmd(g *globalFlags) *cobra.Command {
-	return &cobra.Command{
+	var probe bool
+
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Validate configuration and dependencies",
 		Long: `Checks the whole configuration surface in one pass rather than failing one
@@ -352,9 +355,50 @@ land as their subsystems do.`,
 				fmt.Fprintln(out, "master key  OK")
 			}
 
+			// The CLI runner is the one agent configuration that can fail for a
+			// reason outside kiln entirely -- a missing binary, or a session
+			// that expired since the last build. Both are free to detect and
+			// expensive to discover late: a worker with neither accepts a run,
+			// plans it, and fails every unit on authentication after the queue
+			// has claimed it. Checked only when it is the selected runner,
+			// since the binary is irrelevant otherwise.
+			if cfg.Agent.Runner == config.RunnerCLI {
+				h, err := agent.CheckCLI(ctx, cfg.Agent.Binary, cfg.Secrets.AnthropicAPIKey, cfg.Agent.BaseURL)
+				switch {
+				case err != nil:
+					fmt.Fprintf(out, "claude cli  FAIL (%v)\n", err)
+					return err
+				case !h.Usable() && h.AuthErr == nil:
+					// A definite "not logged in" is a failure: every build
+					// would fail, and saying so here is the whole point.
+					fmt.Fprintf(out, "claude cli  FAIL (%s)\n", h.Summary())
+					return fmt.Errorf("agent: the claude CLI is not authenticated; run `claude auth login`")
+				default:
+					fmt.Fprintf(out, "claude cli  OK  (%s)\n", h.Summary())
+				}
+
+				// The check above reads the CLI's stored opinion of itself,
+				// which is conclusive when it says no and merely hopeful when
+				// it says yes: a session whose access token is still inside its
+				// window reports as logged in even when the refresh token
+				// behind it is dead. Only a real call finds that out, so it is
+				// opt-in -- this one spends a cent or two.
+				if probe {
+					if err := agent.ProbeCLI(ctx, cfg.Agent.Binary, cfg.Secrets.AnthropicAPIKey, cfg.Agent.BaseURL); err != nil {
+						fmt.Fprintf(out, "claude call FAIL (%v)\n", err)
+						return err
+					}
+					fmt.Fprintln(out, "claude call OK  (completed a live request)")
+				}
+			}
+
 			// Remaining checks land as their subsystems do: storage round-trip,
-			// GitHub App JWT, Anthropic key, claude binary.
+			// GitHub App JWT, Anthropic key.
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&probe, "probe", false,
+		"additionally make one small live model call, the only conclusive test that generation would work")
+	return cmd
 }

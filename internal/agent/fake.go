@@ -31,6 +31,16 @@ type FakeRunner struct {
 	opts FakeOptions
 }
 
+// Capabilities: the fake returns structured data like the API runner, so it
+// needs no scratch directory. Its cost is synthetic but exact -- it reports
+// precisely what it charged -- so it is not an estimate in the sense budget
+// enforcement means, which is "derived from a pricing table that may not have
+// an entry for this model". Claiming otherwise makes every dev build demand a
+// pricing entry for whatever placeholder model name is configured.
+func (f *FakeRunner) Capabilities() Capabilities {
+	return Capabilities{WritesFiles: false, EstimatesCost: false}
+}
+
 // FakeOptions tunes the fake's behavior. The zero value is a free, instant,
 // always-succeeding runner.
 type FakeOptions struct {

@@ -95,6 +95,29 @@ func newWorker(cfg *config.Config, db *store.DB, log *slog.Logger) (*worker.Work
 	if err != nil {
 		return nil, err
 	}
+
+	// A worker on the CLI runner with no logged-in session will claim runs and
+	// fail every unit of them on authentication -- after the queue has taken
+	// the work and a human has watched it start. Both causes are free to detect
+	// here, so say so at boot instead.
+	//
+	// A warning rather than a refusal to start: the session can be renewed
+	// without restarting kiln, and a worker that exits on a condition that may
+	// fix itself in a minute is worse than one that says what is wrong. The
+	// hard version of this check is `kiln admin doctor`, which is where an
+	// operator asks the question deliberately.
+	if cfg.Agent.Runner == config.RunnerCLI {
+		switch h, err := agent.CheckCLI(context.Background(), cfg.Agent.Binary, cfg.Secrets.AnthropicAPIKey, cfg.Agent.BaseURL); {
+		case err != nil:
+			log.Warn("the claude CLI is unusable; every build will fail until it is fixed", "err", err)
+		case !h.Usable() && h.AuthErr == nil:
+			log.Warn("the claude CLI is not authenticated; every build will fail until it is",
+				"fix", "claude auth login", "version", h.Version)
+		default:
+			log.Info("claude CLI ready", "path", h.Path, "status", h.Summary())
+		}
+	}
+
 	js := store.NewWikiStore(db.Pool)
 	pipeline := jobs.NewPipeline(cfg, js, runner, log)
 	w := worker.New(cfg, js, pipeline, log)

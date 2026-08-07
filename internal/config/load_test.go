@@ -237,10 +237,16 @@ func TestValidateFakeRunner(t *testing.T) {
 		t.Errorf("negative fake cost accepted: %v", err)
 	}
 
+	// An unrecognised runner is deliberately NOT rejected here. Which runners
+	// exist is a property of the provider registry in internal/agent, which
+	// imports this package and so cannot be consulted from it; the name is
+	// resolved when the runner is built, and the registry's error lists what
+	// this binary actually has. Duplicating a list of kinds here is precisely
+	// what would go stale the first time a provider is added.
 	c = base()
 	c.Agent.Runner = "carrier-pigeon"
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "want api, cli, or fake") {
-		t.Errorf("unknown-runner message must name all three kinds: %v", err)
+	if err := c.Validate(); err != nil {
+		t.Errorf("config rejected an unknown runner it cannot adjudicate: %v", err)
 	}
 }
 
