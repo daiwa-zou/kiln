@@ -39,6 +39,15 @@ type memStore struct {
 
 	// trailingUnitCost is what TrailingUnitCost reports; zero means no history.
 	trailingUnitCost float64
+
+	// seeded and marks record the progress calls, in order. The pipeline makes
+	// them for the benefit of anything watching a build, so the tests assert on
+	// the sequence rather than on a final state.
+	seeded []diff.Key
+	marks  []ItemSummary
+	// failProgress makes both progress calls fail, to prove a build still
+	// succeeds when it cannot report on itself.
+	failProgress error
 }
 
 func newMemStore() *memStore {
@@ -136,6 +145,40 @@ func (m *memStore) RecordRun(_ context.Context, run RunSummary) error {
 	defer m.mu.Unlock()
 	m.runs = append(m.runs, run)
 	return nil
+}
+
+func (m *memStore) SeedRunItems(_ context.Context, _ string, keys []diff.Key, _ float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failProgress != nil {
+		return m.failProgress
+	}
+	m.seeded = append(m.seeded, keys...)
+	return nil
+}
+
+func (m *memStore) MarkRunItem(_ context.Context, _ string, item ItemSummary) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failProgress != nil {
+		return m.failProgress
+	}
+	m.marks = append(m.marks, item)
+	return nil
+}
+
+// marksFor returns one unit's status transitions in order, which is the
+// property the progress feature turns on: pending -> running -> settled.
+func (m *memStore) marksFor(key diff.Key) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for _, it := range m.marks {
+		if it.Key == key {
+			out = append(out, it.Status)
+		}
+	}
+	return out
 }
 
 func (m *memStore) LoadApprovedDeletions(context.Context, string) ([]diff.Key, error) {

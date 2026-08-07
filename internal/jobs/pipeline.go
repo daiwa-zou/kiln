@@ -255,6 +255,17 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		return res, nil
 	}
 
+	// The plan becomes visible before it becomes expensive. Until this existed
+	// a build in flight reported only "running", so a bench ingesting a large
+	// repository looked identical five seconds and five minutes in, with no way
+	// to tell how much was left.
+	//
+	// Best-effort throughout: a build that generated pages correctly must not
+	// fail because its progress could not be written down.
+	if err := p.Store.SeedRunItems(ctx, req.RunID, dirty, perUnit); err != nil {
+		log.Warn("could not record the plan; the build runs but cannot be watched", "err", err)
+	}
+
 	steering, err := p.Store.LoadSteering(ctx, req.WorkspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("jobs: load steering: %w", err)
@@ -531,6 +542,16 @@ func (p *Pipeline) generateUnit(
 
 	sessionID := req.RunID + "-" + sanitize(string(key))
 
+	// The unit's own root, not the run's. A merged map has no single one: repo
+	// units are relative to the checkout, while uploaded documents and fetched
+	// web pages are staged elsewhere and record where. Prompt assembly has
+	// always honoured that (see unitRoot); the agent's working directory did
+	// not, which broke two ways on the CLI runner. A bench of only documents
+	// has no checkout at all, so WorkDir was empty and every unit failed with
+	// "agent: WorkDir is required"; a bench with both pointed the agent's
+	// Read and Grep at the repository while asking it about a PDF.
+	workDir := unitRoot(req.SourceDir, unit)
+
 	// Reserved before the call, settled after. A unit that cannot reserve its
 	// analyze call has not spent anything, so it is not a failure -- the
 	// scheduler reads the sentinel and simply stops launching work, leaving
@@ -542,7 +563,7 @@ func (p *Pipeline) generateUnit(
 	}
 	analyzeRes, aerr := p.Runner.Run(ctx, agent.Request{
 		Step: agent.StepAnalyze, SessionID: sessionID,
-		WorkDir: req.SourceDir, Model: p.AnalyzeModel,
+		WorkDir: workDir, Model: p.AnalyzeModel,
 		BudgetUSD: p.Budget.AnalyzeUSD, Timeout: p.Timeout,
 		SystemPrompt: analyzeSystemPrompt(sc.steering),
 		// The rendered map is identical for every unit in the run, so it
@@ -584,7 +605,7 @@ func (p *Pipeline) generateUnit(
 
 		genRes, gerr := p.Runner.Run(ctx, agent.Request{
 			Step: agent.StepGenerate, SessionID: sessionID,
-			WorkDir: req.SourceDir, ScratchDir: scratch,
+			WorkDir: workDir, ScratchDir: scratch,
 			Model: p.modelFor(attempt), FallbackModel: p.FallbackModel,
 			BudgetUSD: p.Budget.PageUSD, Timeout: p.Timeout,
 			SystemPrompt:     generateSystemPrompt(sc.steering),

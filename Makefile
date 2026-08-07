@@ -8,7 +8,7 @@ TEST_DB_URL := postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
 # Pinned to match .github/workflows/ci.yml. Bump both together.
 GOLANGCI := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
-.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev dev-up dev-seed dev-db migrate-dev dev-build dev-clean clean image compose-up compose-down manifests helm-lint
+.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev dev-up dev-seed dev-db migrate-dev dev-build dev-clean clean image compose-up compose-down manifests helm-lint k8s-up k8s-down k8s-purge k8s-status k8s-logs k8s-token k8s-sync k8s-reauth k8s-shell
 
 all: fmt test build
 
@@ -137,6 +137,55 @@ compose-up:
 
 compose-down:
 	docker compose down -v
+
+# --- local Kubernetes -------------------------------------------------------
+# A persistent single-machine instance on Docker Desktop's Kubernetes, with
+# generation running through the Claude Code CLI rather than the Messages API.
+# Unlike `make dev` this spends real money on every build; the run budget and
+# page cap are what bound it.
+#
+#   ANTHROPIC_API_KEY=sk-ant-... make k8s-up
+#
+# See deploy/local-k8s/README.md for what it creates and how to point it at a
+# source.
+
+K8S_LOCAL := ./scripts/k8s-local.sh
+
+k8s-up:
+	@$(K8S_LOCAL) up
+
+# Stops the workloads and keeps the volumes: the wiki is still there on the
+# next `k8s-up`. `k8s-purge` is the one that deletes data.
+k8s-down:
+	@$(K8S_LOCAL) down
+
+k8s-purge:
+	@$(K8S_LOCAL) purge
+
+k8s-status:
+	@$(K8S_LOCAL) status
+
+# make k8s-logs            -> the worker, where generation happens
+# make k8s-logs C=api      -> the API
+k8s-logs:
+	@$(K8S_LOCAL) logs $(or $(C),worker)
+
+k8s-token:
+	@$(K8S_LOCAL) token
+
+# The cluster's nodes cannot see this filesystem, so a local repository is
+# copied into the sources volume rather than mounted:
+#   make k8s-sync SRC=/path/to/repo
+k8s-sync:
+	@$(K8S_LOCAL) sync $(SRC)
+
+# Discards the credential the worker refreshed for itself and re-seeds from the
+# secret, for when a re-exported Claude Code session replaces a stale one.
+k8s-reauth:
+	@$(K8S_LOCAL) reauth
+
+k8s-shell:
+	@$(K8S_LOCAL) shell
 
 helm-lint:
 	helm lint deploy/helm/kiln --set secrets.existingSecret=kiln-secrets

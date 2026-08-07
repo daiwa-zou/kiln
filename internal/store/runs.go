@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/daiwa-zou/kiln/internal/diff"
+	"github.com/daiwa-zou/kiln/internal/jobs"
 )
 
 // RunRow is one run as the dashboard consumes it.
@@ -124,8 +127,14 @@ type RunItemRow struct {
 	Error      string
 }
 
-// ListRunItems returns a run's per-unit outcomes, costliest first, scoped to
-// the workspace so a run id from another tenant reads as absent.
+// ListRunItems returns a run's per-unit state, scoped to the workspace so a
+// run id from another tenant reads as absent.
+//
+// Ordered to answer whichever question the run's state makes relevant: while it
+// is live, what is happening now and what is still queued; once it is over,
+// what it cost. Unfinished units sort first, and within the finished ones the
+// costliest leads -- which is exactly the old ordering on a completed run, so
+// the cost-attribution view is unchanged.
 func (s *WikiStore) ListRunItems(ctx context.Context, workspaceID, runID string) ([]RunItemRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT ri.cache_key, ri.kind, ri.status, ri.cost_usd, ri.est_cost_usd,
@@ -133,7 +142,12 @@ func (s *WikiStore) ListRunItems(ctx context.Context, workspaceID, runID string)
 		FROM run_items ri
 		JOIN runs r ON r.id = ri.run_id
 		WHERE r.id = $1 AND r.workspace_id = $2
-		ORDER BY ri.cost_usd DESC, ri.cache_key`, runID, workspaceID)
+		ORDER BY CASE ri.status
+		             WHEN 'running' THEN 0
+		             WHEN 'pending' THEN 1
+		             ELSE 2
+		         END,
+		         ri.cost_usd DESC, ri.cache_key`, runID, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list run items: %w", err)
 	}
@@ -147,6 +161,113 @@ func (s *WikiStore) ListRunItems(ctx context.Context, workspaceID, runID string)
 			return nil, fmt.Errorf("store: scan run item: %w", err)
 		}
 		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// SeedRunItems records a run's plan as pending items before any unit runs.
+//
+// This is what makes a build watchable rather than merely reported on: the
+// items table answers "what is still coming" from the moment the plan exists,
+// instead of materializing all at once when the run is already over.
+//
+// A no-op for CLI builds. Their run row is not created until the run finishes
+// -- there is no id to attach to yet, and nothing polling for it either.
+func (s *WikiStore) SeedRunItems(ctx context.Context, runID string, keys []diff.Key, estCostUSD float64) error {
+	if !isUUID(runID) || len(keys) == 0 {
+		return nil
+	}
+
+	kinds := make([]string, len(keys))
+	cacheKeys := make([]string, len(keys))
+	for i, k := range keys {
+		kinds[i] = k.Prefix()
+		cacheKeys[i] = string(k)
+	}
+
+	// One statement rather than a loop: the plan can be dozens of units, and
+	// this runs before the first model call, where latency is pure overhead.
+	//
+	// DO NOTHING rather than an update: a retried seed must not reset an item
+	// that has already started, which is what a resumed or debounced run does.
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO run_items (run_id, kind, cache_key, status, est_cost_usd)
+		SELECT $1, k.kind, k.cache_key, 'pending', $4
+		FROM unnest($2::text[], $3::text[]) AS k(kind, cache_key)
+		ON CONFLICT (run_id, cache_key) DO NOTHING`,
+		runID, kinds, cacheKeys, estCostUSD); err != nil {
+		return fmt.Errorf("store: seed run items: %w", err)
+	}
+	return nil
+}
+
+// MarkRunItem settles one planned item as the run reaches it.
+//
+// Upserts rather than updates so it is correct even when the seed did not run
+// or the plan grew after it: the item is the record of the unit either way.
+// finished_at stays null while the unit is still in flight, which is what lets
+// a reader tell "started three minutes ago" from "took three minutes".
+func (s *WikiStore) MarkRunItem(ctx context.Context, runID string, item jobs.ItemSummary) error {
+	if !isUUID(runID) {
+		return nil
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, turns, error, finished_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7,
+		        CASE WHEN $4 IN ('pending', 'running') THEN NULL ELSE now() END)
+		ON CONFLICT (run_id, cache_key) DO UPDATE SET
+		    status      = EXCLUDED.status,
+		    cost_usd    = EXCLUDED.cost_usd,
+		    turns       = EXCLUDED.turns,
+		    error       = EXCLUDED.error,
+		    finished_at = EXCLUDED.finished_at`,
+		runID, item.Key.Prefix(), string(item.Key), item.Status,
+		item.CostUSD, item.Turns, nullable(item.Err)); err != nil {
+		return fmt.Errorf("store: mark run item %s: %w", item.Key, err)
+	}
+	return nil
+}
+
+// RunProgress counts a run's items by disposition, for the dashboard's
+// progress line. Aggregated in the database rather than by fetching every item
+// per run: the runs list renders ten of them at once.
+type RunProgress struct {
+	Total   int
+	Done    int
+	Running int
+	Pending int
+}
+
+// RunProgressFor returns per-run item counts for the given runs, keyed by run
+// id. Runs with no items are absent rather than zero, so a caller can tell
+// "nothing planned yet" from "a plan of zero units".
+func (s *WikiStore) RunProgressFor(ctx context.Context, workspaceID string, runIDs []string) (map[string]RunProgress, error) {
+	out := map[string]RunProgress{}
+	if len(runIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT ri.run_id,
+		       count(*),
+		       count(*) FILTER (WHERE ri.status NOT IN ('pending', 'running')),
+		       count(*) FILTER (WHERE ri.status = 'running'),
+		       count(*) FILTER (WHERE ri.status = 'pending')
+		FROM run_items ri
+		JOIN runs r ON r.id = ri.run_id
+		WHERE r.workspace_id = $1 AND ri.run_id = ANY($2::uuid[])
+		GROUP BY ri.run_id`, workspaceID, runIDs)
+	if err != nil {
+		return nil, fmt.Errorf("store: run progress: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		var p RunProgress
+		if err := rows.Scan(&id, &p.Total, &p.Done, &p.Running, &p.Pending); err != nil {
+			return nil, fmt.Errorf("store: scan run progress: %w", err)
+		}
+		out[id] = p
 	}
 	return out, rows.Err()
 }

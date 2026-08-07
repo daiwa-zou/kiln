@@ -26,7 +26,7 @@ func New(cfg *config.Config) (Runner, error) {
 		r := NewClaudeRunner(cfg.Agent.Binary)
 		// The subprocess reads untrusted source content; give it an explicit
 		// minimal environment so it can never inherit KILN_* secrets.
-		r.Env = MinimalChildEnv(cfg.Secrets.AnthropicAPIKey)
+		r.Env = MinimalChildEnv(cfg.Secrets.AnthropicAPIKey, cfg.Agent.BaseURL)
 		return r, nil
 
 	case config.RunnerFake:

@@ -486,6 +486,38 @@
   .run-units summary { cursor: pointer; color: var(--ink-dim); font-size: 12.5px; }
   .run-units .detail { font-size: 13px; color: var(--ink-dim); }
 
+  /* Live ingest progress. Indented to the run row's text, so the bar and the
+     unit list read as belonging to the run above them rather than to the day. */
+  .run-progress {
+    display: flex; align-items: center; gap: 10px;
+    margin: 2px 0 6px 17px;
+  }
+  .run-progress progress {
+    flex: 1 1 auto; max-width: 320px; height: 6px;
+    /* Both keywords: Firefox styles the element, WebKit the pseudo-elements
+       below, and neither inherits the other's. */
+    appearance: none; -webkit-appearance: none;
+    border: none; border-radius: 3px; background: var(--border);
+  }
+  .run-progress progress::-webkit-progress-bar {
+    border-radius: 3px; background: var(--border);
+  }
+  .run-progress progress::-webkit-progress-value {
+    border-radius: 3px; background: var(--ember);
+  }
+  .run-progress progress::-moz-progress-bar { border-radius: 3px; background: var(--ember); }
+  .run-progress .hint { margin: 0; font-size: 12.5px; white-space: nowrap; }
+
+  .run-live-units { margin: 0 0 10px 17px; font-size: 13px; color: var(--ink-dim); }
+  /* The unit being written now is the one the eye should land on; the rest of
+     the list is context for how much is left. */
+  .run-live-units .chip.run-running { font-weight: 600; }
+
+  @media (max-width: 620px) {
+    .run-progress { flex-wrap: wrap; gap: 4px; }
+    .run-progress .hint { white-space: normal; }
+  }
+
   /* Collapsible ingestion sections: the group label doubles as the summary,
      with a small disclosure caret that turns when open. */
   details.sec > summary {
