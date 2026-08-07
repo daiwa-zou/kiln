@@ -37,7 +37,7 @@ type Store interface {
 	ResolveWorkspace(ctx context.Context, ref, userID string, admin bool) (store.WorkspaceRow, error)
 	LoadPageSummaries(ctx context.Context, workspaceID string, limit, offset int) ([]store.PageInfo, error)
 	LoadPage(ctx context.Context, workspaceID, ref string) (wiki.Page, error)
-	Search(ctx context.Context, workspaceID, query string, limit, offset int) ([]store.SearchHit, error)
+	Search(ctx context.Context, workspaceID, query string, limit, offset int, prefix bool) ([]store.SearchHit, error)
 	Gaps(ctx context.Context, workspaceID string, limit, offset int) ([]store.Gap, error)
 	LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error)
 	Graph(ctx context.Context, workspaceID string, limit int) ([]store.GraphNode, []store.GraphEdge, int, error)
@@ -525,8 +525,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := pagination(r, defaultHitLimit, maxHitLimit)
+	// prefix=1 says the last word may still be half-typed, so match it as a
+	// prefix. Opt-in rather than always-on: it is what the UI's search box
+	// needs on every keystroke and the opposite of what an agent submitting a
+	// finished query wants, and the default has to keep meaning exact terms.
+	prefix := r.URL.Query().Get("prefix") == "1"
 
-	hits, err := s.Store.Search(r.Context(), ws.ID, query, limit, offset)
+	hits, err := s.Store.Search(r.Context(), ws.ID, query, limit, offset, prefix)
 	if err != nil {
 		s.fail(w, err)
 		return

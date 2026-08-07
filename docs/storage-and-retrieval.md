@@ -136,6 +136,13 @@ pgvector; the change is the image in `docker-compose.yml` and the Helm chart.
    did, and question-shaped queries continue past where they used to stop dead.
    Search also sends an ETag now, which it alone among the read handlers did
    not. No migration, no dependency, no image change.
+
+   `?prefix=1` additionally matches the *last* lexeme as a prefix, for callers
+   searching a keystroke at a time. Mid-word every intermediate query is a term
+   no document contains — `kuber` is not `kubernetes` — so without it a search
+   box updating as it is typed is empty for all but the last character of each
+   word. It stays opt-in because it is exactly wrong for a finished query: the
+   reading UI sends it on every keystroke, the MCP tools never do.
 2. **Measure — done.** `kiln_searches_total{outcome="hit"|"empty"}` counts the
    empty rate without recording what anyone asked. Deliberately a counter with
    a coarse label rather than a query log: the rate is the decision input, the
