@@ -8,7 +8,7 @@ TEST_DB_URL := postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
 # Pinned to match .github/workflows/ci.yml. Bump both together.
 GOLANGCI := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
-.PHONY: all build test test-verbose test-integration cover db-up db-down lint vulncheck fmt tidy migrate dev dev-up dev-seed dev-db migrate-dev dev-build dev-clean clean image compose-up compose-down manifests helm-lint k8s-up k8s-down k8s-purge k8s-status k8s-logs k8s-token k8s-sync k8s-reauth k8s-shell
+.PHONY: all build test test-verbose test-integration test-claude cover db-up db-down lint vulncheck fmt tidy migrate dev dev-up dev-seed dev-db migrate-dev dev-build dev-clean clean image compose-up compose-down manifests helm-lint k8s-up k8s-down k8s-purge k8s-status k8s-logs k8s-token k8s-sync k8s-reauth k8s-shell
 
 all: fmt test build
 
@@ -50,6 +50,19 @@ db-up:
 db-down:
 	@docker rm -f kiln-test >/dev/null 2>&1 || true
 	@echo "postgres removed"
+
+# The one check the rest of the suite cannot make: a real claude, a real model
+# call, real prose imported as a page. Everything else about the CLI runner is
+# covered against a fixture, which proves the pipeline drives it correctly but
+# not that it then produces a wiki.
+#
+# Kept out of `test` and out of CI because it spends money and needs a logged-in
+# session. Costs a few cents.
+#
+#   claude auth login     # or export ANTHROPIC_API_KEY
+#   make test-claude
+test-claude:
+	KILN_TEST_CLAUDE=1 go test ./internal/jobs/ -count=1 -v -run TestCLIRunnerAgainstRealClaude
 
 # Pinned so local runs match CI exactly. `go run` caches the build, so only
 # the first invocation after a version bump is slow.
