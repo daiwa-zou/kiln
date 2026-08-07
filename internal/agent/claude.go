@@ -35,6 +35,12 @@ type ClaudeRunner struct {
 	Env []string
 }
 
+// Capabilities: pages arrive in the scratch directory rather than as data, and
+// the CLI reports its own spend, so nothing here is estimated.
+func (r *ClaudeRunner) Capabilities() Capabilities {
+	return Capabilities{WritesFiles: true, EstimatesCost: false}
+}
+
 // NewClaudeRunner constructs a runner, defaulting the binary name.
 func NewClaudeRunner(binary string) *ClaudeRunner {
 	if strings.TrimSpace(binary) == "" {

@@ -873,7 +873,8 @@ deliver them.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `agent.runner` | `api` | `api` (structured output, no filesystem), `cli` (shells out to `claude`), `fake` (deterministic, zero spend). |
+| `agent.runner` | `api` | Names a registered provider. Shipped: `api` (structured output, no filesystem), `cli` (shells out to `claude`), `fake` (deterministic, zero spend). Not a closed set — see extension points. |
+| `agent.settings` | — | Provider-specific configuration, passed through untouched to the selected provider. |
 | `agent.binary` | `claude` | CLI runner only. |
 | `agent.base_url` | — | Endpoint override, mainly for testing. |
 | `agent.effort` | `high` | Thinking depth: `low`…`max`. |
@@ -958,10 +959,28 @@ they stay routable and cannot collide with another namespace.
 `WorkspaceMap` of units with content hashes. The hash is the contract — get it
 wrong and either nothing regenerates or everything does.
 
-**A new agent runner** implements `Run(ctx, Request) (*Result, error)`. Two
-delivery shapes already exist and the pipeline treats them identically past the
-collection point: structured pages as data (the API runner), or files written
-into a scratch directory (the CLI runner).
+**A new model provider** implements `Name()` and `New(agent.Options) (Runner, error)`
+and registers itself with `agent.RegisterProvider`, the same shape as a source
+connector. The runner it returns implements `Run(ctx, Request) (*Result, error)`.
+Two delivery shapes already exist and the pipeline treats them identically past
+the collection point: structured pages as data (the API runner), or files
+written into a scratch directory (the CLI runner).
+
+A provider says which shape it is — and whether its costs are measured or
+estimated — by implementing `Capabilities()`, because the pipeline branches on
+both. `WritesFiles` decides whether a scratch directory is allocated at all;
+`EstimatesCost` decides whether the run budget is enforced against a local
+pricing table, where a cost of zero means "no entry for this model" rather than
+"free". A provider that declares nothing gets the conservative pair (data, and
+authoritative cost), which is what keeps the pipeline's own test fakes working
+without implementing anything.
+
+Provider-specific configuration travels in `agent.settings`, a free-form map
+handed through untouched, so reaching a new model never means widening
+`config.Agent` with a field only one provider reads. Which providers exist is a
+property of the binary rather than a list in the config package: an unknown
+`agent.runner` fails when the runner is built, with an error naming the
+providers actually registered.
 
 **A new page type** needs an entry in `typeDirs` and `GeneratedTypes`. The
 directory names are part of the on-disk contract with Obsidian and the

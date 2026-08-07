@@ -56,6 +56,13 @@ func (c *Config) Validate() error {
 		problems = append(problems, fmt.Sprintf("storage: unknown backend %q (want s3 or fs)", c.Storage.Backend))
 	}
 
+	// Sanity checks for the runners kiln ships, and deliberately no rejection of
+	// names it does not recognise. Whether a runner exists is a question only
+	// the provider registry can answer, and internal/agent imports this package
+	// so this one cannot ask it. An unknown name therefore fails when the runner
+	// is built -- still at startup, with an error that lists the providers this
+	// binary actually has, which is better than a list duplicated here and left
+	// to drift.
 	switch c.Agent.Runner {
 	case RunnerAPI, "":
 		// Empty means the API runner, matching what the factory does -- Load
@@ -72,8 +79,6 @@ func (c *Config) Validate() error {
 		if c.Agent.FakeCostUSD < 0 {
 			problems = append(problems, "agent: fake_cost_usd cannot be negative")
 		}
-	default:
-		problems = append(problems, fmt.Sprintf("agent: unknown runner %q (want api, cli, or fake)", c.Agent.Runner))
 	}
 
 	switch c.Agent.Effort {

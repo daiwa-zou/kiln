@@ -145,7 +145,7 @@ The knobs worth knowing before anything else:
 | `agent.run_budget_usd` | `6.00` | Hard ceiling per run, at any concurrency. |
 | `agent.max_pages_per_run` | `12` | Caps one run; the remainder is deferred to a follow-up. |
 | `agent.unit_concurrency` | `1` | Raise it to build a large bench in minutes rather than hours. |
-| `agent.runner` | `api` | `fake` runs the whole pipeline with zero spend. |
+| `agent.runner` | `api` | Names a registered model provider; `fake` runs the whole pipeline with zero spend. Adding one is a registration, not a fork — see [docs/architecture.md](docs/architecture.md). |
 | `auth.mode` | `token` | `none` is refused on any non-loopback bind. |
 | `worker.permitted_source_roots` | *(empty)* | Allowlist for local-path sources. Empty denies every one. |
 

@@ -38,6 +38,13 @@ type APIRunner struct {
 	FallbackModel string
 }
 
+// Capabilities: page content comes back as structured data, so no scratch
+// directory is needed; cost is computed from the local pricing table in
+// pricing.go, so budget enforcement must treat it as an estimate.
+func (r *APIRunner) Capabilities() Capabilities {
+	return Capabilities{WritesFiles: false, EstimatesCost: true}
+}
+
 // APIOptions configures an APIRunner.
 type APIOptions struct {
 	APIKey  string
