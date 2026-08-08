@@ -80,10 +80,10 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 	}
 
 	mat, err := materialize(ctx, out, req.Source)
-	defer mat.Close()
 	if err != nil {
 		return nil, p.failResearch(ctx, summary, err)
 	}
+	defer mat.Close()
 
 	pages, err := p.Store.LoadPages(ctx, req.WorkspaceID)
 	if err != nil {

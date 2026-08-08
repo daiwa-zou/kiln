@@ -104,8 +104,9 @@ type material struct {
 }
 
 // Close removes whatever the sync staged. Safe on a partially built material,
-// which is what a failed sync returns: a connector that staged text and then
-// failed to map it has still made a directory that needs removing.
+// which is what materialize closes on its own failure paths: a connector that
+// staged text and then failed to map it has still made a directory that needs
+// removing.
 func (m *material) Close() {
 	if m == nil {
 		return
@@ -122,12 +123,18 @@ func (m *material) Close() {
 // acquisition path would eventually answer questions about a different corpus
 // than the one the pages were written from.
 //
-// The returned material is non-nil even on failure whenever anything was
-// staged, so the caller's Close still runs.
+// A failure releases its own staging and answers nil, so the caller's Close is
+// only ever reached with material worth closing. A connector that staged text
+// and then failed to map it has still made a directory that needs removing,
+// which is why cleanup cannot simply be left to a caller that got no material.
 func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material, error) {
 	m := &material{
 		Map:    &mapper.WorkspaceMap{SchemaVersion: 1},
 		Router: diff.Router{ModuleDirs: map[string]diff.Key{}, DocPaths: map[string]diff.Key{}, Cosmetic: cosmeticPath},
+	}
+	fail := func(err error) (*material, error) {
+		m.Close()
+		return nil, err
 	}
 
 	// The repository is optional: a bench fed only by documents or web pages
@@ -137,20 +144,20 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 	if src.Path != "" {
 		conn, err := connector.Get("git")
 		if err != nil {
-			return m, err
+			return fail(err)
 		}
 		fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), src.Path)
 
 		set, err := conn.Sync(ctx, connector.Config{"path": src.Path, "slug": src.Slug}, "")
 		if err != nil {
-			return m, err
+			return fail(err)
 		}
 
 		// Routing and prompt grounding need the module graph, which a flat item
 		// list cannot express. The git connector carried it on the same sync.
 		rm := gitconn.MapOf(set)
 		if rm == nil {
-			return m, fmt.Errorf("git connector returned no repository map")
+			return fail(fmt.Errorf("git connector returned no repository map"))
 		}
 		m.Repo = rm
 		m.Map = rm.ToWorkspaceMap()
@@ -173,11 +180,11 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 			m.staging = append(m.staging, staging)
 		}
 		if err != nil {
-			return m, err
+			return fail(err)
 		}
 		merged, err := mapper.Merge(src.Path, m.Map, docMap)
 		if err != nil {
-			return m, err
+			return fail(err)
 		}
 		m.Map = merged
 		maps.Copy(m.Router.DocPaths, docRouter)
@@ -193,11 +200,11 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 			m.staging = append(m.staging, staging)
 		}
 		if err != nil {
-			return m, err
+			return fail(err)
 		}
 		merged, err := mapper.Merge(src.Path, m.Map, webMap)
 		if err != nil {
-			return m, err
+			return fail(err)
 		}
 		m.Map = merged
 		maps.Copy(m.Router.DocPaths, webRouter)
@@ -226,10 +233,10 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	}
 
 	mat, err := materialize(ctx, out, req.Source)
-	defer mat.Close()
 	if err != nil {
 		return nil, err
 	}
+	defer mat.Close()
 	wm, router, rm := mat.Map, mat.Router, mat.Repo
 
 	// Without a base ref, every unit is a candidate and the pipeline's hash
