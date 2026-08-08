@@ -17,6 +17,78 @@ type OverviewInput struct {
 	// structure around it stays derived.
 	Narrative []string
 	Date      string
+	// Sources tallies the material the wiki was compiled from. Without it the
+	// overview could only describe the pages that came out, which says nothing
+	// about what went in and does not change when a source is added that has
+	// not yet produced a page.
+	Sources []SourceTally
+}
+
+// SourceTally is one kind of material and how much of it fed the build.
+type SourceTally struct {
+	// Kind is a unit-key namespace: "module", "doc:upload", "doc:web", "doc",
+	// or "arch". Phrasing lives here rather than at the call site so every
+	// surface names a source the same way.
+	Kind  string
+	Count int
+}
+
+// sourcePhrase renders a tally as English, singular or plural.
+func sourcePhrase(t SourceTally) string {
+	one, many := "unit", "units"
+	switch t.Kind {
+	case "module":
+		one, many = "code module", "code modules"
+	case "doc:upload":
+		one, many = "uploaded document", "uploaded documents"
+	case "doc:web":
+		one, many = "fetched web page", "fetched web pages"
+	case "doc":
+		one, many = "repository document", "repository documents"
+	case "arch":
+		// The synthesis unit is derived from everything else rather than being
+		// material in its own right; it is never a source worth counting.
+		return ""
+	}
+	if t.Count == 1 {
+		return fmt.Sprintf("%d %s", t.Count, one)
+	}
+	return fmt.Sprintf("%d %s", t.Count, many)
+}
+
+// sectionNoun names one page of a type, for counts that can read "1 entity"
+// rather than "1 entities".
+func sectionNoun(t PageType, n int) string {
+	if n == 1 {
+		switch t {
+		case TypeEntity:
+			return "entity"
+		case TypeConcept:
+			return "concept"
+		case TypeSource:
+			return "source"
+		case TypeQuery:
+			return "query"
+		case TypeComparison:
+			return "comparison"
+		case TypeSynthesis:
+			return "synthesis page"
+		}
+	}
+	return strings.ToLower(sectionHeading(t))
+}
+
+// joinPhrases renders a list as prose: "a", "a and b", "a, b, and c".
+func joinPhrases(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	case 2:
+		return parts[0] + " and " + parts[1]
+	}
+	return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
 }
 
 // BuildOverview renders overview.md from the current page set.
@@ -35,13 +107,7 @@ func BuildOverview(pages []Page, in OverviewInput) string {
 	}.Render())
 	b.WriteString("\n# Overview\n\n")
 
-	if in.Workspace != "" {
-		fmt.Fprintf(&b, "Knowledge base for **%s**", in.Workspace)
-		if in.Ref != "" {
-			fmt.Fprintf(&b, ", built at `%s`", in.Ref)
-		}
-		b.WriteString(".\n\n")
-	}
+	writeOverviewLede(&b, pages, in)
 
 	if len(in.Narrative) > 0 {
 		for _, para := range in.Narrative {
@@ -53,10 +119,89 @@ func BuildOverview(pages []Page, in OverviewInput) string {
 		}
 	}
 
+	writeOverviewSources(&b, in)
 	writeOverviewCounts(&b, pages)
 	writeOverviewEntry(&b, pages)
 
 	return b.String()
+}
+
+// writeOverviewLede says what this bench is in one sentence: what it is called,
+// what it was compiled from, and when. A reader landing here cold gets the
+// shape of the thing before any of its contents, and the sentence changes on
+// its own as sources are connected and pages accumulate.
+func writeOverviewLede(b *strings.Builder, pages []Page, in OverviewInput) {
+	name := in.Workspace
+	if name == "" {
+		name = "this bench"
+	} else {
+		name = "**" + in.Workspace + "**"
+	}
+
+	var parts []string
+	for _, t := range in.Sources {
+		if p := sourcePhrase(t); p != "" && t.Count > 0 {
+			parts = append(parts, p)
+		}
+	}
+
+	if len(parts) > 0 {
+		fmt.Fprintf(b, "Knowledge base for %s, compiled from %s", name, joinPhrases(parts))
+	} else {
+		fmt.Fprintf(b, "Knowledge base for %s", name)
+	}
+	if in.Ref != "" {
+		fmt.Fprintf(b, ", at `%s`", in.Ref)
+	}
+	b.WriteString(".")
+
+	if n := countedPages(pages); n > 0 && in.Date != "" {
+		fmt.Fprintf(b, " %s, last built %s.", plural(n, "page"), in.Date)
+	} else if in.Date != "" {
+		fmt.Fprintf(b, " Last built %s.", in.Date)
+	}
+	b.WriteString("\n\n")
+}
+
+// writeOverviewSources lists the material behind the wiki. It is deliberately
+// separate from the page counts: a source that has been connected but has not
+// produced pages yet is invisible in a page count, and its absence there is
+// exactly the thing a reader would be confused by.
+func writeOverviewSources(b *strings.Builder, in OverviewInput) {
+	var lines []string
+	for _, t := range in.Sources {
+		if p := sourcePhrase(t); p != "" && t.Count > 0 {
+			lines = append(lines, p)
+		}
+	}
+	if len(lines) == 0 {
+		return
+	}
+	b.WriteString("## What this bench reads\n\n")
+	for _, l := range lines {
+		fmt.Fprintf(b, "- %s\n", l)
+	}
+	b.WriteString("\n")
+}
+
+// countedPages is the number of real pages: the derived artifacts describe the
+// wiki rather than being part of it.
+func countedPages(pages []Page) int {
+	n := 0
+	for _, p := range pages {
+		if p.Meta.Type == TypeOverview || IsReserved(p.Path) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 func writeOverviewCounts(b *strings.Builder, pages []Page) {
@@ -77,10 +222,10 @@ func writeOverviewCounts(b *strings.Builder, pages []Page) {
 		return
 	}
 
-	fmt.Fprintf(b, "## Contents\n\n%d pages:\n\n", total)
+	fmt.Fprintf(b, "## Contents\n\n%s:\n\n", plural(total, "page"))
 	for _, t := range IndexSections {
 		if n := counts[t]; n > 0 {
-			fmt.Fprintf(b, "- %d %s\n", n, strings.ToLower(sectionHeading(t)))
+			fmt.Fprintf(b, "- %d %s\n", n, sectionNoun(t, n))
 		}
 	}
 	b.WriteString("\n")

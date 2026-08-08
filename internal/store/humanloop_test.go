@@ -148,8 +148,13 @@ func TestReviewQueueFromRunSummary(t *testing.T) {
 	if len(open) != 1 {
 		t.Fatalf("open reviews = %d, want 1 (deduplicated)", len(open))
 	}
-	if !strings.Contains(open[0].Detail, "module:ripple") {
-		t.Errorf("detail %q should name the unit that raised it", open[0].Detail)
+	// The unit rides in its own column: the reader is shown the source, not a
+	// cache key spliced into the end of the question.
+	if open[0].Unit != "module:ripple" {
+		t.Errorf("Unit = %q, want the unit that raised it", open[0].Unit)
+	}
+	if strings.Contains(open[0].Detail, "module:ripple") {
+		t.Errorf("detail still carries the unit key: %q", open[0].Detail)
 	}
 
 	if err := js.ResolveReview(ctx, ws, open[0].ID, "dismiss", ""); err != nil {
@@ -539,5 +544,70 @@ func TestSearchMatchesTheWordStillBeingTyped(t *testing.T) {
 	}
 	if len(hits) != 0 {
 		t.Errorf("stopword-only query returned %+v", hits)
+	}
+}
+
+func TestReviewHistoryCoversBothResolvedStatuses(t *testing.T) {
+	js, ws := jobStore(t)
+	ctx := context.Background()
+
+	if err := js.RecordRun(ctx, jobs.RunSummary{
+		WorkspaceID: ws, Trigger: "manual", Status: jobs.StatusSucceeded,
+		Reviews: []jobs.ReviewNote{
+			{Kind: "deletion", Title: "Source vanished", Detail: "d", Unit: diff.Key("doc:upload:gone.pdf")},
+			{Kind: "uncertain", Title: "Unclear figure", Detail: "u", Unit: diff.Key("doc:upload:gone.pdf")},
+			{Kind: "gap", Title: "Still open", Detail: "g"},
+		},
+	}); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+
+	open, err := js.ListReviews(ctx, ws, "open", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 3 {
+		t.Fatalf("open = %d, want 3", len(open))
+	}
+
+	// Resolving writes two different statuses -- "approved" for an approval and
+	// "resolved" for anything else -- so a history that filtered on either name
+	// alone would show half of what was decided.
+	byTitle := map[string]string{}
+	for _, r := range open {
+		byTitle[r.Title] = r.ID
+	}
+	if err := js.ResolveReview(ctx, ws, byTitle["Source vanished"], "approve", ""); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if err := js.ResolveReview(ctx, ws, byTitle["Unclear figure"], "dismiss", ""); err != nil {
+		t.Fatalf("dismiss: %v", err)
+	}
+
+	answered, err := js.ListReviews(ctx, ws, "answered", 100, 0)
+	if err != nil {
+		t.Fatalf("ListReviews(answered): %v", err)
+	}
+	if len(answered) != 2 {
+		t.Fatalf("answered = %d, want both the approved and the dismissed", len(answered))
+	}
+	statuses := map[string]bool{}
+	for _, r := range answered {
+		statuses[r.Status] = true
+		if r.Status == "open" {
+			t.Errorf("open item %q leaked into the history", r.Title)
+		}
+	}
+	if !statuses["approved"] || !statuses["resolved"] {
+		t.Errorf("statuses = %v, want both approved and resolved", statuses)
+	}
+
+	// The inbox keeps only what still needs an answer.
+	stillOpen, err := js.ListReviews(ctx, ws, "open", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stillOpen) != 1 || stillOpen[0].Title != "Still open" {
+		t.Errorf("open after resolving = %+v, want just the unanswered one", stillOpen)
 	}
 }

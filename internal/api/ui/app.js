@@ -143,6 +143,89 @@ function openOverlay(el, onClose) {
   return close;
 }
 
+// ---- what a view is for -----------------------------------------------------
+// Every view used to open with a paragraph explaining itself. That paragraph is
+// read once and then becomes furniture: it sits above the content the reader
+// came for, on every visit, forever. The explanations are worth keeping -- this
+// tool has concepts a first-time reader genuinely needs -- so they move behind a
+// "?" beside the title, where someone who wants them can ask and everyone else
+// gets their content at the top of the page.
+//
+// Keyed by view, so a view names its help rather than carrying the prose.
+const VIEW_HELP = {
+  ingest: {
+    title: "Ingest",
+    body: `<p>What this bench reads, and when it last read it. A repository, web
+      pages, and uploaded documents all fire into one wiki, so pages can link
+      across the boundary rather than forming separate wikis.</p>
+      <p>Each ingest regenerates only the pages whose sources changed — an
+      unchanged bench costs nothing. Runs execute one at a time per bench.</p>
+      <p>Pausing a source skips it on the next ingest without touching the pages
+      it already produced.</p>`,
+  },
+  reviews: {
+    title: "Reviews",
+    body: `<p>Decisions a build could not make on its own: a contradiction
+      between sources, an assertion it could not corroborate, or a page whose
+      source has disappeared.</p>
+      <p>Resolving one records your answer. An approved deletion is applied by
+      the next build — nothing is destroyed until you say so.</p>
+      <p>A question about the material can be handed back to a worker, which
+      re-reads the sources and attaches what it finds. You still make the
+      call.</p>`,
+  },
+  gaps: {
+    title: "Gaps",
+    body: `<p>Pages that existing content links to but that have never been
+      written. They are the wiki's own account of what it knows it is
+      missing.</p>
+      <p>This is what lets an agent tell <em>"the wiki says nothing about X"</em>
+      from <em>"the wiki has not covered X yet"</em> — a distinction that is
+      invisible without it.</p>`,
+  },
+  graph: {
+    title: "Graph",
+    body: `<p>Pages as nodes, wikilinks as edges. Clusters are subjects that
+      reference each other; an isolated node is a page nothing links to,
+      which is usually worth a look.</p>`,
+  },
+  steering: {
+    title: "Steering",
+    body: `<p>Standing instructions handed to the agent on every build: what this
+      bench is for, what to emphasize, what to leave alone.</p>
+      <p>Edits apply to future builds. Existing pages incorporate them when
+      their sources next change, or on a forced rebuild — steering shapes pages
+      as they are written rather than rewriting what is already there.</p>`,
+  },
+  members: {
+    title: "Members",
+    body: `<p>Who can reach this bench and what they may do. Viewers can read,
+      members can edit content, and owners manage connectors, credentials, and
+      membership.</p>
+      <p>The last owner cannot be removed — a bench nobody can administer is a
+      bench nobody can fix.</p>`,
+  },
+};
+
+// openHelp shows one view's explanation in the shared modal.
+function openHelp(key) {
+  const help = VIEW_HELP[key];
+  if (!help) return;
+  $("help-title").textContent = help.title;
+  $("help-body").innerHTML = help.body;
+  const close = openOverlay($("help"), () => { $("help-body").innerHTML = ""; });
+  $("help-x").onclick = close;
+}
+
+// viewHead renders a view's title with its "?" beside it. Views with nothing to
+// explain pass no key and get a bare heading.
+const viewHead = (title, key) => `
+  <div class="view-head">
+    <h1>${esc(title)}</h1>
+    ${VIEW_HELP[key] ? `<button class="help-btn" data-help="${esc(key)}"
+      aria-label="What is this page for?" title="What is this page for?">?</button>` : ""}
+  </div>`;
+
 // fuzzy is the one matcher behind both the palette and the tree filter:
 // case-insensitive subsequence with bonuses for word starts and runs.
 function fuzzy(q, text) {
@@ -932,15 +1015,13 @@ async function showGaps() {
   try {
     const gaps = await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`);
     if (!gaps.length) {
-      view.done(`<h1>Gaps</h1><div class="empty">
+      view.done(`${viewHead("Gaps", "gaps")}<div class="empty">
         ${state.pages.length
           ? "No gaps — every link resolves to an existing page."
           : `Nothing to check yet — gaps are links the wiki wants and does not have. <a href="#/overview">Start here</a>.`}</div>`);
       return;
     }
-    view.done(`<h1>Gaps</h1>
-      <p class="hint">Pages that are linked from existing content but have not
-      been written yet.</p>
+    view.done(`${viewHead("Gaps", "gaps")}
       ${gaps.map((g) => `<div class="row">
         <span class="mono">${esc(g.slug)}</span>
         <span class="count">wanted by ${esc(g.wantedBy)} page${g.wantedBy === 1 ? "" : "s"}</span>
@@ -1018,34 +1099,38 @@ function reviewResearch(r) {
 
 // showReviews renders the wiki's questions for its humans: contradictions and
 // uncertainties the agent flagged, and deletions awaiting approval.
-async function showReviews(all) {
-  const view = beginView("Reviews", "reviews");
+// history is the resolved queue: what was decided, and when. It is a different
+// question from the inbox -- "what needs me" versus "what did we settle" -- so
+// it is its own view behind its own button rather than a filter toggle that
+// mixed answered questions in among the unanswered ones.
+async function showReviews(history) {
+  const view = beginView(history ? "Resolved reviews" : "Reviews", "reviews");
   try {
-    const status = all ? "" : "open";
-    const reviews = await api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=${status}`);
-    const toggle = all
-      ? `<a href="#/reviews">show open only</a>`
-      : `<a href="#/reviews/all">show resolved too</a>`;
+    // "answered" covers both statuses a resolution writes, 'resolved' and
+    // 'approved'; asking for either alone would hide half the history.
+    const reviews = await api(
+      `/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=${history ? "answered" : "open"}`);
+    const nav = history
+      ? `<a class="btn quiet" href="#/reviews">Back to open reviews</a>`
+      : `<a class="btn quiet" href="#/reviews/history">View resolved history</a>`;
 
     if (!reviews.length) {
-      view.done(`<h1>Reviews</h1>
-        <p class="hint">${toggle}</p>
-        <div class="empty">No ${all ? "" : "open "}reviews. Builds file a review
-        here when they need a decision, such as confirming a deletion after a
-        source disappears.</div>`);
+      view.done(`${viewHead(history ? "Resolved reviews" : "Reviews", "reviews")}
+        <div class="meta">${nav}</div>
+        <div class="empty">${history
+          ? "Nothing resolved yet. Answered reviews are kept here as a record of what was decided."
+          : `No open reviews. Builds file one here when they need a decision, such
+             as confirming a deletion after a source disappears.`}</div>`);
       return;
     }
-    if (!view.done(`<h1>Reviews</h1>
-      <p class="hint">Decisions that require review. Resolving one records your
-        answer; an approved deletion is applied by the next build. Questions
-        about the material can be handed back to a worker, which re-reads the
-        sources and attaches what it finds — you still make the call.
-        ${toggle}</p>
+    if (!view.done(`${viewHead(history ? "Resolved reviews" : "Reviews", "reviews")}
+      <div class="meta">${nav}</div>
       <div id="review-note" class="hint" role="status"></div>
       ${reviews.map((r) => `
         <div class="review">
           <div class="meta">
             ${iconChip(REVIEW_KIND_ICONS, r.kind)}
+            ${r.unit ? unitKeyHTML(r.unit) : ""}
             ${r.pageSlug ? `<a class="chip" href="#/page/${encodeURIComponent(r.pageSlug)}">${esc(r.pageSlug)}</a>` : ""}
             ${timeTag(r.created)}
             ${r.status !== "open" ? iconChip(REVIEW_STATUS_ICONS, r.status) : ""}
@@ -1069,7 +1154,7 @@ async function showReviews(all) {
           // Nothing is resolved, so the badge is left alone: the question is
           // still waiting for a human, now with a reader working on it.
           toast("Research queued");
-          showReviews(all);
+          showReviews(history);
         } catch (err) {
           if (err.handled) return;
           const note = $("review-note");
@@ -1093,7 +1178,7 @@ async function showReviews(all) {
           // revision, so an ETag'd refetch could 304 to the stale list.
           updateReviewsBadge(Number($("reviews-badge").textContent || 1) - 1);
           toast(`Review ${b.dataset.action === "approve" ? "approved" : "resolved"}`);
-          showReviews(all);
+          showReviews(history);
         } catch (err) {
           if (err.handled) return;
           const note = $("review-note");
@@ -1115,7 +1200,7 @@ async function showGraph() {
   try {
     const { nodes, edges, totalPages } = await api(`/workspaces/${encodeURIComponent(state.workspace)}/graph`);
     if (!nodes.length) {
-      view.done(`<h1>Graph</h1><div class="empty">No pages yet — the graph draws
+      view.done(`${viewHead("Graph", "graph")}<div class="empty">No pages yet — the graph draws
         itself once this bench has been ingested. <a href="#/overview">Start here</a>.</div>`);
       return;
     }
@@ -1192,7 +1277,7 @@ async function showGraph() {
     const iconMin = icon(`<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M16 3v3a2 2 0 0 0 2 2h3"/>
       <path d="M16 21v-3a2 2 0 0 1 2-2h3"/><path d="M8 21v-3a2 2 0 0 0-2-2H3"/>`);
 
-    if (!view.done(`<h1>Graph</h1>
+    if (!view.done(`${viewHead("Graph", "graph")}
       <p class="hint">${plural(nodes.length, "page")} · ${plural(links.length, "link")}${esc(truncated)}</p>
       <div id="graph-wrap">
       <div class="graph-toolbar">
@@ -1558,7 +1643,7 @@ async function showMembers() {
       members = await api(`/workspaces/${encodeURIComponent(state.workspace)}/members`);
     } catch (err) {
       if (err.handled) return;
-      view.done(`<h1>Members</h1><div class="empty">${esc(err.message)}</div>`);
+      view.done(`${viewHead("Members", "members")}<div class="empty">${esc(err.message)}</div>`);
       return;
     }
     const roleSelect = (m) => `<select data-member="${esc(m.userId)}" aria-label="Role for ${esc(m.login)}">
@@ -1566,9 +1651,7 @@ async function showMembers() {
         `<option value="${r}" ${m.role === r ? "selected" : ""}>${r}</option>`).join("")}
     </select>`;
 
-    if (!view.done(`<h1>Members</h1>
-      <p class="hint">Viewers can read, members can edit content, and owners manage
-      connectors, credentials, and membership. The last owner cannot be removed.</p>
+    if (!view.done(`${viewHead("Members", "members")}
       <div id="member-note" class="hint" role="status"></div>
       ${members.map((m) => `
         <div class="row">
@@ -1643,10 +1726,7 @@ async function showSteering() {
       purpose: "e.g. Documents the dispatch subsystem for on-call engineers. Assume Go fluency; explain domain terms.",
       schema: "e.g. One entity page per service. Comparisons only for alternatives we actually evaluated.",
     };
-    if (!view.done(`<h1>Steering</h1>
-      <p class="hint">These documents guide every build. Edits apply to future
-      builds; existing pages incorporate them when their sources next change,
-      or on a forced rebuild.</p>
+    if (!view.done(`${viewHead("Steering", "steering")}
       ${["purpose", "schema"].map((k) => `
         <label class="group-label" for="steering-${k}">${esc(label[k])}</label>
         <textarea id="steering-${k}" rows="8" placeholder="${esc(placeholder[k])}">${esc(docs[k] || "")}</textarea>
@@ -1806,10 +1886,11 @@ function route() {
   if (hash === "gaps") return showGaps();
   if (hash === "graph") return showGraph();
   if (hash === "reviews") return showReviews(false);
-  if (hash === "reviews/all") return showReviews(true);
-  // Sources and runs merged into one ingestion view; the old hashes stay
+  // reviews/all is the old hash for the same idea; keep it routable.
+  if (hash === "reviews/history" || hash === "reviews/all") return showReviews(true);
+  // Sources and runs merged into one view; every hash it has ever had stays
   // routable so bookmarks and habit survive.
-  if (hash === "ingestion" || hash === "sources" || hash === "runs") return showSources();
+  if (hash === "ingest" || hash === "ingestion" || hash === "sources" || hash === "runs") return showSources();
   if (hash === "members") return showMembers();
   if (hash === "steering") return showSteering();
   // The default landing, and the explicit one, both route through the same
@@ -1838,7 +1919,7 @@ function setDrawer(open) {
 const VIEW_COMMANDS = [
   { title: "Overview", hash: "#/overview" }, { title: "Index", hash: "#/index" },
   { title: "Graph", hash: "#/graph" }, { title: "Gaps", hash: "#/gaps" },
-  { title: "Ingestion", hash: "#/ingestion" }, { title: "Log", hash: "#/log" },
+  { title: "Ingest", hash: "#/ingest" }, { title: "Log", hash: "#/log" },
   { title: "Reviews", hash: "#/reviews" },
   { title: "Steering", hash: "#/steering" }, { title: "Members", hash: "#/members" },
 ];
@@ -2204,6 +2285,13 @@ function openBenchCreator() {
 async function boot() {
   $("menu").addEventListener("click", () =>
     setDrawer(!document.body.classList.contains("nav-open")));
+
+  // Delegated so every view's "?" works without each one wiring its own, and
+  // so a view that re-renders (the ingest poll) does not lose the binding.
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest?.("[data-help]");
+    if (btn) openHelp(btn.dataset.help);
+  });
   document.addEventListener("keydown", (e) => {
     // Escape priority: palette (handled inside its own overlay) -> hover
     // preview -> drawer.

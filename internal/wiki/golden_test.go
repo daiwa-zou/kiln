@@ -126,6 +126,13 @@ func TestBuildOverviewGolden(t *testing.T) {
 		Narrative: []string{
 			"Five Go services behind a gateway, each owning a slice of the request path.",
 		},
+		// A mixed bench, so the golden covers both the lede's prose list and
+		// the source section, singular and plural.
+		Sources: []SourceTally{
+			{Kind: "module", Count: 5},
+			{Kind: "doc:upload", Count: 1},
+			{Kind: "doc:web", Count: 3},
+		},
 	})
 	assertGolden(t, "overview.md", got)
 }
