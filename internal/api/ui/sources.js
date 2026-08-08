@@ -133,6 +133,62 @@ const iconPause = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><pat
 const iconPlay = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2l9 6-9 6z"/></svg>`;
 const iconTrash = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 1h4v1h4v2H2V2h4zM3 5h10l-.8 10H3.8zM6 7v6h1V7zm3 0v6h1V7z"/></svg>`;
 
+// Glyphs for the source a unit came from. Names are distinct from app.js's
+// icon consts: both files are classic scripts sharing one global scope, where
+// a repeated top-level const is a SyntaxError that takes down the whole UI.
+const iconRepo = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M3 1h8.5L14 3.4V15H3a1.4 1.4 0 0 1 0-2.8h9.2V1.9H3.9v9.4H3a2.3 2.3 0 0 0-.9.2V2.3A1.3 1.3 0 0 1 3 1z"/></svg>`;
+const iconWeb = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM6.2 3.1a9.6 9.6 0 0 0-1 3.9H2.9a5.2 5.2 0 0 1 3.3-3.9zM8 2.9c.6.7 1.1 2.1 1.3 4.1H6.7c.2-2 .7-3.4 1.3-4.1zm1.8.2A5.2 5.2 0 0 1 13.1 7h-2.3a9.6 9.6 0 0 0-1-3.9zM2.9 8.8h2.3a9.6 9.6 0 0 0 1 4 5.2 5.2 0 0 1-3.3-4zm4.1 0h2.6c-.2 2-.7 3.4-1.3 4.2-.6-.8-1.1-2.2-1.3-4.2zm4.4 0h2.3a5.2 5.2 0 0 1-3.3 4 9.6 9.6 0 0 0 1-4z"/></svg>`;
+const iconDoc = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M3 1h6.2L13 4.8V15H3V1zm5.6 1.6v2.6h2.6L8.6 2.6zM5 8h6v1.2H5zm0 2.6h6v1.2H5z"/></svg>`;
+const iconModule = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M8 1.2l5.6 3.1v7.4L8 14.8l-5.6-3.1V4.3L8 1.2zm0 2L4.4 5.2 8 7.2l3.6-2L8 3.2zM3.9 6.6v4.3L7.2 12.8V8.4L3.9 6.6zm4.9 1.8v4.4l3.3-1.9V6.6L8.8 8.4z"/></svg>`;
+const iconArch = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M6.2 1h3.6v3.6H8.9v1.9h3.3v2.1h1.4V12h-3.4V8.6h1.3V7.4H4.5v1.2h1.3V12H2.4V8.6h1.4V6.5h3.3V4.6H6.2V1z"/></svg>`;
+
+// SOURCE_ICONS is keyed by the words unitSource hands back, so a type with no
+// glyph falls back to its word rather than vanishing.
+const SOURCE_ICONS = {
+  "document": iconDoc,
+  "web page": iconWeb,
+  "repository document": iconRepo,
+  "code module": iconModule,
+  "architecture": iconArch,
+};
+
+// unitSource splits a cache key into the source that produced it and the name
+// of the thing itself. The namespaces are cache plumbing -- they exist so an
+// uploaded README and a repo README cannot collide (internal/diff/keys.go) --
+// and a reader watching a run wants the document's name, not its bucket. The
+// run item's own `kind` field cannot answer this: the API sets it to the bare
+// prefix, so uploads, fetched pages and repo documents all arrive as "doc".
+// Mirrors diff.Namespace; anything unrecognized keeps the raw key, since a
+// half-parsed key is worse than an honest one.
+function unitSource(key) {
+  const k = String(key || "");
+  const colon = k.indexOf(":");
+  if (colon < 0) return { label: "", cls: "", name: k };
+  const prefix = k.slice(0, colon);
+  const id = k.slice(colon + 1);
+  if (prefix === "doc") {
+    if (id.startsWith("upload:")) {
+      return { label: "document", cls: "kind-upload", name: id.slice(7) };
+    }
+    if (id.startsWith("web:")) {
+      return { label: "web page", cls: "kind-web", name: id.slice(4) };
+    }
+    return { label: "repository document", cls: "kind-git", name: id };
+  }
+  if (prefix === "module") return { label: "code module", cls: "kind-git", name: id };
+  if (prefix === "arch") return { label: "architecture", cls: "", name: id };
+  return { label: "", cls: "", name: k };
+}
+
+// unitKeyHTML renders a unit's identity: source as a glyph, name as itself.
+const unitKeyHTML = (key) => {
+  const s = unitSource(key);
+  return `<span class="unit-key">
+    ${s.label ? iconChip(SOURCE_ICONS, s.label, s.cls) : ""}
+    <span class="mono">${esc(s.name)}</span>
+  </span>`;
+};
+
 // uploadWorkspaceFiles pushes a FileList one request at a time, reporting
 // progress into progressEl. Shared by the page dropzone and the wizard's.
 // Calls onDone(okCount, lastBuildState) when at least one file landed.
@@ -452,6 +508,285 @@ function openSourceWizard(ctx) {
 
 // ---- the sources view -------------------------------------------------------
 
+// ---- run feed ----------------------------------------------------------------
+// These render the Recent runs list. They live out here rather than inside
+// showSources because the live poll re-renders the feed alone: rebuilding the
+// whole view on a timer is what used to throw the reader back to the top of
+// the page every five seconds.
+
+const money = (v) => `$${Number(v || 0).toFixed(2)}`;
+
+// Trigger values are queue internals; runs started by hand carry no chip at
+// all (that is the normal case), automatic ones say why they started, with the
+// longer explanation a hover away.
+const triggerChip = {
+  webhook: ["repo push", "A push to the connected repository started this run."],
+  upload: ["documents changed", "Documents were uploaded or removed, so a run was queued."],
+  poll: ["scheduled check", "The poll schedule came due and re-read the source."],
+  continuation: ["leftover pages",
+    "The previous run reached its per-run page cap; this run built the pages it had to defer."],
+};
+
+// Each run reads as one sentence about what happened, not a ledger row.
+const runOutcome = (r) => {
+  if (r.status === "queued") return "Waiting to start";
+  if (r.status === "running") {
+    // Before the plan exists there is genuinely nothing to count, and
+    // "0 of 0" reads as broken rather than as early.
+    if (!r.unitsTotal) return "Ingesting now…";
+    const done = r.unitsDone || 0;
+    return `Ingesting — ${done} of ${r.unitsTotal} ${r.unitsTotal === 1 ? "unit" : "units"} done`;
+  }
+  if (r.status === "failed") return "Failed";
+  if (r.status === "over_budget") return "Stopped at the budget cap";
+  const parts = [];
+  if (r.pagesCreated) parts.push(`${r.pagesCreated} created`);
+  if (r.pagesUpdated) parts.push(`${r.pagesUpdated} updated`);
+  if (r.pagesDeleted) parts.push(`${r.pagesDeleted} removed`);
+  if (!parts.length) return "Nothing changed — no cost";
+  const n = (r.pagesCreated || 0) + (r.pagesUpdated || 0) + (r.pagesDeleted || 0);
+  return `${n === 1 ? "1 page" : `${n} pages`}: ${parts.join(", ")}`;
+};
+
+// Unit states as the queue's own words. The one being written now is bolded by
+// CSS, which is what separates it from the ones merely queued behind it.
+const unitLabel = {
+  running: ["pending", "run-running"],
+  pending: ["queued", "run-queued"],
+  deferred: ["left for the next run", "run-queued"],
+  failed: ["failed", "run-failed"],
+};
+
+// The live list: what is being worked on, what is queued behind it, what
+// already landed. Ordered by the API so the first rows are the ones that
+// answer "is anything happening".
+const liveUnits = (items) => {
+  if (!items.length) return "";
+  return `<div class="detail run-live-units">${items.map((it) => {
+    const [label, cls] = unitLabel[it.status] || ["done", "run-succeeded"];
+    return `<div class="row">
+      ${unitKeyHTML(it.key)}
+      <span>
+        <span class="chip ${cls}">${esc(label)}</span>
+        ${it.tokens > 0 ? `<span class="count">${esc(humanTokens(it.tokens))}</span>` : ""}
+        ${it.costUsd > 0 ? `<span class="count">${money(it.costUsd)}</span>` : ""}
+      </span>
+    </div>`;
+  }).join("")}</div>`;
+};
+
+// What the run has consumed so far. Summed from the units that have settled
+// rather than read off the run row, which is written once when the run ends
+// and reads zero for the whole time anyone is watching.
+const liveTokens = (items) => items.reduce((n, it) => n + (Number(it.tokens) || 0), 0);
+
+// A run's error arrives from the queue as "<cache key>: <what went wrong>",
+// written for whoever reads the logs. Both halves leak: the key is the cache
+// namespacing the reader was never meant to meet, and the tail is often a
+// validation report addressed to whoever maintains the generator, not to the
+// person who uploaded a PDF. So: say which source failed in the words used
+// everywhere else on this page, say what happened in a sentence, and keep the
+// report itself one click away rather than in their face. Nothing is
+// discarded -- an operator who needs the detail still has it, and the CLI and
+// the logs still carry the original untouched.
+const KEY_RE = /^((?:doc:(?:upload:|web:)?|module:|arch:|entry:)[^\s].*?): ([\s\S]*)$/;
+const VIOLATIONS_RE = /^(\d+) validation violation\(s\): ([\s\S]*)$/;
+
+function runErrorHTML(r) {
+  if (!r.error) return "";
+  const keyed = KEY_RE.exec(r.error);
+  // An error that does not name a unit is about the run itself; it has no
+  // source to attribute and no report to hide.
+  if (!keyed) return `<div class="detail hint error">${esc(r.error)}</div>`;
+  const [, key, tail] = keyed;
+  const bad = VIOLATIONS_RE.exec(tail);
+  if (!bad) {
+    return `<div class="detail hint error run-error">${unitKeyHTML(key)}<span>${esc(tail)}</span></div>`;
+  }
+  const n = Number(bad[1]);
+  // One line, deliberately: .review .detail is pre-wrap so that a server
+  // error keeps its own line breaks, which means any indentation written here
+  // would reach the reader as a line break they did not ask for.
+  const sentence = `was written but failed ${n === 1 ? "a check" : `${n} checks`}, `
+    + `so its pages were not kept. Ingest again once the source is fixed.`;
+  return `<div class="detail hint error run-error">${unitKeyHTML(key)}<span>${sentence}</span></div>
+    <details class="run-units" data-keep="err:${esc(r.id)}">
+      <summary>what failed the check</summary>
+      <div class="detail mono">${esc(bad[2])}</div>
+    </details>`;
+}
+
+// A real <progress>: it is announced to screen readers as a progress bar with
+// its value, which a styled div is not.
+const runProgress = (r) => {
+  if (r.status !== "running" || !r.unitsTotal) return "";
+  const done = r.unitsDone || 0;
+  const left = (r.unitsPending || 0) + (r.unitsRunning || 0);
+  return `<div class="detail run-progress">
+    <progress max="${r.unitsTotal}" value="${done}"
+      aria-label="Ingest progress: ${done} of ${r.unitsTotal} units done"></progress>
+    <span class="hint">${left
+      ? `${left} still to go${r.unitsRunning ? `, ${r.unitsRunning} being written now` : ""}`
+      : "finishing up"}</span>
+  </div>`;
+};
+
+const runRow = (r, activeUnits) => `
+  <div class="row" title="${esc(r.created)}">
+    <span><span class="run-dot run-${esc(r.status)}" aria-hidden="true"></span>${esc(runOutcome(r))}</span>
+    <span>
+      ${r.trigger && r.trigger !== "manual" ? (() => {
+        const known = triggerChip[r.trigger];
+        // .chip.help is dashed and cursor:help -- CSS that promises a hover
+        // reveals something. With no explanation to give, the plain chip is
+        // the honest one: the label still says what started the run.
+        if (!known) return `<span class="chip">${esc(r.trigger)}</span>`;
+        const [label, why] = known;
+        return `<span class="chip help" title="${esc(why)}">${esc(label)}</span>`;
+      })() : ""}
+      ${r.ref ? `<span class="count mono">${esc(r.ref)}</span>` : ""}
+      ${(() => {
+        // A live run's total climbs with its units; a finished one reports
+        // what the run row settled. Both are the same question asked at
+        // different moments, so they render in the same place.
+        const t = r.status === "running" ? liveTokens(activeUnits) : (Number(r.tokens) || 0);
+        return t > 0 ? `<span class="count">${esc(humanTokens(t))}</span>` : "";
+      })()}
+      ${r.costUsd > 0 ? `<span class="count">${money(r.costUsd)}</span>` : ""}
+    </span>
+  </div>
+  ${runErrorHTML(r)}
+  ${runProgress(r)}
+  ${r.status === "running" ? liveUnits(activeUnits) : ""}
+  ${r.status !== "running" && r.costUsd > 0
+    ? `<details class="run-units" data-run-items="${esc(r.id)}" data-keep="items:${esc(r.id)}">
+    <summary>tokens and cost by unit</summary>
+    <div class="detail">loading…</div>
+  </details>` : ""}`;
+
+// renderRunsHTML builds the whole feed. Runs group under day headers, newest
+// first; the repeated time chips go.
+function renderRunsHTML(runs, activeUnits) {
+  const runGroups = [];
+  for (const r of runs) {
+    const label = relTime(r.created);
+    if (!runGroups.length || runGroups[runGroups.length - 1].label !== label) {
+      runGroups.push({ label, runs: [] });
+    }
+    runGroups[runGroups.length - 1].runs.push(r);
+  }
+  return runGroups.map((g) => `
+    <div class="run-day">${esc(g.label)}</div>
+    <div class="review run-list">${g.runs.map((r) => runRow(r, activeUnits)).join("")}</div>`).join("")
+    || `<div class="empty">No runs yet. Press Ingest now, or build from the
+        CLI with <span class="mono">kiln build</span>.</div>`;
+}
+
+// fetchRunFeed reads what the feed needs and nothing else: the runs, plus the
+// units of the one that is running. A failed item fetch still yields a feed --
+// the run rows carry their own counts.
+async function fetchRunFeed(ws) {
+  const runs = await api(`/workspaces/${ws}/runs?limit=10`);
+  const active = runs.find((r) => r.status === "running");
+  let activeUnits = [];
+  if (active) {
+    try {
+      activeUnits = await api(`/workspaces/${ws}/runs/${encodeURIComponent(active.id)}/items`);
+    } catch (err) {
+      if (err?.handled) throw err;
+    }
+  }
+  return { runs, activeUnits };
+}
+
+// wireRunItems attaches the lazy per-unit cost loader. Scoped to a root so the
+// poll can re-wire the feed it just replaced without touching the rest of the
+// page.
+function wireRunItems(root, ws) {
+  for (const d of root.querySelectorAll("[data-run-items]")) {
+    d.addEventListener("toggle", async () => {
+      if (!d.open || d.dataset.loaded) return;
+      d.dataset.loaded = "true";
+      const box = d.querySelector(".detail");
+      try {
+        const items = await api(`/workspaces/${ws}/runs/${encodeURIComponent(d.dataset.runItems)}/items`);
+        box.innerHTML = items.map((it) => `<div class="row">
+            ${unitKeyHTML(it.key)}${it.status !== "succeeded" ? (() => {
+              // The same words the live list uses. This branch used to print
+              // the queue's own enum -- "deferred", "over_budget" -- which is
+              // a status name, not a status. The fallback differs from the
+              // live list's: everything here is known not to have succeeded,
+              // so "done" would be a lie about a status we do not recognize.
+              const [label, cls] = unitLabel[it.status] || ["did not finish", "run-failed"];
+              return `<span class="chip ${cls}">${esc(label)}</span>`;
+            })() : ""}
+            <span>
+              ${it.tokens > 0 ? `<span class="count">${esc(humanTokens(it.tokens))}</span>` : ""}
+              <span class="count">${money(it.costUsd)}${it.estCostUsd ? ` (est ${money(it.estCostUsd)})` : ""}</span>
+            </span>
+          </div>`).join("") || "no unit records";
+      } catch (err) {
+        if (!err.handled) box.textContent = err.message;
+      }
+    });
+  }
+}
+
+// pollRuns keeps the run feed live without re-rendering the view. Each tick
+// swaps #run-feed alone and updates the two lines outside it that depend on run
+// state, so scroll position, focus, open sections and the document list all
+// survive -- the reader is scrolled down here precisely because something is
+// moving, and rebuilding the view would throw them back to the top every five
+// seconds. Returns { now, soon } so a queued run can refresh the feed
+// immediately without a page bounce. The timer is registered for view teardown
+// so leaving the page cannot leave one ticking.
+function pollRuns(ws, view, connectors) {
+  let timer = 0;
+  onViewCleanup(() => clearTimeout(timer));
+  const soon = () => { clearTimeout(timer); timer = setTimeout(tick, 5000); };
+
+  async function tick() {
+    if (!view.current()) return;
+    const feed = $("run-feed");
+    if (!feed) return;
+    let runs, activeUnits;
+    try {
+      ({ runs, activeUnits } = await fetchRunFeed(ws));
+    } catch (err) {
+      if (err?.handled) return;
+      // A blip is not worth tearing the feed down over -- the numbers on
+      // screen are still the last true ones. Try again next tick.
+      soon();
+      return;
+    }
+    if (!view.current() || !feed.isConnected) return;
+
+    // Anything the reader opened is a question they asked, and a tick is not
+    // an answer to it. Re-opening a cost breakdown re-fires the toggle that
+    // lazily fills it.
+    const open = [...feed.querySelectorAll("[data-keep]")]
+      .filter((d) => d.open).map((d) => d.dataset.keep);
+    feed.innerHTML = renderRunsHTML(runs, activeUnits);
+    wireRunItems(feed, ws);
+    for (const d of feed.querySelectorAll("[data-keep]")) {
+      if (open.includes(d.dataset.keep)) d.open = true;
+    }
+
+    const active = runs.some((r) => r.status === "queued" || r.status === "running");
+    const note = $("next-build");
+    if (note) note.textContent = nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0);
+    const btn = $("sources-build");
+    if (btn) {
+      btn.disabled = active;
+      btn.textContent = active ? "Ingestion is queued or running" : "Ingest now";
+    }
+    // A finished run stops the poll: the feed is settled until someone acts.
+    if (active) soon();
+  }
+
+  return { now: tick, soon };
+}
+
 async function showSources() {
   const view = beginView("Ingestion", "sources");
   const ws = encodeURIComponent(state.workspace);
@@ -510,6 +845,16 @@ async function showSources() {
       webhook: "ingests automatically on pushes",
       poll: "re-checked on a schedule",
     };
+    // The trigger clause is a verb phrase inside a sentence, not a label. A
+    // mode we have no phrase for drops its clause rather than dropping the
+    // raw value into the middle of one -- "poll; last read 3 days ago" is not
+    // a sentence. What is left is still true and still answers "when was this
+    // last read", which is the half a reader actually came for.
+    const connectorWhen = (c) => {
+      const read = c.lastSynced ? `last read ${relTime(c.lastSynced)}` : "not read yet";
+      const phrase = triggerPhrase[c.triggerMode];
+      return phrase ? `${phrase}; ${read}.` : `${read[0].toUpperCase()}${read.slice(1)}.`;
+    };
     const connectorRow = (c) => `
       <div class="review" data-connector-row="${esc(c.id)}">
         <div class="meta">
@@ -518,7 +863,7 @@ async function showSources() {
         </div>
         <strong>${esc(c.name)}</strong>
         <span class="count mono">${esc(connectorSummary(c))}</span>
-        <div class="detail">${esc(triggerPhrase[c.triggerMode] || c.triggerMode)}; ${c.lastSynced ? `last read ${esc(relTime(c.lastSynced))}` : "not read yet"}.</div>
+        <div class="detail">${esc(connectorWhen(c))}</div>
         ${c.lastError ? `<div class="detail hint error">${esc(c.lastError)}</div>` : ""}
         <div class="meta">
           <button class="btn quiet icon-btn" data-conn-toggle="${esc(c.id)}" data-enabled="${c.enabled}"
@@ -544,119 +889,6 @@ async function showSources() {
             aria-label="Delete ${esc(f.path)}" title="delete">${iconTrash}</button>
         </span>
       </div>`;
-
-    const money = (v) => `$${Number(v || 0).toFixed(2)}`;
-    // Trigger values are queue internals; runs started by hand carry no
-    // chip at all (that is the normal case), automatic ones say why they
-    // started, with the longer explanation a hover away.
-    const triggerChip = {
-      webhook: ["repo push", "A push to the connected repository started this run."],
-      upload: ["documents changed", "Documents were uploaded or removed, so a run was queued."],
-      poll: ["scheduled check", "The poll schedule came due and re-read the source."],
-      continuation: ["leftover pages",
-        "The previous run reached its per-run page cap; this run built the pages it had to defer."],
-    };
-    // Each run reads as one sentence about what happened, not a ledger row.
-    const runOutcome = (r) => {
-      if (r.status === "queued") return "Waiting to start";
-      if (r.status === "running") {
-        // Before the plan exists there is genuinely nothing to count, and
-        // "0 of 0" reads as broken rather than as early.
-        if (!r.unitsTotal) return "Ingesting now…";
-        const done = r.unitsDone || 0;
-        return `Ingesting — ${done} of ${r.unitsTotal} ${r.unitsTotal === 1 ? "unit" : "units"} done`;
-      }
-      if (r.status === "failed") return "Failed";
-      if (r.status === "over_budget") return "Stopped at the budget cap";
-      const parts = [];
-      if (r.pagesCreated) parts.push(`${r.pagesCreated} created`);
-      if (r.pagesUpdated) parts.push(`${r.pagesUpdated} updated`);
-      if (r.pagesDeleted) parts.push(`${r.pagesDeleted} removed`);
-      if (!parts.length) return "Nothing changed — no cost";
-      const n = (r.pagesCreated || 0) + (r.pagesUpdated || 0) + (r.pagesDeleted || 0);
-      return `${n === 1 ? "1 page" : `${n} pages`}: ${parts.join(", ")}`;
-    };
-    // Unit states, in the words the reader needs rather than the queue's.
-    const unitLabel = {
-      running: ["working on it", "run-running"],
-      pending: ["waiting", "run-queued"],
-      deferred: ["left for the next run", "run-queued"],
-      failed: ["failed", "run-failed"],
-    };
-    // The live list: what is being worked on, what is queued behind it, what
-    // already landed. Ordered by the API so the first rows are the ones that
-    // answer "is anything happening".
-    const liveUnits = (items) => {
-      if (!items.length) return "";
-      return `<div class="detail run-live-units">${items.map((it) => {
-        const [label, cls] = unitLabel[it.status] || ["done", "run-succeeded"];
-        return `<div class="row">
-          <span class="mono">${esc(it.key)}</span>
-          <span>
-            <span class="chip ${cls}">${esc(label)}</span>
-            ${it.tokens > 0 ? `<span class="count">${esc(humanTokens(it.tokens))}</span>` : ""}
-            ${it.costUsd > 0 ? `<span class="count">${money(it.costUsd)}</span>` : ""}
-          </span>
-        </div>`;
-      }).join("")}</div>`;
-    };
-
-    // What the run has consumed so far. Summed from the units that have
-    // settled rather than read off the run row, which is written once when the
-    // run ends and reads zero for the whole time anyone is watching.
-    const liveTokens = (items) => items.reduce((n, it) => n + (Number(it.tokens) || 0), 0);
-    // A real <progress>: it is announced to screen readers as a progress bar
-    // with its value, which a styled div is not.
-    const runProgress = (r) => {
-      if (r.status !== "running" || !r.unitsTotal) return "";
-      const done = r.unitsDone || 0;
-      const left = (r.unitsPending || 0) + (r.unitsRunning || 0);
-      return `<div class="detail run-progress">
-        <progress max="${r.unitsTotal}" value="${done}"
-          aria-label="Ingest progress: ${done} of ${r.unitsTotal} units done"></progress>
-        <span class="hint">${left
-          ? `${left} still to go${r.unitsRunning ? `, ${r.unitsRunning} being written now` : ""}`
-          : "finishing up"}</span>
-      </div>`;
-    };
-    const runRow = (r) => `
-      <div class="row" title="${esc(r.created)}">
-        <span><span class="run-dot run-${esc(r.status)}" aria-hidden="true"></span>${esc(runOutcome(r))}</span>
-        <span>
-          ${r.trigger && r.trigger !== "manual" ? (() => {
-            const [label, why] = triggerChip[r.trigger] || [r.trigger, ""];
-            return `<span class="chip help" title="${esc(why)}">${esc(label)}</span>`;
-          })() : ""}
-          ${r.ref ? `<span class="count mono">${esc(r.ref)}</span>` : ""}
-          ${(() => {
-            // A live run's total climbs with its units; a finished one reports
-            // what the run row settled. Both are the same question asked at
-            // different moments, so they render in the same place.
-            const t = r.status === "running" ? liveTokens(activeUnits) : (Number(r.tokens) || 0);
-            return t > 0 ? `<span class="count">${esc(humanTokens(t))}</span>` : "";
-          })()}
-          ${r.costUsd > 0 ? `<span class="count">${money(r.costUsd)}</span>` : ""}
-        </span>
-      </div>
-      ${r.error ? `<div class="detail hint error">${esc(r.error)}</div>` : ""}
-      ${runProgress(r)}
-      ${r.status === "running" ? liveUnits(activeUnits) : ""}
-      ${r.status !== "running" && r.costUsd > 0 ? `<details class="run-units" data-run-items="${esc(r.id)}">
-        <summary>tokens and cost by unit</summary>
-        <div class="detail">loading…</div>
-      </details>` : ""}`;
-    // Runs group under day headers, newest first; the repeated time chips go.
-    const runGroups = [];
-    for (const r of runs) {
-      const label = relTime(r.created);
-      if (!runGroups.length || runGroups[runGroups.length - 1].label !== label) {
-        runGroups.push({ label, runs: [] });
-      }
-      runGroups[runGroups.length - 1].runs.push(r);
-    }
-    const runsHTML = runGroups.map((g) => `
-      <div class="run-day">${esc(g.label)}</div>
-      <div class="review run-list">${g.runs.map(runRow).join("")}</div>`).join("");
 
     if (!view.done(`<h1>Ingestion</h1>
       <p class="hint">What this bench reads and when it read it: a repository,
@@ -696,9 +928,7 @@ async function showSources() {
         `<p class="hint">Each ingest regenerates only the pages whose sources
          changed; an unchanged bench incurs no cost. Runs execute one at a time
          per bench.</p>
-         ${runsHTML ||
-           `<div class="empty">No runs yet. Press Ingest now, or build from the
-            CLI with <span class="mono">kiln build</span>.</div>`}`)}`)) return;
+         <div id="run-feed">${renderRunsHTML(runs, activeUnits)}</div>`)}`)) return;
 
     // Collapsed/expanded choices persist across renders and visits -- the
     // 5-second active-run refresh must not spring sections back open.
@@ -709,25 +939,11 @@ async function showSources() {
 
     // Per-unit cost attribution, fetched lazily on first expand: where the
     // money went, costliest unit first, estimate beside actual.
-    for (const d of document.querySelectorAll("[data-run-items]")) {
-      d.addEventListener("toggle", async () => {
-        if (!d.open || d.dataset.loaded) return;
-        d.dataset.loaded = "true";
-        const box = d.querySelector(".detail");
-        try {
-          const items = await api(`/workspaces/${ws}/runs/${encodeURIComponent(d.dataset.runItems)}/items`);
-          box.innerHTML = items.map((it) => `<div class="row">
-              <span class="mono">${esc(it.key)}${it.status !== "succeeded" ? ` <span class="chip run-failed">${esc(it.status)}</span>` : ""}</span>
-              <span>
-                ${it.tokens > 0 ? `<span class="count">${esc(humanTokens(it.tokens))}</span>` : ""}
-                <span class="count">${money(it.costUsd)}${it.estCostUsd ? ` (est ${money(it.estCostUsd)})` : ""}</span>
-              </span>
-            </div>`).join("") || "no unit records";
-        } catch (err) {
-          if (!err.handled) box.textContent = err.message;
-        }
-      });
-    }
+    wireRunItems(document, ws);
+
+    // The feed refreshes itself from here on: on a timer while a run moves,
+    // and on demand when this page queues one.
+    const refreshRuns = pollRuns(ws, view, connectors);
 
     // ---- actions ------------------------------------------------------------
     const buildNote = (msg, isErr) => {
@@ -740,14 +956,22 @@ async function showSources() {
       hasUpload: connectors.some((c) => c.kind === "upload" && c.enabled),
       refresh: () => { if (view.current()) showSources(); },
     }));
+    // Not once(): this button's disabled state means "a run is active", which
+    // outlives the click, and once() hands the button back on the way out. It
+    // is wired even when it starts disabled, because the poll re-enables it in
+    // place when the run finishes.
     const buildBtn = $("sources-build");
-    if (buildBtn && !buildBtn.disabled) once(buildBtn, async () => {
+    if (buildBtn) buildBtn.addEventListener("click", async () => {
+      if (buildBtn.disabled) return;
+      buildBtn.disabled = true;
       try {
         const res = await api(`/workspaces/${ws}/runs`, { method: "POST", body: {} });
         toast(res.created ? "Run queued" : "A run was already waiting — joined it");
-        // The run appears in Recent runs below; no page bounce.
-        showSources();
+        // The run appears in Recent runs below; no page bounce. The refresh
+        // settles the button to match whatever the queue now says.
+        await refreshRuns.now();
       } catch (err) {
+        buildBtn.disabled = false;
         if (!err.handled) buildNote(err.message, true);
       }
     });
@@ -831,10 +1055,11 @@ async function showSources() {
       });
     }
 
-    // Live-ish while something is moving: the next-ingest line and the run
-    // cards refresh together on a short leash, guarded by the nav token so
-    // leaving the view stops the poll.
-    if (buildActive) setTimeout(() => { if (view.current()) showSources(); }, 5000);
+    // Live-ish while something is moving. The poll touches the run feed and
+    // the two lines that depend on it, never the whole view: re-rendering the
+    // page would scroll the reader back to the top every five seconds, and
+    // they are down here watching the run precisely because it is moving.
+    if (buildActive) refreshRuns.soon();
   } catch (err) {
     if (!err.handled) view.done(banner(err));
   }

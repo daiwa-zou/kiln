@@ -529,6 +529,27 @@
      the list is context for how much is left. */
   .run-live-units .chip.run-running { font-weight: 600; }
 
+  /* A unit's identity: where it came from as a glyph, what it is as its own
+     name. The wrapper keeps the glyph out of the monospace box, and lets a
+     long document path wrap instead of shoving the cost off the row. */
+  .unit-key {
+    display: inline-flex; align-items: center; gap: 8px;
+    min-width: 0; overflow-wrap: anywhere;
+  }
+  .unit-key .chip { flex: none; }
+
+  /* A failure names its source first, then says what happened -- the chip sits
+     on the first line rather than in a column of its own. */
+  .run-error {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
+    margin: 2px 0 6px 17px;
+  }
+  .run-error .unit-key { align-self: center; }
+  .run-error .unit-key .mono { color: var(--oxide); }
+  /* The report behind "what failed the check" is the generator's own words:
+     readable when sought, never shouted. */
+  .run-units .detail.mono { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
+
   @media (max-width: 620px) {
     .run-progress { flex-wrap: wrap; gap: 4px; }
     .run-progress .hint { white-space: normal; }

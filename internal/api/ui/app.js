@@ -979,10 +979,11 @@ const REVIEW_ACTION_ICONS = { approve: iconApprove, keep: iconKeep, dismiss: ico
 // iconChip swaps a word for its glyph and keeps the word as the tooltip and the
 // accessible name. `kind` is free-form text chosen by whatever filed the review,
 // so anything unmapped falls back to the word it always was -- a chip with no
-// glyph and no label would be a decision nobody can read.
-const iconChip = (icons, name) => icons[name]
-  ? `<span class="chip icon-chip" title="${esc(name)}">${icons[name]}<span class="sr-only">${esc(name)}</span></span>`
-  : `<span class="chip">${esc(name)}</span>`;
+// glyph and no label would be a decision nobody can read. `extra` carries a
+// palette class (the kind-* colours) for callers that have one.
+const iconChip = (icons, name, extra = "") => icons[name]
+  ? `<span class="chip icon-chip ${extra}" title="${esc(name)}">${icons[name]}<span class="sr-only">${esc(name)}</span></span>`
+  : `<span class="chip ${extra}">${esc(name)}</span>`;
 
 // reviewResearch renders the research half of a card: the button that hands
 // the question to a worker, the note that one is already reading, and the
