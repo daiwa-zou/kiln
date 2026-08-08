@@ -188,22 +188,53 @@ WCAG 2.2 AA; what that means here and what was measured is in
 Requires Go 1.25 and Postgres 16. The `claude` CLI is only needed when
 `agent.runner = "cli"`; the default runner calls the Anthropic API directly.
 
-```bash
-make test              # hermetic: unit + golden tests, no network, no database
-make test-integration  # starts Postgres in Docker, runs everything including schema tests
-make cover             # coverage profile + regenerate the README coverage badge
-make                   # every target, grouped by where it runs
-make lint              # golangci-lint, same config CI runs
-make vulncheck         # govulncheck against the Go vulnerability database
-make build             # -> bin/kiln
-make migrate           # apply schema (advisory-lock guarded, safe to run concurrently)
-make dev-up            # one command: database, schema, a built wiki, then the server
-make dev               # just the server + worker, against a wiki that already exists
-make db-up / db-down   # manage the test Postgres container
-make k8s-up            # a persistent local instance on Docker Desktop's Kubernetes
-```
+`make` with no arguments (or `make help`) prints every target grouped by where
+it runs, which is the fastest way to find one. The full reference follows.
 
-The operational commands exist for both places kiln runs, under the same names:
+Three targets spend real money — `make dev-cli`, `make k8s-up`, and
+`make test-claude`. Everything else is free.
+
+### Build and check
+
+| target | what it does |
+| --- | --- |
+| `make build` | compiles `bin/kiln`, stamping the version from `git describe`. |
+| `make all` | `fmt`, `test`, `build`. |
+| `make test` | unit and golden tests. Hermetic: no network, no database, no cost. |
+| `make test-verbose` | the same suite with `-v -race`. |
+| `make test-integration` | starts Postgres in Docker and runs everything, schema tests included. |
+| `make cover` | coverage profile, prints the total, regenerates the README badge. This is the CI gate — a plain `go test` passes while coverage is under the floor. |
+| `make lint` | golangci-lint, pinned to the version CI runs. |
+| `make vulncheck` | govulncheck against the Go vulnerability database. |
+| `make fmt` / `make tidy` | gofmt every package; prune and sync `go.mod`. |
+| `make db-up` / `make db-down` | start or remove the Postgres container on `:55432`, shared by the tests and the dev database. |
+| `make test-claude` | **spends money.** The one check the suite cannot make: a real `claude`, a real model call, real prose imported as a page. Needs a logged-in session; costs a few cents. |
+| `make clean` | remove `bin/` and `dist/`. |
+
+Integration tests key off `KILN_TEST_DATABASE_URL` and skip themselves when it
+is unset, so `make test` stays fast and offline.
+
+### Running it locally
+
+| target | what it does |
+| --- | --- |
+| `make dev-up` | **start here.** Database, schema, a built wiki, then the server — from nothing, in one command. |
+| `make dev` | just the server and worker, against a wiki that already exists. Fake runner: full pipeline, placeholder prose, zero cost. |
+| `make dev-cli` | **spends money.** `make dev` with the real Claude Code CLI instead of the fake runner, a master key so credential-backed connectors work, and budgets sized for real documents. Override with `ANALYZE_USD=`, `PAGE_USD=`, `RUN_USD=`; set all three to `0` to remove the caps entirely. |
+| `make dev-build` | one build of this repository into the dev wiki, from another terminal. |
+| `make dev-seed` | builds this repository into the dev wiki until it converges. A run stops at `max_pages_per_run` and defers the rest, so this loops until a run reports nothing changed. |
+| `make dev-db` / `make migrate-dev` | create the `kiln_dev` database; apply migrations to it. |
+| `make dev-clean` | drop `kiln_dev` and the local blob store. |
+| `make migrate` | apply migrations using the default config, for a real deployment on this machine. Advisory-lock guarded, so concurrent runs are safe. |
+| `make doctor` | configuration, database, schema, master key, and — when the CLI runner is selected — whether the claude session is usable. Free. `PROBE=1` adds a real generation round trip, the only conclusive answer about a credential. |
+| `make token` | mint an API token against the dev database. `LOGIN=you` sets the login. |
+| `make status` | is the local stack up: the Postgres container and the server's readiness endpoint. |
+
+### The same questions, in Kubernetes
+
+The operational commands exist for both places kiln runs, under matching names.
+The in-cluster ones run inside a pod, because that is where the configuration
+and the database are.
 
 | | local | Kubernetes |
 | --- | --- | --- |
@@ -212,13 +243,28 @@ The operational commands exist for both places kiln runs, under the same names:
 | mint an API token | `make token` | `make k8s-token` |
 | what is running | `make status` | `make k8s-status` |
 
-`make doctor` and `make k8s-doctor` check configuration, the database, the
-schema, and — when the CLI runner is selected — whether the claude session is
-actually usable. They cost nothing; `PROBE=1` adds a real generation round trip,
-which is the only conclusive answer about a credential.
+| target | what it does |
+| --- | --- |
+| `make k8s-up` | **spends money.** Build, load, apply, wait; prints the URL and a token. Generation runs through the Claude Code CLI, so every build has a real cost. |
+| `make k8s-down` | stop the workloads and keep the volumes — the wiki is still there next time. |
+| `make k8s-purge` | delete the namespace and every volume in it, data included. |
+| `make k8s-status` | pods, services, and volumes. |
+| `make k8s-logs` | follow the worker, where generation happens. `C=api` or `C=postgres` for the others. |
+| `make k8s-doctor` | the in-cluster `make doctor`, run in the worker pod — the one whose CLI credential state matters. `PROBE=1` applies here too. |
+| `make k8s-migrate` | apply migrations to a cluster already running, without a redeploy. `k8s-up` runs them as a Job on the way in. |
+| `make k8s-token` | mint another API token. |
+| `make k8s-sync` | `SRC=/path/to/repo` copies a local directory into the sources volume. The cluster's nodes cannot see your filesystem, so copying is the way in. |
+| `make k8s-reauth` | discard the credential the worker refreshed for itself and re-seed from the secret, after a re-exported Claude Code session. |
+| `make k8s-shell` | a shell in the worker pod. |
 
-Integration tests key off `KILN_TEST_DATABASE_URL` and skip themselves when it is
-unset, so `make test` stays fast and offline.
+### Images and charts
+
+| target | what it does |
+| --- | --- |
+| `make image` | build the container image CI publishes. `VERSION=` overrides the tag. |
+| `make compose-up` / `make compose-down` | bring the docker compose stack up, or down with its volumes. |
+| `make helm-lint` | lint the Helm chart. |
+| `make manifests` | render the chart to plain YAML for GitOps repositories and Kustomize overlays. |
 
 ### Local end-to-end run (no API key, zero cost)
 
@@ -280,9 +326,15 @@ cannot read `.golangci.yml`.
 ### Local Kubernetes, generating through the Claude Code CLI
 
 `make dev-up` proves the pipeline; it does not prove generation, because the
-fake runner writes the prose. For that there is a persistent instance on the
-Kubernetes built into Docker Desktop, with `agent.runner = "cli"` — the worker
-shells out to `claude -p` against the real sources:
+fake runner writes the prose. `make dev-cli` is the shortest way to prove that
+too — the same local stack with the real CLI runner, using the `claude` session
+already on your machine.
+
+What Kubernetes adds is persistence and the shape of a deployment: a worker in
+its own pod, Postgres and the blob store on volumes, and generation running
+against sources staged inside the cluster rather than read from your working
+copy. `agent.runner = "cli"` there as well — the worker shells out to
+`claude -p` against the staged sources:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... make k8s-up       # then open http://localhost:8080
