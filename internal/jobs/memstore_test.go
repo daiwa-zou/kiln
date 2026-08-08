@@ -167,6 +167,20 @@ func (m *memStore) MarkRunItem(_ context.Context, _ string, item ItemSummary) er
 	return nil
 }
 
+// marksOf returns one unit's progress records in order, for asserting on what
+// they carried rather than only on the status they announced.
+func (m *memStore) marksOf(key diff.Key) []ItemSummary {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []ItemSummary
+	for _, it := range m.marks {
+		if it.Key == key {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
 // marksFor returns one unit's status transitions in order, which is the
 // property the progress feature turns on: pending -> running -> settled.
 func (m *memStore) marksFor(key diff.Key) []string {

@@ -93,6 +93,10 @@ func (s *scriptedRunner) Run(_ context.Context, req agent.Request) (*agent.Resul
 	res := &agent.Result{
 		Subtype: "success", TerminalReason: "completed",
 		SessionID: req.SessionID, NumTurns: 1, TotalCostUSD: s.costPerCall,
+		// Every runner reports usage, and the pipeline's progress reporting
+		// carries it per unit, so a scripted call that billed nothing would
+		// make that path untestable.
+		Usage: agent.Usage{InputTokens: 1000, OutputTokens: 200},
 	}
 
 	if req.Step == agent.StepAnalyze && s.analyzeResult != "" {
@@ -645,6 +649,60 @@ func TestBuildPublishesPlanBeforeGenerating(t *testing.T) {
 	}
 	if last := got[len(got)-1]; last != StatusSucceeded {
 		t.Errorf("module:ripple settled as %q, want %q", last, StatusSucceeded)
+	}
+}
+
+// A one-unit ingest is the case that made this necessary. Its unit's spend used
+// to be published only when the unit landed, so the single-document bench --
+// the most common way anyone first runs kiln -- reported zero tokens for the
+// whole build and then the total, which reads as "this is costing nothing" for
+// exactly as long as it takes to be wrong.
+func TestUnitReportsSpendBeforeItSettles(t *testing.T) {
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.filesByAttempt[0] = map[string]string{
+		"entities/ripple.md": validPage("entity", "Ripple"),
+	}
+
+	p := testPipeline(store, runner)
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"})
+
+	if _, err := p.Build(context.Background(), testRequest(t, m, diff.ChangeSet{FullRebuild: true})); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	marks := store.marksOf("module:ripple")
+	if len(marks) < 3 {
+		t.Fatalf("unit published %d progress records, want a running/spend/settle sequence: %+v",
+			len(marks), marks)
+	}
+
+	// The first record announces the unit starting and has nothing to report;
+	// what matters is that some record *before* the settle already carries the
+	// analyze call's tokens.
+	var spentWhileRunning bool
+	for _, it := range marks[:len(marks)-1] {
+		if it.Status == StatusRunning && it.Tokens > 0 {
+			spentWhileRunning = true
+		}
+	}
+	if !spentWhileRunning {
+		t.Errorf("no in-flight record carried tokens; a watcher sees zero until the unit lands: %+v", marks)
+	}
+
+	// The settle is still the authority, and still the larger number: it
+	// includes the generate call the in-flight record could not have seen.
+	settled := marks[len(marks)-1]
+	if settled.Status != StatusSucceeded {
+		t.Fatalf("last record settled as %q, want %q", settled.Status, StatusSucceeded)
+	}
+	if settled.Tokens <= 0 || settled.CostUSD <= 0 {
+		t.Errorf("settled record reports %d tokens and $%v", settled.Tokens, settled.CostUSD)
+	}
+	for _, it := range marks[:len(marks)-1] {
+		if it.Tokens > settled.Tokens {
+			t.Errorf("an in-flight record claimed more than the settled total: %+v vs %+v", it, settled)
+		}
 	}
 }
 

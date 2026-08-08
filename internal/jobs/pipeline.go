@@ -583,6 +583,13 @@ func (p *Pipeline) generateUnit(
 		res.Err = err
 		return res
 	}
+	// The analysis is paid for and the unit has a way to go. Publishing here is
+	// what makes a single-unit ingest observable at all: the settle in fanout
+	// reports the unit's whole spend at once, so a bench with one document
+	// showed nothing for the entire run and then everything, which reads as
+	// "this is not costing anything" right up until it reads as "that is what
+	// it cost".
+	p.publishSpend(ctx, req.RunID, key, &res)
 
 	// The plan is handed to generation explicitly. The CLI runner also resumes
 	// the session, but the default API runner is stateless -- without this the
@@ -653,6 +660,10 @@ func (p *Pipeline) generateUnit(
 
 		p.logger().Warn("validation failed; retrying",
 			"key", key, "attempt", attempt+1, "violations", len(lastViolations))
+		// A retry is the other moment a unit has spent more and is not done.
+		// Without this the extra attempts a struggling unit pays for are
+		// invisible until it either succeeds or gives up.
+		p.publishSpend(ctx, req.RunID, key, &res)
 		// Clear the scratch dir so a partial attempt is not re-collected.
 		if scratch != "" {
 			if err := os.RemoveAll(scratch); err != nil {
