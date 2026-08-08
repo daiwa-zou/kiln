@@ -493,17 +493,18 @@ func (s *WikiStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 	// them, and remains correct for a CLI run whose items are all new.
 	for _, item := range run.Items {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, est_cost_usd, turns, error, finished_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
+			INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, est_cost_usd, turns, tokens, error, finished_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
 			ON CONFLICT (run_id, cache_key) DO UPDATE SET
 			    status       = EXCLUDED.status,
 			    cost_usd     = EXCLUDED.cost_usd,
 			    est_cost_usd = COALESCE(EXCLUDED.est_cost_usd, run_items.est_cost_usd),
 			    turns        = EXCLUDED.turns,
+			    tokens       = EXCLUDED.tokens,
 			    error        = EXCLUDED.error,
 			    finished_at  = EXCLUDED.finished_at`,
 			runID, item.Key.Prefix(), string(item.Key), item.Status,
-			item.CostUSD, nullableFloat(item.EstCostUSD), item.Turns, nullable(item.Err),
+			item.CostUSD, nullableFloat(item.EstCostUSD), item.Turns, item.Tokens, nullable(item.Err),
 		); err != nil {
 			return fmt.Errorf("store: record run item %s: %w", item.Key, err)
 		}

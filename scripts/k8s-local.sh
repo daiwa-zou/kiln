@@ -483,6 +483,49 @@ cmd_shell() {
 	kn exec -it "$pod" -c worker -- bash
 }
 
+# pod_of prints a running pod for a component, or explains what to do instead.
+# It reports failure rather than calling die: callers read it through command
+# substitution, and a die there would exit only the subshell -- leaving the
+# caller to run kubectl with an empty pod name and print a second, confusing
+# error underneath the useful one.
+pod_of() {
+	local component="$1" pod
+	pod="$(kn get pod -l app.kubernetes.io/component="$component" \
+		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+	if [ -z "$pod" ]; then
+		printf '%serror:%s no %s pod is running; run "make k8s-up" first\n' \
+			"$RED" "$RESET" "$component" >&2
+		return 1
+	fi
+	printf '%s' "$pod"
+}
+
+# doctor and migrate exist locally as `make doctor` and `make migrate`, and the
+# questions they answer -- is the configuration sound, is the schema current --
+# are worth more against the cluster than against a laptop, because that is
+# where the answer is not obvious. Run inside the pod rather than from the host:
+# the configuration lives in the pod's environment and the database is only
+# reachable from inside the namespace.
+#
+# The worker is the pod to ask: it is the one that runs the agent, so it is the
+# only one whose CLI credential state doctor can see.
+cmd_doctor() {
+	preflight
+	local pod
+	pod="$(pod_of worker)" || return 1
+	kn exec "$pod" -c worker -- kiln admin doctor "$@"
+}
+
+# k8s-up runs migrations as a Job before the deployments start, so this is for
+# the case that Job cannot cover: a schema change applied to a cluster that is
+# already up, without a full redeploy.
+cmd_migrate() {
+	preflight
+	local pod
+	pod="$(pod_of api)" || return 1
+	kn exec "$pod" -c api -- kiln admin migrate
+}
+
 usage() {
 	cat <<-EOF
 	usage: scripts/k8s-local.sh <command>
@@ -496,6 +539,8 @@ usage() {
 	  sync <path>      copy a local directory into the sources volume
 	  reauth           replace the stored Claude Code credential with the secret's
 	  shell            a shell in the worker pod
+	  doctor [--probe] check config, database, schema, and the CLI credential
+	  migrate          apply pending migrations to a cluster already running
 
 	environment:
 	  ANTHROPIC_API_KEY              model access for the Claude Code CLI
@@ -526,6 +571,8 @@ main() {
 		sync)   cmd_sync "$@" ;;
 		reauth) cmd_reauth "$@" ;;
 		shell)  cmd_shell "$@" ;;
+		doctor) cmd_doctor "$@" ;;
+		migrate) cmd_migrate "$@" ;;
 		-h|--help|help) usage ;;
 		*)      usage >&2; exit 2 ;;
 	esac

@@ -35,6 +35,7 @@ type RunSummaryJSON struct {
 	Ref          string  `json:"ref,omitempty"`
 	Status       string  `json:"status"`
 	CostUSD      float64 `json:"costUsd"`
+	Tokens       int64   `json:"tokens"`
 	PagesCreated int     `json:"pagesCreated"`
 	PagesUpdated int     `json:"pagesUpdated"`
 	PagesDeleted int     `json:"pagesDeleted"`
@@ -93,6 +94,7 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, RunSummaryJSON{
 			ID: run.ID, Trigger: run.Trigger, Ref: run.Ref, Status: run.Status,
 			CostUSD:      run.CostUSD,
+			Tokens:       run.Tokens,
 			PagesCreated: run.PagesCreated, PagesUpdated: run.PagesUpdated,
 			PagesDeleted: run.PagesDeleted,
 			Error:        run.Error, ClaimedBy: run.ClaimedBy,
@@ -126,7 +128,7 @@ func (s *Server) handleRunItems(w http.ResponseWriter, r *http.Request) {
 	for _, it := range items {
 		row := map[string]any{
 			"key": it.Key, "kind": it.Kind, "status": it.Status,
-			"costUsd": it.CostUSD, "turns": it.Turns,
+			"costUsd": it.CostUSD, "turns": it.Turns, "tokens": it.Tokens,
 		}
 		if it.EstCostUSD != nil {
 			row["estCostUsd"] = *it.EstCostUSD

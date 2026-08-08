@@ -1,0 +1,20 @@
+-- Tokens per unit, not just per run.
+--
+-- The run row has carried a token total since the first schema, but it is
+-- written once, in the transaction that finishes the run. That makes it a
+-- receipt: it answers what a completed build consumed and nothing at all about
+-- one still going. Cost had already been pulled down to the unit and settled
+-- progressively (007); tokens were computed alongside it in the pipeline, added
+-- to the run total, and then dropped, because ItemSummary had nowhere to put
+-- them.
+--
+-- With the column here, the same row that already reports "this unit finished,
+-- and it cost this much" also reports what it spent to do it, as it happens. A
+-- run in flight can then be totalled from its settled items rather than waited
+-- on -- which is the only way a number that moves can be shown while it moves.
+--
+-- BIGINT to match runs.tokens, and defaulted so the rows already in the table
+-- read as zero rather than null: a build from before this migration genuinely
+-- has no per-unit figure, and zero is the honest rendering of "not recorded"
+-- for a column that only ever counts up.
+ALTER TABLE run_items ADD COLUMN tokens BIGINT NOT NULL DEFAULT 0;
