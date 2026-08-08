@@ -44,19 +44,6 @@ type Scanner struct {
 // would change with it, and nothing would ever be skipped.
 const RootModuleSlug = "root"
 
-// Kind implements mapper.Mapper.
-func (s *Scanner) Kind() string { return "git" }
-
-// Map implements mapper.Mapper, converting a scan into the partitioning the
-// pipeline consumes.
-func (s *Scanner) Map(ctx context.Context, set *mapper.SourceSet) (*mapper.WorkspaceMap, error) {
-	rm, err := s.Scan(ctx, set.Root)
-	if err != nil {
-		return nil, err
-	}
-	return rm.ToWorkspaceMap(), nil
-}
-
 // Scan walks a repository and produces its map. It performs no LLM calls and
 // is fast enough to run on every build.
 func (s *Scanner) Scan(ctx context.Context, root string) (*RepoMap, error) {

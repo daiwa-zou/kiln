@@ -79,11 +79,6 @@ func (c *Client) AuthorizeURL(state string) string {
 	return c.base() + "/login/oauth/authorize?" + q.Encode()
 }
 
-// InstallURL is where the browser goes to install the App on an account.
-func (c *Client) InstallURL(appSlug string) string {
-	return c.base() + "/apps/" + url.PathEscape(appSlug) + "/installations/new"
-}
-
 // ExchangeCode swaps an OAuth callback code for a user access token.
 func (c *Client) ExchangeCode(ctx context.Context, code string) (string, error) {
 	form := url.Values{

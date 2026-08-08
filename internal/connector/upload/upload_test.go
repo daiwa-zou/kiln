@@ -36,7 +36,7 @@ func TestSyncExtractsDocuments(t *testing.T) {
 		"node_modules/x.md": "# Vendored\n",
 	})
 
-	set, err := New().Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	set, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestSyncSkipsEmptyExtractions(t *testing.T) {
 		"real.md":  "# Real\n\nContent.\n",
 	})
 
-	set, err := New().Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	set, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestSyncStagesExtractedText(t *testing.T) {
 	root := fixture(t, map[string]string{"notes.md": "# Notes\n\nBody.\n"})
 	staging := t.TempDir()
 
-	set, err := New().Sync(context.Background(), connector.Config{"path": root}, staging)
+	set, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": root}, staging)
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -142,11 +142,11 @@ func TestSyncHashesAreContentOnly(t *testing.T) {
 
 	// The same document in two folders must hash identically, or a restaged
 	// upload would look changed and regenerate for nothing.
-	first, err := New().Sync(context.Background(), connector.Config{"path": fixture(t, files)}, t.TempDir())
+	first, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": fixture(t, files)}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := New().Sync(context.Background(), connector.Config{"path": fixture(t, files)}, t.TempDir())
+	second, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": fixture(t, files)}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,11 +161,11 @@ func TestSyncIsDeterministic(t *testing.T) {
 		"z.md": "# Z\n", "a.md": "# A\n", "m/nested.md": "# M\n",
 	})
 
-	first, err := New().Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	first, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := New().Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	second, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestSyncIsDeterministic(t *testing.T) {
 }
 
 func TestSyncRejectsBadPaths(t *testing.T) {
-	c := New()
+	c := &Connector{}
 	ctx := context.Background()
 
 	if _, err := c.Sync(ctx, connector.Config{}, ""); err == nil {

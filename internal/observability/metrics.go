@@ -138,10 +138,6 @@ func NewMetrics() *Metrics {
 	return m
 }
 
-// Registry exposes the collectors for tests and for a caller that wants to
-// mount the handler itself.
-func (m *Metrics) Registry() *prometheus.Registry { return m.registry }
-
 // Handler serves the exposition format.
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{

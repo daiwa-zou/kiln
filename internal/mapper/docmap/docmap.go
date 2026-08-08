@@ -1,11 +1,8 @@
 // Package docmap partitions documents into units.
 //
-// This is the second Mapper alongside repomap, and it exists as much to prove
-// the abstraction as to serve documents: a Mapper interface with one
-// implementation is an assumption, not a seam. Where repomap partitions by
-// manifest boundaries, docmap partitions by document and by heading structure,
-// which is about as different as two mappers get while producing the same
-// WorkspaceMap.
+// Where repomap partitions by manifest boundaries, docmap partitions by
+// document and by heading structure, which is about as different as two
+// mappers get while producing the same WorkspaceMap.
 package docmap
 
 import (
@@ -13,9 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -49,7 +44,7 @@ type Doc struct {
 	Origin string
 }
 
-// Mapper implements mapper.Mapper for documents.
+// Mapper partitions documents into units.
 type Mapper struct {
 	// SplitMinBytes overrides the default split threshold.
 	SplitMinBytes int
@@ -57,37 +52,8 @@ type Mapper struct {
 	Now func() time.Time
 }
 
-// Kind implements mapper.Mapper.
+// Kind names the source type stamped into the maps this mapper produces.
 func (m *Mapper) Kind() string { return "doc" }
-
-// Map implements mapper.Mapper.
-//
-// The generic SourceSet carries no extracted text, so this reads what the
-// connector staged; without that read, no document could ever split into
-// sections on this path. MapDocs is the direct entry point when the caller
-// already has the documents in hand.
-func (m *Mapper) Map(ctx context.Context, set *mapper.SourceSet) (*mapper.WorkspaceMap, error) {
-	docs := make([]Doc, 0, len(set.Items))
-	for _, item := range set.Items {
-		staged := item.Path
-		if !filepath.IsAbs(staged) {
-			staged = filepath.Join(set.Root, staged)
-		}
-		raw, err := os.ReadFile(staged)
-		if err != nil {
-			return nil, fmt.Errorf("docmap: read staged text for %s: %w", item.Key, err)
-		}
-		docs = append(docs, Doc{
-			Key:    item.Key,
-			Path:   item.Path,
-			Title:  item.Title,
-			Text:   string(raw),
-			Hash:   item.Hash,
-			Origin: item.Origin,
-		})
-	}
-	return m.MapDocs(ctx, set.Root, docs)
-}
 
 // MapDocs partitions documents into units.
 func (m *Mapper) MapDocs(_ context.Context, root string, docs []Doc) (*mapper.WorkspaceMap, error) {

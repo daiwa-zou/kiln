@@ -1,16 +1,14 @@
 // Package mapper turns a materialized set of sources into the partitioning that
 // drives page generation.
 //
-// A Mapper is the only source-kind-specific piece of the pipeline besides the
-// prompts. Everything downstream of WorkspaceMap -- diff routing, cascade
-// deletion, validation, the deterministic index, storage, and the UI -- is
-// shared across every connector.
+// The mappers (repomap for code, docmap for documents) are the only
+// source-kind-specific pieces of the pipeline besides the prompts. Everything
+// downstream of WorkspaceMap -- diff routing, cascade deletion, validation,
+// the deterministic index, storage, and the UI -- is shared across every
+// connector.
 package mapper
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 // Unit is one primary page plus its satellites: a code module, a document, a
 // web page. It is the granularity at which regeneration is decided, so its
@@ -54,35 +52,4 @@ type WorkspaceMap struct {
 	Edges         []Edge    `json:"edges"`
 	Summary       string    `json:"summary"` // rendered, citable by the agent
 	Hash          string    `json:"hash"`    // changes when the shape changes
-}
-
-// SourceSet is what a Connector materializes for a Mapper to read.
-//
-// This mirrors connector.SourceSet rather than reusing it, so the mapper layer
-// does not depend on the connector layer. The duplication is deliberate but
-// worth watching: if a third field has to be kept in step across both, they
-// should become one type.
-type SourceSet struct {
-	Root string
-	// Kind names the connector that produced this, so a caller can pick a
-	// matching Mapper.
-	Kind  string
-	Items []SourceItem
-}
-
-// SourceItem is one piece of raw material.
-type SourceItem struct {
-	Key    string
-	Kind   string
-	Title  string
-	Hash   string
-	Path   string // local path to extracted text or the original file
-	Origin string // deep link back to GitHub / Notion / the URL
-	Meta   map[string]any
-}
-
-// Mapper partitions a SourceSet into units.
-type Mapper interface {
-	Kind() string
-	Map(ctx context.Context, set *SourceSet) (*WorkspaceMap, error)
 }

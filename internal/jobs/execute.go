@@ -302,104 +302,123 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	return p.Build(ctx, breq)
 }
 
-// syncDocs ingests a documents directory through the upload connector and maps
-// it with docmap, returning the map and the doc paths to add to routing.
+// docSource names the facts on which the upload and web ingests differ. Both
+// are the same procedure -- fetch through a connector, map with docmap, report
+// skips, build routes -- and syncDocSource is that procedure written once.
+type docSource struct {
+	kind    string           // connector to fetch through
+	subject string           // what is being synced, for the log line
+	prefix  string           // staging directory prefix
+	noun    string           // what one unit of material is called in output
+	config  connector.Config // connector-specific location of the material
+	// origin namespaces a doc's origin into the change-routing key space
+	// (diff.UploadOrigin / diff.WebOrigin).
+	origin func(string) string
+	// payload reads the connector's native result: the docs to map, and the
+	// skipped items as (subject, reason) pairs.
+	payload func(*connector.SourceSet) ([]docmap.Doc, [][2]string, bool)
+}
+
+// syncDocSource ingests documents through one connector and maps them with
+// docmap, returning the map and the routes to add to change routing.
 //
 // The returned staging directory holds the extracted text the unit inputs point
 // at. It must outlive the build -- prompts are assembled from it -- so the
 // caller owns removing it rather than a defer here.
-func syncDocs(ctx context.Context, out io.Writer, dir string) (_ *mapper.WorkspaceMap, _ map[string]diff.Key, staging string, err error) {
-	absDocs, err := filepath.Abs(dir)
+func syncDocSource(ctx context.Context, out io.Writer, src docSource) (_ *mapper.WorkspaceMap, _ map[string]diff.Key, staging string, err error) {
+	conn, err := connector.Get(src.kind)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), src.subject)
+
+	staging, err = os.MkdirTemp("", src.prefix)
 	if err != nil {
 		return nil, nil, "", err
 	}
 
-	conn, err := connector.Get("upload")
-	if err != nil {
-		return nil, nil, "", err
-	}
-	fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), absDocs)
-
-	staging, err = os.MkdirTemp("", "kiln-docs-")
-	if err != nil {
-		return nil, nil, "", err
-	}
-
-	set, err := conn.Sync(ctx, connector.Config{"path": absDocs}, staging)
+	set, err := conn.Sync(ctx, src.config, staging)
 	if err != nil {
 		return nil, nil, staging, err
 	}
-
-	payload := upload.PayloadOf(set)
-	if payload == nil {
-		return nil, nil, staging, fmt.Errorf("upload connector returned no documents payload")
+	docs, skipped, ok := src.payload(set)
+	if !ok {
+		return nil, nil, staging, fmt.Errorf("%s connector returned no documents payload", src.kind)
 	}
 
 	dm := &docmap.Mapper{}
-	wm, err := dm.MapDocs(ctx, staging, payload.Docs)
+	wm, err := dm.MapDocs(ctx, staging, docs)
 	if err != nil {
 		return nil, nil, staging, err
 	}
 
-	fmt.Fprintf(out, "  %d document(s), %d units\n", len(payload.Docs), len(wm.Units))
+	fmt.Fprintf(out, "  %d %s, %d units\n", len(docs), src.noun, len(wm.Units))
 	// Skips are reported rather than swallowed: a folder that silently ingested
 	// half its files would look like a working build.
-	for _, s := range payload.Skipped {
-		fmt.Fprintf(out, "  skipped %s: %s\n", s.Path, s.Reason)
+	for _, s := range skipped {
+		fmt.Fprintf(out, "  skipped %s: %s\n", s[0], s[1])
 	}
 
-	// Routes are keyed by the namespaced upload path (diff.UploadOrigin), the
-	// same namespace the connector keys the source cache with, so an uploaded
-	// document can never collide with a repo file of the same name. A future
-	// incremental change source for uploads must emit paths through
-	// diff.UploadOrigin to be routable.
+	// Routes are keyed by the namespaced origin, the same namespace the
+	// connector keys the source cache with, so an ingested document can never
+	// collide with a repo file of the same name. A future incremental change
+	// source for either connector must emit paths through the same origin
+	// function to be routable.
 	routes := map[string]diff.Key{}
-	for _, d := range payload.Docs {
-		routes[diff.UploadOrigin(d.Origin)] = diff.Key(d.Key)
+	for _, d := range docs {
+		routes[src.origin(d.Origin)] = diff.Key(d.Key)
 	}
 	return wm, routes, staging, nil
 }
 
-// syncWeb ingests fetched pages through the web connector, mirroring
-// syncDocs: the staging directory holds the extracted text the unit inputs
-// point at and must outlive the build.
-func syncWeb(ctx context.Context, out io.Writer, urls []string) (_ *mapper.WorkspaceMap, _ map[string]diff.Key, staging string, err error) {
-	conn, err := connector.Get("web")
+// syncDocs ingests a documents directory through the upload connector.
+func syncDocs(ctx context.Context, out io.Writer, dir string) (*mapper.WorkspaceMap, map[string]diff.Key, string, error) {
+	absDocs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	fmt.Fprintf(out, "syncing via %s connector: %d url(s)\n", conn.Kind(), len(urls))
+	return syncDocSource(ctx, out, docSource{
+		kind:    "upload",
+		subject: absDocs,
+		prefix:  "kiln-docs-",
+		noun:    "document(s)",
+		config:  connector.Config{"path": absDocs},
+		origin:  diff.UploadOrigin,
+		payload: func(set *connector.SourceSet) ([]docmap.Doc, [][2]string, bool) {
+			p := upload.PayloadOf(set)
+			if p == nil {
+				return nil, nil, false
+			}
+			skipped := make([][2]string, 0, len(p.Skipped))
+			for _, s := range p.Skipped {
+				skipped = append(skipped, [2]string{s.Path, s.Reason})
+			}
+			return p.Docs, skipped, true
+		},
+	})
+}
 
-	staging, err = os.MkdirTemp("", "kiln-web-")
-	if err != nil {
-		return nil, nil, "", err
-	}
-
-	set, err := conn.Sync(ctx, connector.Config{"urls": urls}, staging)
-	if err != nil {
-		return nil, nil, staging, err
-	}
-	payload := webconn.PayloadOf(set)
-	if payload == nil {
-		return nil, nil, staging, fmt.Errorf("web connector returned no documents payload")
-	}
-
-	dm := &docmap.Mapper{}
-	wm, err := dm.MapDocs(ctx, staging, payload.Docs)
-	if err != nil {
-		return nil, nil, staging, err
-	}
-
-	fmt.Fprintf(out, "  %d page(s), %d units\n", len(payload.Docs), len(wm.Units))
-	for _, s := range payload.Skipped {
-		fmt.Fprintf(out, "  skipped %s: %s\n", s.URL, s.Reason)
-	}
-
-	routes := map[string]diff.Key{}
-	for _, d := range payload.Docs {
-		routes[diff.WebOrigin(d.Origin)] = diff.Key(d.Key)
-	}
-	return wm, routes, staging, nil
+// syncWeb ingests fetched pages through the web connector.
+func syncWeb(ctx context.Context, out io.Writer, urls []string) (*mapper.WorkspaceMap, map[string]diff.Key, string, error) {
+	return syncDocSource(ctx, out, docSource{
+		kind:    "web",
+		subject: fmt.Sprintf("%d url(s)", len(urls)),
+		prefix:  "kiln-web-",
+		noun:    "page(s)",
+		config:  connector.Config{"urls": urls},
+		origin:  diff.WebOrigin,
+		payload: func(set *connector.SourceSet) ([]docmap.Doc, [][2]string, bool) {
+			p := webconn.PayloadOf(set)
+			if p == nil {
+				return nil, nil, false
+			}
+			skipped := make([][2]string, 0, len(p.Skipped))
+			for _, s := range p.Skipped {
+				skipped = append(skipped, [2]string{s.URL, s.Reason})
+			}
+			return p.Docs, skipped, true
+		},
+	})
 }
 
 // routerFor maps module directories to their cache keys so a changed path is
