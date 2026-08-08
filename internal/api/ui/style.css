@@ -264,8 +264,6 @@
     display: inline-flex; align-items: center; justify-content: center;
   }
 
-  .chip.fresh { border-color: var(--ember); color: var(--ember); }
-  .chip.stale { border-color: var(--ash); color: var(--ash); }
 
   /* Run states borrow the same temperature language: active runs glow, failure
      is worth alarm, everything settled reads neutral. Labels carry meaning;

@@ -47,17 +47,26 @@ const byTitle = (a, b) => (a.title || a.slug).localeCompare(b.title || b.slug);
 // relTime renders a date as distance ("3 days ago"); the absolute value rides
 // in datetime/title so precision is a hover away.
 //
+// Distance is counted in calendar days, not in elapsed milliseconds, because
+// "today" and "yesterday" are calendar words: whether a page was written this
+// morning is a question about the date, not about how many hours have passed.
+// Rounding elapsed time answered the second question and got the first wrong --
+// eighteen hours is nearer a day than nothing, so every page flipped to
+// "yesterday" around noon on the day it was written. A timestamp late last
+// night had the mirror bug, reading "today" until the small hours.
+//
 // A bare YYYY-MM-DD is parsed as local midnight rather than left to the
-// built-in rule, which reads it as *UTC* midnight. Page frontmatter carries
-// genuine dates with no time in them, and under the built-in rule every one of
-// them rendered a day early for readers west of UTC -- a page written this
-// morning said "yesterday". Timestamps that do carry a time and a zone are left
-// to Date, which parses them correctly.
+// built-in rule, which reads it as *UTC* midnight and dates every page a day
+// early for readers west of UTC. Timestamps that carry a time and a zone are
+// left to Date, which parses them correctly.
 function relTime(iso) {
   const dateOnly = typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso.trim());
   const d = dateOnly ? new Date(`${iso.trim()}T00:00:00`) : new Date(iso);
   if (isNaN(d)) return String(iso ?? "");
-  const days = Math.round((Date.now() - d.getTime()) / 86400000);
+  const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  // Rounding absorbs the 23- and 25-hour days daylight saving puts between
+  // two midnights; the quotient is otherwise a whole number already.
+  const days = Math.round((midnight(new Date()) - midnight(d)) / 86400000);
   if (days <= 0) return "today";
   if (days === 1) return "yesterday";
   if (days < 30) return `${days} days ago`;
@@ -587,10 +596,6 @@ function beginView(title, view, activeSlug) {
   };
 }
 
-const freshnessChip = (ref) => ref
-  ? `<span class="chip fresh">as of <span class="mono">${esc(ref)}</span></span>`
-  : `<span class="chip stale">source revision unknown</span>`;
-
 // pagerFor renders prev/next within the page's type group, in exactly the
 // order the sidebar shows -- byTitle over a copy, never sorting state.pages
 // in place (its arrays may alias frozen cache entries).
@@ -812,7 +817,6 @@ async function showPage(slug) {
         <h1>${esc(p.title || p.slug)}</h1>
         <div class="meta">
           <span class="chip">${esc(p.type)}</span>
-          ${freshnessChip(p.builtAtRef)}
           ${(p.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join("")}
           ${p.updated ? `<span class="meta-when">updated ${timeTag(p.updated)}</span>` : ""}
         </div>
