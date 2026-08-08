@@ -220,6 +220,75 @@ func TestAPIRunnerAnalyzeUsesAnalysisSchema(t *testing.T) {
 	}
 }
 
+func TestAPIRunnerResearchReturnsFindingsAndNoPages(t *testing.T) {
+	findings := `{"findings":"Both modules read the same constant.","resolved":true,"evidence":["internal/dispatch/retry.go:12"]}`
+
+	r, seen := apiServer(t, func(w http.ResponseWriter, _ capturedRequest) {
+		io.WriteString(w, messageJSON(findings, "end_turn", nil))
+	})
+
+	res, err := r.Run(context.Background(), Request{
+		Step: StepResearch, Prompt: "answer this",
+		MaxTokens: 4_000, Timeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Research == nil || !res.Research.Resolved {
+		t.Fatalf("Research = %+v", res.Research)
+	}
+	if len(res.Research.Evidence) != 1 {
+		t.Errorf("evidence = %v, want the one citation", res.Research.Evidence)
+	}
+	// Research answers questions; it never returns pages, and the schema is
+	// what guarantees it cannot.
+	if res.Generation != nil || res.Analysis != nil {
+		t.Error("research produced a pages payload")
+	}
+	props, _ := seen.Output.Format.Schema["properties"].(map[string]any)
+	if _, ok := props["findings"]; !ok {
+		t.Errorf("research did not send its own output schema: %v", seen.Output.Format.Schema)
+	}
+	// The schema is the guarantee, not the prompt: a research step that could
+	// return pages would be a second generation path into the wiki.
+	if _, ok := props["pages"]; ok {
+		t.Error("research sent a schema that permits writing pages")
+	}
+}
+
+func TestResearchSchemaRoundTrip(t *testing.T) {
+	// The CLI runner takes the schema as a string, and both runners must
+	// enforce the same contract, so the text is derived from the map rather
+	// than hand-maintained beside it.
+	var text map[string]any
+	if err := json.Unmarshal([]byte(ResearchSchemaText()), &text); err != nil {
+		t.Fatalf("ResearchSchemaText is not valid JSON: %v", err)
+	}
+	if text["additionalProperties"] != false {
+		t.Error("research schema allows fields that silently vanish on decode")
+	}
+
+	got, err := ParseResearch(`{"findings":"answer","resolved":false}`)
+	if err != nil {
+		t.Fatalf("ParseResearch: %v", err)
+	}
+	if got.Findings != "answer" || got.Resolved {
+		t.Errorf("parsed %+v", got)
+	}
+	if _, err := ParseResearch("not json"); err == nil {
+		t.Error("malformed research decoded cleanly")
+	}
+}
+
+func TestAPIRunnerRejectsUnknownSteps(t *testing.T) {
+	r, _ := apiServer(t, func(w http.ResponseWriter, _ capturedRequest) {
+		io.WriteString(w, messageJSON(validGeneration, "end_turn", nil))
+	})
+	if _, err := r.Run(context.Background(), Request{Step: "summarize", Prompt: "x"}); err == nil {
+		t.Error("an unknown step was accepted")
+	}
+}
+
 func TestAPIRunnerPlacesCacheBreakpointOnSharedContext(t *testing.T) {
 	r, seen := apiServer(t, func(w http.ResponseWriter, _ capturedRequest) {
 		io.WriteString(w, messageJSON(validGeneration, "end_turn", nil))

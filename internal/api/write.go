@@ -244,6 +244,15 @@ func (s *Server) handleReviews(w http.ResponseWriter, r *http.Request) {
 			"id": rv.ID, "kind": rv.Kind, "title": rv.Title, "detail": rv.Detail,
 			"actions": rv.Actions, "status": rv.Status, "pageSlug": rv.PageSlug,
 			"created": rv.CreatedAt, "resolved": rv.ResolvedAt,
+			// Whether the item can be handed to a worker is decided here rather
+			// than in the client: the kinds reading can settle are a property of
+			// the queue, and a button the server would refuse is worse than no
+			// button at all.
+			"researchable": s.Runs != nil && rv.Status == "open" &&
+				slices.Contains(store.ResearchableKinds, rv.Kind),
+			"researching": rv.Researching,
+			"research":    rv.Research,
+			"researched":  rv.ResearchAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -280,6 +289,56 @@ func (s *Server) handleReviewResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "action": body.Action})
+}
+
+// handleReviewResearch hands a review item back to the worker: instead of a
+// human answering the question from scratch, the agent that raised it re-reads
+// the bench's sources with that one question in hand and attaches what it
+// finds. The item stays in the queue either way -- research is evidence, not a
+// decision -- so this resolves nothing.
+//
+// 202 with the run id: the answer arrives on the card when the worker gets to
+// it, the same way a rebuild's pages do.
+func (s *Server) handleReviewResearch(w http.ResponseWriter, r *http.Request) {
+	ws, _, ok := s.guardWrite(w, r, maxResolveBytes)
+	if !ok {
+		return
+	}
+
+	// Enforced here for the same reason a rebuild enforces it: this is the
+	// last moment refusing costs nothing.
+	if refused, err := s.refuseOverBudget(r.Context(), ws); err != nil {
+		s.fail(w, err)
+		return
+	} else if refused != "" {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": refused})
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	runID, err := s.Writes.RequestResearch(r.Context(), ws.ID, id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "review not found or no longer open"})
+		return
+	case errors.Is(err, store.ErrNotResearchable):
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "this review asks for a decision, not for reading; only " +
+				strings.Join(store.ResearchableKinds, ", ") + " items can be researched"})
+		return
+	case errors.Is(err, store.ErrRunActive):
+		// Not a failure: the bench runs one job at a time and the slot is
+		// taken -- by a build, or by research already queued for this very
+		// item. Saying so beats filing a request that would silently collapse
+		// onto a run which is not going to answer anything.
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "this bench already has a queued or running job; try again when it finishes"})
+		return
+	case err != nil:
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "runId": runID})
 }
 
 // handleBacklinks lists pages linking to a slug -- the inbound half of the

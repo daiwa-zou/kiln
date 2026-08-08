@@ -46,6 +46,8 @@ type Store interface {
 	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
 	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
 	FileReview(ctx context.Context, workspaceID, kind, title, detail string) error
+	ResearchQuestionFor(ctx context.Context, runID string) (*store.ResearchQuestion, error)
+	RecordResearch(ctx context.Context, reviewID, findings string, resolved bool) error
 	RequeueRun(ctx context.Context, runID string) error
 	Sweep(ctx context.Context, softDeleteRetention, runRetention time.Duration) (int64, error)
 	QueueDepth(ctx context.Context) (map[string]int, error)
@@ -273,6 +275,21 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		return
 	}
 
+	// A research run exists to answer one review item, not to build pages. It
+	// takes the same claim, the same source resolution, and the same drain
+	// handling as a build -- everything above this line -- and diverges in what
+	// it does with the material.
+	//
+	// It deliberately does not touch the connector sync bookkeeping the build
+	// path finishes with. Research reads the sources but is not a sync of
+	// record: stamping last_sync_at here would push every poll-triggered
+	// connector's next refresh out by a full interval, so answering a question
+	// about the bench would quietly delay rebuilding it.
+	if run.Trigger == "research" {
+		w.research(ctx, run, spec, started)
+		return
+	}
+
 	// A run that arrived through a push carries the head it should build
 	// toward, which makes it incremental-eligible: the base is always the
 	// workspace's own last successful build, never the webhook's claim, so
@@ -335,6 +352,87 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 			log.Error("mark connector sync failed", "error", merr)
 		}
 	}
+}
+
+// research executes a claimed research run: read the bench's sources with one
+// review item's question in hand and write the findings back onto it.
+//
+// A failure is written onto the item too, not just onto the run. The item was
+// already answerable by a human the whole time -- research never took it out
+// of the queue -- so what a failure owes the reader is the reason there are no
+// findings attached, which is not something they would otherwise find without
+// going to the runs list and matching timestamps.
+func (w *Worker) research(ctx context.Context, run *store.QueuedRun, spec jobs.SourceSpec, started time.Time) {
+	log := w.logger().With("run", run.ID, "workspace", run.WorkspaceSlug)
+
+	q, err := w.Store.ResearchQuestionFor(ctx, run.ID)
+	if err != nil {
+		// The review item is gone -- resolved by a human, or swept with its
+		// workspace -- so there is nothing to answer and nothing to release.
+		log.Warn("research run has no review item; nothing to answer", "error", err)
+		w.failRun(ctx, run.ID, fmt.Errorf("research run has no review item: %w", err), log)
+		w.metrics().RunFinished("unresolvable", time.Since(started), 0, 0, 0, 0)
+		return
+	}
+
+	res, err := w.Pipeline.Research(ctx, jobs.ResearchRequest{
+		RunID:       run.ID,
+		WorkspaceID: run.WorkspaceID,
+		Source:      spec,
+		Question: jobs.Question{
+			Kind:     q.Kind,
+			Title:    q.Title,
+			Detail:   q.Detail,
+			PageSlug: q.PageSlug,
+		},
+	})
+
+	// Write-back outlives cancellation for the same reason the run record
+	// does: the call is already billed, and findings nobody can read are the
+	// one outcome worse than no findings at all.
+	writeCtx := context.WithoutCancel(ctx)
+
+	if err != nil {
+		if ctx.Err() != nil {
+			// Interrupted by the drain deadline, not broken: back to the
+			// queue, and the item is left untouched because the answer is
+			// still coming -- from whichever worker picks this up next.
+			log.Warn("research interrupted by shutdown; requeuing")
+			if rerr := w.Store.RequeueRun(writeCtx, run.ID); rerr != nil {
+				log.Error("requeue after interruption failed", "error", rerr)
+			}
+			w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
+			return
+		}
+		log.Error("research failed", "error", err)
+		if rerr := w.Store.RecordResearch(writeCtx, q.ReviewID,
+			"Research did not complete: "+err.Error(), false); rerr != nil {
+			log.Error("releasing the review item failed", "error", rerr)
+		}
+		// The pipeline ledgers its own failure on the run row; failRun here
+		// would overwrite the detail it recorded with a duplicate.
+		w.metrics().RunFinished("failed", time.Since(started), 0, 0, 0, 0)
+		return
+	}
+
+	if rerr := w.Store.RecordResearch(writeCtx, q.ReviewID, findingsText(res), res.Resolved); rerr != nil {
+		log.Error("recording research findings failed", "error", rerr)
+	}
+	log.Info("research finished", "review", q.ReviewID,
+		"resolved", res.Resolved, "cost_usd", res.CostUSD)
+	w.metrics().RunFinished(jobs.StatusSucceeded, time.Since(started), res.CostUSD, 0, 0, 0)
+	w.warnNearBudget(ctx, run.WorkspaceID, log)
+}
+
+// findingsText renders the outcome as the prose that lands on the review card:
+// the answer, then what it rests on. Evidence is appended rather than left in a
+// structured field because the card is read, not queried, and a citation the
+// reader cannot see is a citation that was never made.
+func findingsText(res *jobs.ResearchOutcome) string {
+	if len(res.Evidence) == 0 {
+		return res.Findings
+	}
+	return res.Findings + "\n\nEvidence:\n  " + strings.Join(res.Evidence, "\n  ")
 }
 
 // sourceSpec resolves a run's connectors into build material. A run pinned to

@@ -413,6 +413,10 @@ Two model calls per unit: **analyze**, then **generate**. Analysis produces the
 plan (which pages, at which paths) and is not re-run on retry — only generation
 failed, and the plan does not change because a page body was malformed.
 
+(A third step, **research**, exists outside this pass: it answers one review
+item against the corpus and returns no pages. See
+[Research runs](#research-runs).)
+
 ```mermaid
 sequenceDiagram
     participant P as Pipeline
@@ -602,6 +606,8 @@ flowchart LR
     Gen -->|"agent files contradictions,<br/>uncertainties, gaps"| R
     Del -->|"vanished source<br/>files a request"| R
     Sys["Worker: storage incidents,<br/>budget at 80%"] --> R
+    R -->|"'research this':<br/>one question, whole corpus"| Res["Research run"]
+    Res -->|"findings attached<br/>to the card"| R
 ```
 
 **Steering** (`purpose`, `schema`) is the main lever for changing a wiki's
@@ -609,6 +615,41 @@ character without touching code. **Corrections** are how what you teach the wiki
 survives regeneration. The **review queue** is where the wiki asks its humans
 about things it would otherwise have to guess at — and it is the only path to
 deletion.
+
+### Research runs
+
+A question of kind `contradiction`, `uncertain`, or `gap` can be handed back to
+the worker instead of answered from scratch. `POST /reviews/{id}/research`
+files a run whose `review_id` is set; the worker claims it through the same
+queue, resolves the same connectors, and calls `Pipeline.Research` instead of
+`Execute`.
+
+The premise is that these questions exist because of how builds are *shaped*,
+not because the answer is unavailable. A build generates unit by unit, and each
+unit sees one slice of the material — so a module that contradicts a document,
+or a claim corroborated two directories away, is genuinely unanswerable from
+where the unit stood. Research is the read that does not stand there.
+
+- **One call, no pages.** The research schema returns findings, evidence, and a
+  `resolved` flag; it has no `pages` field at all, so the step cannot become a
+  second generation path into the wiki with none of the validation the first
+  one has. Turning findings into prose is the next build's job, through
+  steering or a correction someone writes after reading them.
+- **Go picks the material.** Which units and pages the question is rendered
+  against is decided by term overlap in `relevantUnits`/`relevantPages`, before
+  the model is involved — deterministic and inspectable, like routing and
+  planning. A wrong pick costs tokens and an "I could not settle this", not a
+  wrong page.
+- **No new network surface.** Research reads what the connectors already
+  fetched. The agent's denied-tool list is unchanged.
+- **Evidence, not authority.** Findings land on the card and the item stays in
+  the queue. Only a pass that reports the question conclusively settled closes
+  it, and a deletion is never researchable — that needs authority, not reading.
+- **In flight is derived, never stored.** Whether a read is running comes from
+  the run queue, so a worker that dies mid-read leaves a run the stale-requeue
+  handles rather than a question the queue refuses to let anyone answer.
+  Resolving an item drops its still-queued research run: the money would buy an
+  answer to a settled question.
 
 ---
 
@@ -681,6 +722,7 @@ erDiagram
     credentials ||--o{ connectors : seals
     runs ||--o{ run_items : "per unit"
     runs ||--o{ spend_ledger : charges
+    review_items ||--o{ runs : "researched by"
 ```
 
 Points worth knowing:
@@ -745,7 +787,7 @@ so a revoked membership takes effect immediately.
 | Runs | `GET /runs`, `GET /runs/{id}/items`, `POST /runs` |
 | Sources *(admin)* | `GET`/`POST /connectors`, `PATCH`/`DELETE /connectors/{id}`, `GET`/`POST /credentials`, `DELETE /credentials/{id}` |
 | Files | `GET /files`, `POST` upload, `PATCH`/`DELETE /files/{id}` |
-| Human loop | `GET`/`PUT /steering[/{kind}]`, `GET`/`POST /corrections/*`, `PATCH /correction/{id}`, `GET /reviews`, `POST /reviews/{id}/resolve` |
+| Human loop | `GET`/`PUT /steering[/{kind}]`, `GET`/`POST /corrections/*`, `PATCH /correction/{id}`, `GET /reviews`, `POST /reviews/{id}/resolve`, `POST /reviews/{id}/research` |
 | Members *(admin)* | `GET`/`POST /members`, `PATCH`/`DELETE /members/{userID}` |
 
 **Auth modes.** `token` is the default — a shared deployment must opt *out* of

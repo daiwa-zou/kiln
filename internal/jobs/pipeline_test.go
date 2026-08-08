@@ -47,6 +47,11 @@ type scriptedRunner struct {
 	// way the CLI runner returns schema-constrained JSON. It is what lets a test
 	// script a plan and then decline to write the pages it names.
 	analyzeResult string
+	// researchResult is returned as structured data the way the API runner
+	// does; researchText is returned as envelope text the way the CLI runner
+	// does. Both paths exist in the pipeline, so both are scriptable.
+	researchResult *agent.ResearchResult
+	researchText   string
 }
 
 func newScriptedRunner() *scriptedRunner {
@@ -92,6 +97,11 @@ func (s *scriptedRunner) Run(_ context.Context, req agent.Request) (*agent.Resul
 
 	if req.Step == agent.StepAnalyze && s.analyzeResult != "" {
 		res.Result = s.analyzeResult
+	}
+
+	if req.Step == agent.StepResearch {
+		res.Research = s.researchResult
+		res.Result = s.researchText
 	}
 
 	if req.Step == agent.StepGenerate {

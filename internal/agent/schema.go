@@ -143,6 +143,59 @@ func GenerationSchemaJSON() map[string]any {
 	}
 }
 
+// ResearchResult is the structured payload of a research step: what a second,
+// unbounded read of the corpus found out about one review item.
+type ResearchResult struct {
+	// Findings is the answer, written for the human reading the review card.
+	Findings string `json:"findings"`
+	// Resolved is the model's claim that the question is now settled and needs
+	// no human decision. It is a recommendation, not a permission: the caller
+	// decides what a settled question is allowed to close.
+	Resolved bool `json:"resolved"`
+	// Evidence cites what the finding rests on -- paths, urls, page slugs --
+	// so a reader can check the answer instead of trusting it.
+	Evidence []string `json:"evidence,omitempty"`
+}
+
+// ResearchSchemaJSON constrains the research step's output.
+//
+// Deliberately narrow: research reads and reports, and returns no pages at
+// all. A step that could write pages while answering a question would be a
+// second, unreviewed generation path into the wiki -- the answer belongs on
+// the review item, and the next build is what turns it into prose.
+func ResearchSchemaJSON() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []any{"findings", "resolved"},
+		"properties": map[string]any{
+			"findings": map[string]any{"type": "string"},
+			"resolved": map[string]any{"type": "boolean"},
+			"evidence": stringArray(),
+		},
+	}
+}
+
+// ResearchSchemaText is the research schema serialized for transports that
+// take a string, derived from ResearchSchemaJSON for the same reason
+// AnalysisSchemaText is.
+func ResearchSchemaText() string {
+	b, err := json.Marshal(ResearchSchemaJSON())
+	if err != nil {
+		panic("agent: marshal research schema: " + err.Error())
+	}
+	return string(b)
+}
+
+// ParseResearch decodes a structured research response.
+func ParseResearch(raw string) (*ResearchResult, error) {
+	var out ResearchResult
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // AnalysisSchemaText is the analyze schema serialized for transports that take
 // a string (the CLI's --json-schema flag). Derived from AnalysisSchemaJSON so
 // the two runners can never enforce different contracts.
