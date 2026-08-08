@@ -57,15 +57,24 @@ func NewClaudeRunner(binary string) *ClaudeRunner {
 // secret, database password) must never be inherited by it.
 //
 // HOME is passed so a logged-in CLI session's credentials still resolve when no
-// API key is configured.
+// API key is configured. USER and LOGNAME go with it, and are not optional
+// decoration: on macOS the CLI keeps its session in the Keychain under an
+// account named for the current user, and resolves that name from the
+// environment. Stripped of both, it does not fail -- it looks up the literal
+// account "unknown", finds whatever a previous environment-less run left there,
+// and reports "not authenticated" while a perfectly good session sits in the
+// account beside it. That reads as an expired login and sends the operator off
+// to re-run `claude auth login`, which writes to the real account again and
+// changes nothing. HOME alone was never enough to find the credential HOME
+// points at.
 //
 // baseURL redirects the CLI at a gateway or proxy, from agent.base_url. The API
 // runner has always honoured that key; without it here, the same configuration
 // silently meant two different things depending on the runner, and a key valid
 // only at a gateway failed to authenticate with no indication why.
 func MinimalChildEnv(apiKey, baseURL string) []string {
-	env := make([]string, 0, 7)
-	for _, k := range []string{"PATH", "HOME", "TMPDIR", "TERM", "LANG"} {
+	env := make([]string, 0, 9)
+	for _, k := range []string{"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TERM", "LANG"} {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}
@@ -158,8 +167,16 @@ func BuildArgs(req Request) []string {
 		// vector. These two flags stop the CLI loading any of it.
 		"--setting-sources", "",
 		"--strict-mcp-config",
-		// Daemon runs should not pollute the operator's resume history.
-		"--no-session-persistence",
+	}
+
+	// Daemon runs should not pollute the operator's resume history -- but a
+	// two-step run resumes its own analyze session to keep the source context
+	// prompt-cached, and there is nothing to resume if nothing was persisted.
+	// Unconditionally, these flags contradict each other: analyze stored no
+	// conversation and generate failed every time with "No conversation found
+	// with session ID". Persistence is bought only where resume needs it.
+	if req.SessionID == "" {
+		args = append(args, "--no-session-persistence")
 	}
 
 	if req.Model != "" {

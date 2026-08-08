@@ -75,7 +75,10 @@ func TestBuildArgsAnalyze(t *testing.T) {
 
 	// Isolation from source-supplied config is not optional: ingested repos
 	// carry .claude directories that are untrusted input on a shared platform.
-	for _, want := range []string{"--setting-sources", "--strict-mcp-config", "--no-session-persistence"} {
+	// Session persistence is not in this set: this request carries a session id,
+	// and the generate step's --resume needs the conversation kept. See
+	// TestSessionResumeImpliesPersistence for both halves of that rule.
+	for _, want := range []string{"--setting-sources", "--strict-mcp-config"} {
 		if !containsArg(args, want) {
 			t.Errorf("missing %s in: %s", want, joined)
 		}
@@ -287,6 +290,56 @@ func TestRunChildEnvExcludesSecrets(t *testing.T) {
 	}
 	if !sawAPIKey {
 		t.Error("ANTHROPIC_API_KEY did not reach the child")
+	}
+}
+
+// On macOS the CLI keeps its session in the Keychain under an account named for
+// the current user, read from the environment. Without USER and LOGNAME it does
+// not fail: it reads the literal account "unknown" and reports "not
+// authenticated" while the real session sits in the account beside it. The
+// symptom is a login that appears not to take, so this is asserted rather than
+// left to whichever environment happens to run the worker.
+func TestMinimalChildEnvCarriesTheUserIdentity(t *testing.T) {
+	t.Setenv("USER", "someone")
+	t.Setenv("LOGNAME", "someone")
+
+	var sawUser, sawLogname bool
+	for _, kv := range MinimalChildEnv("", "") {
+		switch kv {
+		case "USER=someone":
+			sawUser = true
+		case "LOGNAME=someone":
+			sawLogname = true
+		}
+	}
+	if !sawUser || !sawLogname {
+		t.Errorf("USER/LOGNAME missing from the child env (user=%v logname=%v); "+
+			"the CLI resolves its Keychain account from them", sawUser, sawLogname)
+	}
+}
+
+// --no-session-persistence and --resume contradict each other: the first tells
+// the CLI to store no conversation, the second asks for one back. Passed
+// together, every generate step failed with "No conversation found with session
+// ID" after the analyze call had already been paid for. The fake accepts any
+// argv, so only a direct assertion catches it.
+func TestSessionResumeImpliesPersistence(t *testing.T) {
+	for _, step := range []Step{StepAnalyze, StepGenerate} {
+		withSession := BuildArgs(Request{
+			Step: step, WorkDir: "/src", ScratchDir: "/scratch",
+			SessionID: "run-1", Prompt: "p",
+		})
+		if containsArg(withSession, "--no-session-persistence") {
+			t.Errorf("%s: --no-session-persistence passed alongside a session id; "+
+				"the resume it enables can never find the conversation", step)
+		}
+
+		noSession := BuildArgs(Request{
+			Step: step, WorkDir: "/src", ScratchDir: "/scratch", Prompt: "p",
+		})
+		if !containsArg(noSession, "--no-session-persistence") {
+			t.Errorf("%s: a sessionless run should stay out of the operator's resume history", step)
+		}
 	}
 }
 
