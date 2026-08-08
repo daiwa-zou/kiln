@@ -45,7 +45,9 @@ buttons — are held to the floor.
 - **Focus is managed on navigation.** Each view change moves focus to `<main>`
   and resets scroll, the SPA equivalent of a page load, so a screen reader
   lands somewhere meaningful instead of staying on a control that no longer
-  exists.
+  exists. Background refreshes are not navigations: the live-run poll on the
+  Ingestion view swaps only the run feed, so focus, scroll position, and open
+  disclosures survive each tick.
 - **Modals trap and restore.** The command palette and the add-source wizard
   capture focus, cycle Tab inside themselves, close on Escape and on backdrop
   click, and return focus to the element that opened them.

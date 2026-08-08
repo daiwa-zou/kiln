@@ -997,9 +997,12 @@ its material needs a change-source for incremental routing, its paths must be
 emitted through a namespacing helper (`diff.UploadOrigin`, `diff.WebOrigin`) so
 they stay routable and cannot collide with another namespace.
 
-**A new mapper** implements `Kind()` and `Map(ctx, set)`, returning a
-`WorkspaceMap` of units with content hashes. The hash is the contract — get it
-wrong and either nothing regenerates or everything does.
+**A new mapper** produces a `mapper.WorkspaceMap` of units with content hashes
+and is wired into the pipeline's sync step the way the two existing mappers
+are: repomap via `Scan` + `ToWorkspaceMap`, docmap via `MapDocs`. There is no
+mapper interface to implement — the pipeline calls each mapper concretely, and
+the `WorkspaceMap` itself is the contract. The hash is the load-bearing part —
+get it wrong and either nothing regenerates or everything does.
 
 **A new model provider** implements `Name()` and `New(agent.Options) (Runner, error)`
 and registers itself with `agent.RegisterProvider`, the same shape as a source
