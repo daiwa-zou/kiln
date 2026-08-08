@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/jobs"
@@ -223,6 +224,41 @@ func TestDeletionApprovalRoundTrip(t *testing.T) {
 	keys, _ = js.LoadApprovedDeletions(ctx, ws)
 	if len(keys) != 1 {
 		t.Errorf("approved after keep = %v, want still only module:legacy", keys)
+	}
+}
+
+// Timestamps go out as instants, not bare dates.
+//
+// 'YYYY-MM-DD' reads fine in SQL and is wrong in a browser: a bare date parses
+// as UTC midnight, so an item filed minutes ago rendered as "yesterday" for
+// every reader west of UTC, and the exact time the UI promises on hover did not
+// exist to show.
+func TestHumanLoopTimestampsAreInstants(t *testing.T) {
+	js, ws := jobStore(t)
+	ctx := context.Background()
+
+	if err := js.FileReview(ctx, ws, "gap", "filed just now", "detail"); err != nil {
+		t.Fatalf("FileReview: %v", err)
+	}
+	rows, err := js.ListReviews(ctx, ws, "open", 10, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListReviews = %d rows, %v", len(rows), err)
+	}
+
+	created, err := time.Parse(time.RFC3339, rows[0].CreatedAt)
+	if err != nil {
+		t.Fatalf("created_at %q is not RFC3339: %v", rows[0].CreatedAt, err)
+	}
+	// The instant is the real one, not a date rounded to midnight -- rounding
+	// is exactly what put it on the wrong day.
+	if since := time.Since(created); since < 0 || since > time.Hour {
+		t.Errorf("created_at is %s away from now; a just-filed item should be seconds old", since)
+	}
+	// Absent timestamps stay empty rather than becoming a zero-time instant,
+	// which the UI would render as "56 years ago".
+	if rows[0].ResolvedAt != "" || rows[0].ResearchAt != "" {
+		t.Errorf("unset timestamps rendered as %q / %q, want empty",
+			rows[0].ResolvedAt, rows[0].ResearchAt)
 	}
 }
 

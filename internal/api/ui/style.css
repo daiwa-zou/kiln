@@ -241,6 +241,12 @@
   .login-alt { margin-top: 20px; }
   h1 { font-family: var(--serif); font-size: 30px; line-height: 1.2; margin: 0 0 8px; font-weight: 600; }
   .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12.5px; color: var(--ink-dim); }
+  /* Bare prose in a row of chips reads as a chip that lost its border, so the
+     one piece of text in the meta row is set apart rather than queued among
+     them: pushed to the end of the line where a caption belongs, and dimmed so
+     the chips stay the thing being scanned. It wraps with the row like
+     everything else -- margin-left:auto only moves it while there is space. */
+  .meta .meta-when { margin-left: auto; color: var(--ink-faint); white-space: nowrap; }
   .chip {
     padding: 2px 8px; border-radius: 999px;
     background: var(--surface); border: 1px solid var(--border);

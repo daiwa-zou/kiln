@@ -165,6 +165,24 @@ func (p *Pipeline) generateUnits(
 	return outcomes, halted
 }
 
+// publishSpend republishes a unit's running totals while it is still working,
+// so what an ingest is spending is visible as it spends it rather than only
+// once the unit lands.
+//
+// The status stays "running", which is what keeps this reporting rather than
+// settling: finished_at is left null, the progress counts are unchanged, and
+// the settle in generateUnits still writes the authoritative figures. Only the
+// numbers move.
+//
+// Called after an agent call settles and the unit has more to do -- there is no
+// point publishing on the way out, where the settle follows immediately.
+func (p *Pipeline) publishSpend(ctx context.Context, runID string, key diff.Key, res *unitResult) {
+	p.markItem(ctx, runID, ItemSummary{
+		Key: key, Status: StatusRunning,
+		CostUSD: res.CostUSD, Turns: res.Turns, Tokens: res.Tokens,
+	}, p.logger())
+}
+
 // markItem publishes one unit's state mid-run, for anything watching the
 // build. Failures are logged and swallowed: this is reporting, and a build
 // whose pages are correct must not fail because its progress was not recorded.

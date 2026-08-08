@@ -46,8 +46,16 @@ const byTitle = (a, b) => (a.title || a.slug).localeCompare(b.title || b.slug);
 
 // relTime renders a date as distance ("3 days ago"); the absolute value rides
 // in datetime/title so precision is a hover away.
+//
+// A bare YYYY-MM-DD is parsed as local midnight rather than left to the
+// built-in rule, which reads it as *UTC* midnight. Page frontmatter carries
+// genuine dates with no time in them, and under the built-in rule every one of
+// them rendered a day early for readers west of UTC -- a page written this
+// morning said "yesterday". Timestamps that do carry a time and a zone are left
+// to Date, which parses them correctly.
 function relTime(iso) {
-  const d = new Date(iso);
+  const dateOnly = typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso.trim());
+  const d = dateOnly ? new Date(`${iso.trim()}T00:00:00`) : new Date(iso);
   if (isNaN(d)) return String(iso ?? "");
   const days = Math.round((Date.now() - d.getTime()) / 86400000);
   if (days <= 0) return "today";
@@ -805,8 +813,8 @@ async function showPage(slug) {
         <div class="meta">
           <span class="chip">${esc(p.type)}</span>
           ${freshnessChip(p.builtAtRef)}
-          ${p.updated ? `<span>updated ${timeTag(p.updated)}</span>` : ""}
           ${(p.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join("")}
+          ${p.updated ? `<span class="meta-when">updated ${timeTag(p.updated)}</span>` : ""}
         </div>
       </div>
       <div class="prose">${renderMarkdown(p.body)}</div>

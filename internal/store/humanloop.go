@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -148,7 +149,7 @@ func (s *WikiStore) SetCorrectionActive(ctx context.Context, workspaceID, correc
 // ListCorrections returns a page's corrections, active first, newest first.
 func (s *WikiStore) ListCorrections(ctx context.Context, workspaceID, pageRef string) ([]CorrectionRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT c.id, c.body, c.active, to_char(c.created_at, 'YYYY-MM-DD')
+		SELECT c.id, c.body, c.active, c.created_at
 		FROM page_corrections c
 		JOIN pages p ON p.id = c.page_id
 		JOIN wikis w ON w.id = p.wiki_id
@@ -163,10 +164,14 @@ func (s *WikiStore) ListCorrections(ctx context.Context, workspaceID, pageRef st
 
 	out := []CorrectionRow{}
 	for rows.Next() {
-		var c CorrectionRow
-		if err := rows.Scan(&c.ID, &c.Body, &c.Active, &c.Created); err != nil {
+		var (
+			c         CorrectionRow
+			createdAt time.Time
+		)
+		if err := rows.Scan(&c.ID, &c.Body, &c.Active, &createdAt); err != nil {
 			return nil, fmt.Errorf("store: scan correction: %w", err)
 		}
+		c.Created = instant(&createdAt)
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -185,12 +190,10 @@ type CorrectionRow struct {
 func (s *WikiStore) ListReviews(ctx context.Context, workspaceID, status string, limit, offset int) ([]ReviewRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.id, r.kind, r.title, r.detail, r.actions, r.status,
-		       coalesce(p.slug, ''), r.research,
-		       coalesce(to_char(r.research_at, 'YYYY-MM-DD'), ''),
+		       coalesce(p.slug, ''), r.research, r.research_at,
 		       EXISTS (SELECT 1 FROM runs rn
 		               WHERE rn.review_id = r.id AND rn.status IN ('queued','running')),
-		       to_char(r.created_at, 'YYYY-MM-DD'),
-		       coalesce(to_char(r.resolved_at, 'YYYY-MM-DD'), '')
+		       r.created_at, r.resolved_at
 		FROM review_items r
 		LEFT JOIN pages p ON p.id = r.page_id
 		WHERE r.workspace_id = $1 AND ($2 = '' OR r.status = $2)
@@ -205,14 +208,19 @@ func (s *WikiStore) ListReviews(ctx context.Context, workspaceID, status string,
 	out := []ReviewRow{}
 	for rows.Next() {
 		var (
-			rv      ReviewRow
-			actions []byte
+			rv                     ReviewRow
+			actions                []byte
+			createdAt              time.Time
+			researchAt, resolvedAt *time.Time
 		)
 		if err := rows.Scan(&rv.ID, &rv.Kind, &rv.Title, &rv.Detail, &actions,
-			&rv.Status, &rv.PageSlug, &rv.Research, &rv.ResearchAt, &rv.Researching,
-			&rv.CreatedAt, &rv.ResolvedAt); err != nil {
+			&rv.Status, &rv.PageSlug, &rv.Research, &researchAt, &rv.Researching,
+			&createdAt, &resolvedAt); err != nil {
 			return nil, fmt.Errorf("store: scan review: %w", err)
 		}
+		rv.CreatedAt = instant(&createdAt)
+		rv.ResearchAt = instant(researchAt)
+		rv.ResolvedAt = instant(resolvedAt)
 		// Actions ride as jsonb; a decode failure means a hand-edited row, and
 		// an empty action list degrades gracefully in the UI.
 		_ = json.Unmarshal(actions, &rv.Actions)
@@ -264,6 +272,21 @@ func (s *WikiStore) ResolveReview(ctx context.Context, workspaceID, reviewID, ac
 		return fmt.Errorf("store: commit resolve review: %w", err)
 	}
 	return nil
+}
+
+// instant renders a timestamp as an unambiguous UTC RFC3339 string, empty when
+// there is none.
+//
+// Dates used to go out as 'YYYY-MM-DD' from to_char, which reads fine in SQL
+// and is wrong in a browser: a bare date parses as *UTC* midnight, so a review
+// filed an hour ago rendered as "yesterday" for every reader west of UTC, and
+// the exact timestamp the UI promises on hover did not exist to show. Runs have
+// always sent the full instant; this is the same rule everywhere.
+func instant(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // ResearchQuestion is the review item behind a research run, as the worker
