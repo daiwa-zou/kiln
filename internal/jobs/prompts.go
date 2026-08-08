@@ -106,12 +106,28 @@ func analyzePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, atte
 	return b.String()
 }
 
-func generatePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, plan string, attempt int, prior []wiki.Violation) string {
+func generatePrompt(key diff.Key, unit mapper.Unit, root, outDir string, s Steering, plan string, attempt int, prior []wiki.Violation) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Write the wiki pages you planned for unit %s.\n", key)
-	b.WriteString("\nUse paths relative to the directory granted to you, for example ")
-	b.WriteString("`entities/module-name.md` or `concepts/some-idea.md`.\n")
+	// The output directory is named, in full, rather than described. It used to
+	// read "relative to the directory granted to you", which is ambiguous in
+	// exactly the way that matters: the working directory is the sources, the
+	// grant is somewhere else entirely, and a relative path resolves against the
+	// former. The agent obeyed and wrote a complete set of pages into the source
+	// staging directory, where nothing collects them -- the run then reported
+	// success having produced nothing, because an empty output directory is
+	// indistinguishable from a clean one.
+	if outDir != "" {
+		fmt.Fprintf(&b, "\nWrite every page under %s, which is the only directory "+
+			"you may write to. Use paths beneath it, for example %s/entities/module-name.md "+
+			"or %s/concepts/some-idea.md. Do not write anywhere else: the working "+
+			"directory holds the sources you are documenting, and files written "+
+			"there are discarded.\n", outDir, outDir, outDir)
+	} else {
+		// The API runner returns pages as data and is granted no directory.
+		b.WriteString("\nUse paths like `entities/module-name.md` or `concepts/some-idea.md`.\n")
+	}
 
 	// The plan is passed explicitly rather than relied on from session state:
 	// the CLI runner resumes the analyze session, but the default API runner

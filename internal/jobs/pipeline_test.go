@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -42,6 +43,10 @@ type scriptedRunner struct {
 	// workDirExisted records which working directories were real directories at
 	// the moment of the call, for the tests that care that one was.
 	workDirExisted map[string]bool
+	// analyzeResult, when set, is returned as the analyze envelope's text, the
+	// way the CLI runner returns schema-constrained JSON. It is what lets a test
+	// script a plan and then decline to write the pages it names.
+	analyzeResult string
 }
 
 func newScriptedRunner() *scriptedRunner {
@@ -83,6 +88,10 @@ func (s *scriptedRunner) Run(_ context.Context, req agent.Request) (*agent.Resul
 	res := &agent.Result{
 		Subtype: "success", TerminalReason: "completed",
 		SessionID: req.SessionID, NumTurns: 1, TotalCostUSD: s.costPerCall,
+	}
+
+	if req.Step == agent.StepAnalyze && s.analyzeResult != "" {
+		res.Result = s.analyzeResult
 	}
 
 	if req.Step == agent.StepGenerate {
@@ -1226,5 +1235,71 @@ func TestDeferredIsZeroWhenEverythingFits(t *testing.T) {
 	}
 	if res.Deferred != 0 {
 		t.Errorf("Deferred = %d, want 0", res.Deferred)
+	}
+}
+
+// The generate prompt has to name the directory it wants pages in. It used to
+// say "relative to the directory granted to you", and the working directory is
+// the sources, not the grant -- so a relative path resolved against the wrong
+// root. A real run obeyed that instruction, wrote eleven pages into the source
+// staging directory, and reported success having produced nothing.
+func TestGeneratePromptNamesTheOutputDirectory(t *testing.T) {
+	runner := newScriptedRunner()
+	p := testPipeline(newMemStore(), runner)
+
+	req := testRequest(t, testMap(mapper.Unit{
+		Key: "module:ripple", Slug: "ripple", Hash: "h",
+	}), diff.ChangeSet{FullRebuild: true})
+
+	if _, err := p.Build(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	var checked int
+	for _, c := range runner.calls {
+		if c.Step != agent.StepGenerate {
+			continue
+		}
+		checked++
+		if c.ScratchDir == "" {
+			t.Fatal("generate call carried no scratch directory")
+		}
+		if !strings.Contains(c.Prompt, c.ScratchDir) {
+			t.Errorf("generate prompt never names the scratch dir %q; a relative path "+
+				"would resolve against the working directory instead:\n%s", c.ScratchDir, c.Prompt)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no generate calls were made")
+	}
+}
+
+// Documents current behaviour rather than asserting a fix: a unit that plans
+// pages and writes none completes as "succeeded" with nothing created, because
+// validating an empty batch raises nothing. That is how a generation writing to
+// the wrong directory stayed invisible through a paid analyze call and a green
+// run. The prompt fix removes the cause; this records that the masking itself
+// is still here, so a future change to it is a deliberate one.
+func TestUnitThatPlansPagesAndWritesNoneStillReportsSuccess(t *testing.T) {
+	runner := newScriptedRunner()
+	plan, err := json.Marshal(agent.AnalysisResult{Pages: []agent.AnalysisPage{{
+		Path: "entities/ripple.md", Type: "entity", Title: "Ripple", Summary: "s",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.analyzeResult = string(plan)
+
+	p := testPipeline(newMemStore(), runner)
+	req := testRequest(t, testMap(mapper.Unit{
+		Key: "module:ripple", Slug: "ripple", Hash: "h",
+	}), diff.ChangeSet{FullRebuild: true})
+
+	res, err := p.Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.Summary.Created != 0 {
+		t.Errorf("Created = %d, want 0 for a generation that wrote nothing", res.Summary.Created)
 	}
 }

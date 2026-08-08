@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 	"sync"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
@@ -17,6 +18,23 @@ import (
 // asks otherwise. Fan-out multiplies in-flight model calls, and the cost of
 // that decision belongs to whoever operates the bench, not to a default.
 const DefaultUnitConcurrency = 1
+
+// joinViolations renders the first n violations for a message a human reads.
+// Bounded because a page can fail many rules at once and this ends up in a
+// database column and a log line; the count alongside it carries the rest.
+func joinViolations(vs []wiki.Violation, n int) string {
+	if len(vs) < n {
+		n = len(vs)
+	}
+	parts := make([]string, 0, n+1)
+	for _, v := range vs[:n] {
+		parts = append(parts, v.String())
+	}
+	if len(vs) > n {
+		parts = append(parts, fmt.Sprintf("(+%d more)", len(vs)-n))
+	}
+	return strings.Join(parts, "; ")
+}
 
 // unitOutcome is one unit's result, held in the run's planned order so the
 // records a run produces never depend on which unit happened to finish
@@ -124,7 +142,7 @@ func (p *Pipeline) generateUnits(
 			// is right for the common case and visible immediately.
 			p.markItem(ctx, req.RunID, ItemSummary{
 				Key: key, Status: itemStatus(out), CostUSD: out.CostUSD,
-				Turns: out.Turns, Err: errText(out.Err),
+				Turns: out.Turns, Tokens: out.Tokens, Err: errText(out.Err),
 			}, log)
 
 			if errors.Is(out.Err, errRunBudgetExhausted) {
@@ -235,7 +253,7 @@ func (p *Pipeline) mergeOutcomes(
 
 		item := ItemSummary{
 			Key: key, Status: StatusPending, EstCostUSD: perUnit,
-			CostUSD: out.CostUSD, Turns: out.Turns,
+			CostUSD: out.CostUSD, Turns: out.Turns, Tokens: out.Tokens,
 		}
 		res.Summary.Tokens += out.Tokens
 
@@ -260,9 +278,16 @@ func (p *Pipeline) mergeOutcomes(
 			log.Error("unit failed", "key", key, "err", out.Err)
 		case len(out.Violations) > 0:
 			item.Status = StatusFailed
-			item.Err = fmt.Sprintf("%d validation violations", len(out.Violations))
+			// The reasons, not just the count. "1 validation violations" is the
+			// whole of what an operator used to get for a unit that ran, cost
+			// money, and produced pages that were then thrown away -- with the
+			// one fact needed to fix it discarded here. The detail already
+			// exists; only reporting it was missing.
+			item.Err = fmt.Sprintf("%d validation violation(s): %s",
+				len(out.Violations), joinViolations(out.Violations, 3))
 			res.Violations = append(res.Violations, out.Violations...)
-			log.Error("unit failed validation", "key", key, "violations", len(out.Violations))
+			log.Error("unit failed validation", "key", key,
+				"violations", len(out.Violations), "detail", joinViolations(out.Violations, 5))
 		default:
 			item.Status = StatusSucceeded
 			written = append(written, out.Pages...)

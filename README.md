@@ -192,6 +192,7 @@ Requires Go 1.25 and Postgres 16. The `claude` CLI is only needed when
 make test              # hermetic: unit + golden tests, no network, no database
 make test-integration  # starts Postgres in Docker, runs everything including schema tests
 make cover             # coverage profile + regenerate the README coverage badge
+make                   # every target, grouped by where it runs
 make lint              # golangci-lint, same config CI runs
 make vulncheck         # govulncheck against the Go vulnerability database
 make build             # -> bin/kiln
@@ -201,6 +202,20 @@ make dev               # just the server + worker, against a wiki that already e
 make db-up / db-down   # manage the test Postgres container
 make k8s-up            # a persistent local instance on Docker Desktop's Kubernetes
 ```
+
+The operational commands exist for both places kiln runs, under the same names:
+
+| | local | Kubernetes |
+| --- | --- | --- |
+| is it healthy | `make doctor` | `make k8s-doctor` |
+| apply migrations | `make migrate` / `make migrate-dev` | `make k8s-migrate` |
+| mint an API token | `make token` | `make k8s-token` |
+| what is running | `make status` | `make k8s-status` |
+
+`make doctor` and `make k8s-doctor` check configuration, the database, the
+schema, and — when the CLI runner is selected — whether the claude session is
+actually usable. They cost nothing; `PROBE=1` adds a real generation round trip,
+which is the only conclusive answer about a credential.
 
 Integration tests key off `KILN_TEST_DATABASE_URL` and skip themselves when it is
 unset, so `make test` stays fast and offline.

@@ -610,7 +610,7 @@ func (p *Pipeline) generateUnit(
 			BudgetUSD: p.Budget.PageUSD, Timeout: p.Timeout,
 			SystemPrompt:     generateSystemPrompt(sc.steering),
 			CacheableContext: req.Map.Summary,
-			Prompt:           generatePrompt(key, unit, req.SourceDir, sc.steering, plan, attempt, lastViolations),
+			Prompt:           generatePrompt(key, unit, req.SourceDir, scratch, sc.steering, plan, attempt, lastViolations),
 		})
 		sc.ledger.settle(want, costOf(genRes))
 		p.account(&res, key, genRes)

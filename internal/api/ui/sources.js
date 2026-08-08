@@ -7,6 +7,17 @@
 // defines functions, and resolves shared helpers (api, esc, beginView,
 // openOverlay…) at call time.
 
+// humanTokens renders a token count for a number that is being watched while
+// it climbs. Thousands are rounded to one decimal and millions to two: the
+// exact digit is never the point, and a figure whose last three characters
+// churn every poll reads as noise rather than as progress.
+function humanTokens(n) {
+  const v = Number(n) || 0;
+  if (v < 1000) return `${v} tokens`;
+  if (v < 1_000_000) return `${(v / 1000).toFixed(1)}k tokens`;
+  return `${(v / 1_000_000).toFixed(2)}M tokens`;
+}
+
 // humanBytes renders a byte count the way a person scans a file list.
 function humanBytes(n) {
   if (!Number.isFinite(n) || n < 0) return "";
@@ -583,11 +594,17 @@ async function showSources() {
           <span class="mono">${esc(it.key)}</span>
           <span>
             <span class="chip ${cls}">${esc(label)}</span>
+            ${it.tokens > 0 ? `<span class="count">${esc(humanTokens(it.tokens))}</span>` : ""}
             ${it.costUsd > 0 ? `<span class="count">${money(it.costUsd)}</span>` : ""}
           </span>
         </div>`;
       }).join("")}</div>`;
     };
+
+    // What the run has consumed so far. Summed from the units that have
+    // settled rather than read off the run row, which is written once when the
+    // run ends and reads zero for the whole time anyone is watching.
+    const liveTokens = (items) => items.reduce((n, it) => n + (Number(it.tokens) || 0), 0);
     // A real <progress>: it is announced to screen readers as a progress bar
     // with its value, which a styled div is not.
     const runProgress = (r) => {
@@ -611,6 +628,13 @@ async function showSources() {
             return `<span class="chip help" title="${esc(why)}">${esc(label)}</span>`;
           })() : ""}
           ${r.ref ? `<span class="count mono">${esc(r.ref)}</span>` : ""}
+          ${(() => {
+            // A live run's total climbs with its units; a finished one reports
+            // what the run row settled. Both are the same question asked at
+            // different moments, so they render in the same place.
+            const t = r.status === "running" ? liveTokens(activeUnits) : (Number(r.tokens) || 0);
+            return t > 0 ? `<span class="count">${esc(humanTokens(t))}</span>` : "";
+          })()}
           ${r.costUsd > 0 ? `<span class="count">${money(r.costUsd)}</span>` : ""}
         </span>
       </div>
@@ -618,7 +642,7 @@ async function showSources() {
       ${runProgress(r)}
       ${r.status === "running" ? liveUnits(activeUnits) : ""}
       ${r.status !== "running" && r.costUsd > 0 ? `<details class="run-units" data-run-items="${esc(r.id)}">
-        <summary>cost by unit</summary>
+        <summary>tokens and cost by unit</summary>
         <div class="detail">loading…</div>
       </details>` : ""}`;
     // Runs group under day headers, newest first; the repeated time chips go.
@@ -694,7 +718,10 @@ async function showSources() {
           const items = await api(`/workspaces/${ws}/runs/${encodeURIComponent(d.dataset.runItems)}/items`);
           box.innerHTML = items.map((it) => `<div class="row">
               <span class="mono">${esc(it.key)}${it.status !== "succeeded" ? ` <span class="chip run-failed">${esc(it.status)}</span>` : ""}</span>
-              <span class="count">${money(it.costUsd)}${it.estCostUsd ? ` (est ${money(it.estCostUsd)})` : ""}</span>
+              <span>
+                ${it.tokens > 0 ? `<span class="count">${esc(humanTokens(it.tokens))}</span>` : ""}
+                <span class="count">${money(it.costUsd)}${it.estCostUsd ? ` (est ${money(it.estCostUsd)})` : ""}</span>
+              </span>
             </div>`).join("") || "no unit records";
         } catch (err) {
           if (!err.handled) box.textContent = err.message;

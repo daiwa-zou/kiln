@@ -26,7 +26,7 @@ const migrateLockKey int64 = 0x6b696c6e0001 // "kiln" + 1
 // SchemaVersion is the migration version this binary expects. A server whose
 // database is at a different version refuses to start rather than operating on
 // an unexpected shape.
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 var migrationName = regexp.MustCompile(`^(\d+)_([a-z0-9_]+)\.sql$`)
 

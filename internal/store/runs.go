@@ -14,11 +14,15 @@ import (
 
 // RunRow is one run as the dashboard consumes it.
 type RunRow struct {
-	ID           string
-	Trigger      string
-	Ref          string
-	Status       string
-	CostUSD      float64
+	ID      string
+	Trigger string
+	Ref     string
+	Status  string
+	CostUSD float64
+	// Tokens is the run's settled total, written when the run finishes. A run
+	// still in flight reports zero here; its live figure comes from summing
+	// the items that have settled so far.
+	Tokens       int64
 	PagesCreated int
 	PagesUpdated int
 	PagesDeleted int
@@ -35,7 +39,7 @@ type RunRow struct {
 // ListRuns returns a workspace's runs, newest first.
 func (s *WikiStore) ListRuns(ctx context.Context, workspaceID string, limit, offset int) ([]RunRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, trigger, coalesce(ref, ''), status, cost_usd,
+		SELECT id, trigger, coalesce(ref, ''), status, cost_usd, tokens,
 		       pages_created, pages_updated, pages_deleted,
 		       coalesce(error, ''), coalesce(claimed_by, ''),
 		       created_at, started_at, finished_at, not_before
@@ -51,7 +55,7 @@ func (s *WikiStore) ListRuns(ctx context.Context, workspaceID string, limit, off
 	out := []RunRow{}
 	for rows.Next() {
 		var r RunRow
-		if err := rows.Scan(&r.ID, &r.Trigger, &r.Ref, &r.Status, &r.CostUSD,
+		if err := rows.Scan(&r.ID, &r.Trigger, &r.Ref, &r.Status, &r.CostUSD, &r.Tokens,
 			&r.PagesCreated, &r.PagesUpdated, &r.PagesDeleted,
 			&r.Error, &r.ClaimedBy, &r.CreatedAt, &r.StartedAt, &r.FinishedAt,
 			&r.NotBefore); err != nil {
@@ -124,6 +128,7 @@ type RunItemRow struct {
 	CostUSD    float64
 	EstCostUSD *float64
 	Turns      int
+	Tokens     int64
 	Error      string
 }
 
@@ -138,7 +143,7 @@ type RunItemRow struct {
 func (s *WikiStore) ListRunItems(ctx context.Context, workspaceID, runID string) ([]RunItemRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT ri.cache_key, ri.kind, ri.status, ri.cost_usd, ri.est_cost_usd,
-		       ri.turns, coalesce(ri.error, '')
+		       ri.turns, ri.tokens, coalesce(ri.error, '')
 		FROM run_items ri
 		JOIN runs r ON r.id = ri.run_id
 		WHERE r.id = $1 AND r.workspace_id = $2
@@ -157,7 +162,7 @@ func (s *WikiStore) ListRunItems(ctx context.Context, workspaceID, runID string)
 	for rows.Next() {
 		var it RunItemRow
 		if err := rows.Scan(&it.Key, &it.Kind, &it.Status, &it.CostUSD,
-			&it.EstCostUSD, &it.Turns, &it.Error); err != nil {
+			&it.EstCostUSD, &it.Turns, &it.Tokens, &it.Error); err != nil {
 			return nil, fmt.Errorf("store: scan run item: %w", err)
 		}
 		out = append(out, it)
@@ -212,17 +217,18 @@ func (s *WikiStore) MarkRunItem(ctx context.Context, runID string, item jobs.Ite
 		return nil
 	}
 	if _, err := s.pool.Exec(ctx, `
-		INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, turns, error, finished_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7,
+		INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, turns, tokens, error, finished_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
 		        CASE WHEN $4 IN ('pending', 'running') THEN NULL ELSE now() END)
 		ON CONFLICT (run_id, cache_key) DO UPDATE SET
 		    status      = EXCLUDED.status,
 		    cost_usd    = EXCLUDED.cost_usd,
 		    turns       = EXCLUDED.turns,
+		    tokens      = EXCLUDED.tokens,
 		    error       = EXCLUDED.error,
 		    finished_at = EXCLUDED.finished_at`,
 		runID, item.Key.Prefix(), string(item.Key), item.Status,
-		item.CostUSD, item.Turns, nullable(item.Err)); err != nil {
+		item.CostUSD, item.Turns, item.Tokens, nullable(item.Err)); err != nil {
 		return fmt.Errorf("store: mark run item %s: %w", item.Key, err)
 	}
 	return nil

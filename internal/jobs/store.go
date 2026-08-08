@@ -153,7 +153,12 @@ type ItemSummary struct {
 	// where the trailing average that produces future estimates comes from.
 	EstCostUSD float64
 	Turns      int
-	Err        string
+	// Tokens is what this unit consumed across its agent calls. Carried per
+	// unit rather than only summed into the run so a build in flight can be
+	// totalled from the units that have settled, which is what makes the
+	// figure visible while it is still moving.
+	Tokens int
+	Err    string
 }
 
 // Run status values.
