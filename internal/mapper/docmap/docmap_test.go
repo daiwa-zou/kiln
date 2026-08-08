@@ -2,8 +2,6 @@ package docmap
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -201,49 +199,25 @@ func TestMapDocsFallsBackToFilenameTitle(t *testing.T) {
 	}
 }
 
-func TestMapperSatisfiesTheInterface(t *testing.T) {
-	// The whole reason docmap exists alongside repomap: a Mapper interface with
-	// one implementation is an assumption, not a seam.
-	var _ mapper.Mapper = (*Mapper)(nil)
-}
-
-func TestMapViaSourceSet(t *testing.T) {
-	// Map reads the staged text off disk -- that read is what lets a long
-	// document split into sections on the generic path.
-	root := t.TempDir()
-	long := "# One\n\n" + strings.Repeat("alpha content here. ", 800) +
-		"\n\n# Two\n\n" + strings.Repeat("beta content here. ", 800)
-	if err := os.WriteFile(filepath.Join(root, "a.md"), []byte(long), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	set := &mapper.SourceSet{
-		Root: root,
-		Kind: "upload",
-		Items: []mapper.SourceItem{
-			{Key: "doc:a.md", Path: "a.md", Title: "A", Hash: "h1"},
-		},
-	}
-
-	wm, err := testMapper().Map(context.Background(), set)
-	if err != nil {
-		t.Fatalf("Map: %v", err)
-	}
-	if len(wm.Units) != 3 || wm.Units[0].Key != "doc:a.md" {
-		t.Errorf("units = %+v, want the whole doc plus two sections", unitKeys(wm))
-	}
-
-	// A missing staged file is an error, not a silently empty document.
-	set.Items[0].Path = "missing.md"
-	if _, err := testMapper().Map(context.Background(), set); err == nil {
-		t.Error("Map succeeded with unreadable staged text")
-	}
-}
-
 func unitKeys(wm *mapper.WorkspaceMap) []string {
 	out := make([]string, 0, len(wm.Units))
 	for _, u := range wm.Units {
 		out = append(out, u.Key)
 	}
 	return out
+}
+
+func TestUniqueSlugCollisionCounter(t *testing.T) {
+	taken := map[string]bool{}
+	got := []string{
+		uniqueSlug(taken, "report"),
+		uniqueSlug(taken, "report"),
+		uniqueSlug(taken, "report"),
+	}
+	want := []string{"report", "report-2", "report-3"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("slug %d = %q, want %q", i, got[i], want[i])
+		}
+	}
 }

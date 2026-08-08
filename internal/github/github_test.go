@@ -200,3 +200,18 @@ func TestConfiguredPredicates(t *testing.T) {
 		t.Error("app pair not recognized")
 	}
 }
+
+func TestFirstLineTrimsAndCaps(t *testing.T) {
+	// API errors get folded into one readable line: first line only, and never
+	// more than 200 bytes of it.
+	if got := firstLine("  Bad credentials\ndocumentation_url: ...\n"); got != "Bad credentials" {
+		t.Errorf("firstLine = %q", got)
+	}
+	long := strings.Repeat("x", 300)
+	if got := firstLine(long); len(got) != 200 {
+		t.Errorf("len(firstLine(300 bytes)) = %d, want 200", len(got))
+	}
+	if got := firstLine("short"); got != "short" {
+		t.Errorf("firstLine short = %q", got)
+	}
+}

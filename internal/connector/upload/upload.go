@@ -31,9 +31,6 @@ type Connector struct {
 
 func init() { connector.Register(&Connector{}) }
 
-// New returns an upload connector.
-func New() *Connector { return &Connector{} }
-
 // Kind implements connector.Connector.
 func (c *Connector) Kind() string { return "upload" }
 

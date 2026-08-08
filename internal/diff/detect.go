@@ -27,8 +27,3 @@ type ChangeSet struct {
 	// force-push, or an unreachable base commit -- and everything is dirty.
 	FullRebuild bool
 }
-
-// Empty reports whether anything changed.
-func (cs ChangeSet) Empty() bool {
-	return !cs.FullRebuild && len(cs.Changes) == 0
-}

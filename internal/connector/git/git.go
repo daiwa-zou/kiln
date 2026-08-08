@@ -20,9 +20,6 @@ type Connector struct{}
 
 func init() { connector.Register(&Connector{}) }
 
-// New returns a git connector.
-func New() *Connector { return &Connector{} }
-
 // Kind implements connector.Connector.
 func (c *Connector) Kind() string { return "git" }
 

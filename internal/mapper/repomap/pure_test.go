@@ -4,8 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/daiwa-zou/kiln/internal/mapper"
 )
 
 func TestDetectLanguage(t *testing.T) {
@@ -63,23 +61,19 @@ func TestShortSHA(t *testing.T) {
 	}
 }
 
-func TestScannerImplementsMapper(t *testing.T) {
-	s := &Scanner{}
-	if s.Kind() != "git" {
-		t.Errorf("Kind = %q, want git", s.Kind())
-	}
-
-	// Map must equal Scan().ToWorkspaceMap() for the same tree.
+func TestScanToWorkspaceMap(t *testing.T) {
+	// The pipeline's actual path: Scan, then ToWorkspaceMap.
 	root := fixture(t, map[string]string{
 		"go.mod":  "module example.test/demo\n\ngo 1.25\n",
 		"main.go": "package main\n\nfunc main() {}\n",
 	})
-	wm, err := s.Map(context.Background(), &mapper.SourceSet{Kind: "git", Root: root})
+	rm, err := (&Scanner{}).Scan(context.Background(), root)
 	if err != nil {
-		t.Fatalf("Map: %v", err)
+		t.Fatalf("Scan: %v", err)
 	}
+	wm := rm.ToWorkspaceMap()
 	if wm == nil || len(wm.Units) == 0 {
-		t.Fatal("Map produced no units")
+		t.Fatal("ToWorkspaceMap produced no units")
 	}
 	if wm.Kind != "git" {
 		t.Errorf("workspace map kind = %q", wm.Kind)

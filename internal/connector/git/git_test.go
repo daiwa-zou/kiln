@@ -32,7 +32,7 @@ func TestSyncDescribesModulesAndDocs(t *testing.T) {
 		"README.md": "# My Project\n\nWhat it does.\n",
 	})
 
-	set, err := New().Sync(context.Background(), connector.Config{"path": root}, "")
+	set, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": root}, "")
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestSyncSkipsEmptyModules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	set, err := New().Sync(context.Background(), connector.Config{"path": root}, "")
+	set, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": root}, "")
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -94,11 +94,11 @@ func TestSyncIsStableAcrossRuns(t *testing.T) {
 
 	// Two different directories with identical content must produce identical
 	// hashes, or a per-run checkout path would make every build look changed.
-	first, err := New().Sync(context.Background(), connector.Config{"path": fixture(t, files)}, "")
+	first, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": fixture(t, files)}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := New().Sync(context.Background(), connector.Config{"path": fixture(t, files)}, "")
+	second, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": fixture(t, files)}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestSyncIsStableAcrossRuns(t *testing.T) {
 }
 
 func TestSyncRejectsBadPaths(t *testing.T) {
-	c := New()
+	c := &Connector{}
 	ctx := context.Background()
 
 	if _, err := c.Sync(ctx, connector.Config{}, ""); err == nil {
