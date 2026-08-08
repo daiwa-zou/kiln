@@ -73,6 +73,13 @@ through three channels, all editable from the UI (or the write API):
   uncertainties, and gaps it would otherwise guess at; a disappeared source files a deletion
   request. Nothing is ever deleted until someone approves it there.
 
+A question about the *material* can also be handed back: **Research** on a contradiction,
+uncertainty, or gap queues a run that re-reads the bench's sources with that one question in
+hand and attaches what it found to the card. Builds raise these questions because each unit
+sees only its own slice of the material; research is the read that is not bounded to a slice.
+It writes no pages and resolves nothing on its own — the findings are evidence, and the
+decision stays yours.
+
 ## Architecture
 
 A full walkthrough — topology, the build pipeline stage by stage, how material

@@ -88,6 +88,130 @@ type ExecuteRequest struct {
 	Progress io.Writer
 }
 
+// material is one call's synced sources: the map every later step reads, the
+// router builds attribute changed paths with, the repository map when there
+// was a repository, and the staging directories that must outlive the sync.
+//
+// Close is separate from the sync because unit prompts are assembled from the
+// staged text: releasing it inside materialize would leave the map pointing at
+// files that no longer exist.
+type material struct {
+	Map    *mapper.WorkspaceMap
+	Router diff.Router
+	Repo   *repomap.RepoMap
+
+	staging []string
+}
+
+// Close removes whatever the sync staged. Safe on a partially built material,
+// which is what a failed sync returns: a connector that staged text and then
+// failed to map it has still made a directory that needs removing.
+func (m *material) Close() {
+	if m == nil {
+		return
+	}
+	for _, dir := range m.staging {
+		os.RemoveAll(dir)
+	}
+	m.staging = nil
+}
+
+// materialize syncs every configured source through the connector registry and
+// merges them into one map. Shared by builds and by research so a question is
+// answered against exactly the material a build would have read -- a second
+// acquisition path would eventually answer questions about a different corpus
+// than the one the pages were written from.
+//
+// The returned material is non-nil even on failure whenever anything was
+// staged, so the caller's Close still runs.
+func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material, error) {
+	m := &material{
+		Map:    &mapper.WorkspaceMap{SchemaVersion: 1},
+		Router: diff.Router{ModuleDirs: map[string]diff.Key{}, DocPaths: map[string]diff.Key{}, Cosmetic: cosmeticPath},
+	}
+
+	// The repository is optional: a bench fed only by documents or web pages
+	// builds from those alone. When present, sync goes through the connector
+	// registry rather than calling the scanner directly, so the abstraction is
+	// exercised by the path that uses it rather than assumed to work.
+	if src.Path != "" {
+		conn, err := connector.Get("git")
+		if err != nil {
+			return m, err
+		}
+		fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), src.Path)
+
+		set, err := conn.Sync(ctx, connector.Config{"path": src.Path, "slug": src.Slug}, "")
+		if err != nil {
+			return m, err
+		}
+
+		// Routing and prompt grounding need the module graph, which a flat item
+		// list cannot express. The git connector carried it on the same sync.
+		rm := gitconn.MapOf(set)
+		if rm == nil {
+			return m, fmt.Errorf("git connector returned no repository map")
+		}
+		m.Repo = rm
+		m.Map = rm.ToWorkspaceMap()
+		fmt.Fprintf(out, "  %d modules, %d units, %d edges\n", len(rm.Modules), len(m.Map.Units), len(m.Map.Edges))
+		if rm.Git != nil && rm.Git.HeadSHA != "" {
+			fmt.Fprintf(out, "  at %s on %s\n", shortRef(rm.Git.HeadSHA), rm.Git.Branch)
+		} else {
+			fmt.Fprintln(out, "  not a git repository; change detection uses content hashes")
+		}
+
+		m.Router = routerFor(rm)
+	}
+
+	// A second connector's material merges into the same map, so code and
+	// documents produce one wiki whose pages can link across the boundary
+	// rather than two wikis that cannot see each other.
+	if src.DocsDir != "" {
+		docMap, docRouter, staging, err := syncDocs(ctx, out, src.DocsDir)
+		if staging != "" {
+			m.staging = append(m.staging, staging)
+		}
+		if err != nil {
+			return m, err
+		}
+		merged, err := mapper.Merge(src.Path, m.Map, docMap)
+		if err != nil {
+			return m, err
+		}
+		m.Map = merged
+		maps.Copy(m.Router.DocPaths, docRouter)
+		// Section units have no path of their own; register them under their
+		// parent so routing a document also routes its chapters.
+		m.Router.DocSections = sectionsByParent(docMap)
+	}
+
+	// Web pages merge the same way: a third source kind, one wiki.
+	if len(src.WebURLs) > 0 {
+		webMap, webRouter, staging, err := syncWeb(ctx, out, src.WebURLs)
+		if staging != "" {
+			m.staging = append(m.staging, staging)
+		}
+		if err != nil {
+			return m, err
+		}
+		merged, err := mapper.Merge(src.Path, m.Map, webMap)
+		if err != nil {
+			return m, err
+		}
+		m.Map = merged
+		maps.Copy(m.Router.DocPaths, webRouter)
+		for parent, sections := range sectionsByParent(webMap) {
+			if m.Router.DocSections == nil {
+				m.Router.DocSections = map[diff.Key][]diff.Key{}
+			}
+			m.Router.DocSections[parent] = sections
+		}
+	}
+
+	return m, nil
+}
+
 // Execute syncs sources through the connector registry, maps and routes them,
 // and runs the build pipeline. It is the single entry point shared by the CLI
 // and the worker, so server-side builds exercise exactly the code path local
@@ -101,86 +225,12 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		return nil, fmt.Errorf("nothing to build: no repository, documents, or web pages")
 	}
 
-	// The repository is optional: a bench fed only by documents or web pages
-	// builds from those alone. When present, sync goes through the connector
-	// registry rather than calling the scanner directly, so the abstraction is
-	// exercised by the path that uses it rather than assumed to work.
-	var rm *repomap.RepoMap
-	wm := &mapper.WorkspaceMap{SchemaVersion: 1}
-	router := diff.Router{ModuleDirs: map[string]diff.Key{}, DocPaths: map[string]diff.Key{}, Cosmetic: cosmeticPath}
-	if req.Source.Path != "" {
-		conn, err := connector.Get("git")
-		if err != nil {
-			return nil, err
-		}
-		fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), req.Source.Path)
-
-		set, err := conn.Sync(ctx, connector.Config{"path": req.Source.Path, "slug": req.Source.Slug}, "")
-		if err != nil {
-			return nil, err
-		}
-
-		// Routing and prompt grounding need the module graph, which a flat item
-		// list cannot express. The git connector carried it on the same sync.
-		rm = gitconn.MapOf(set)
-		if rm == nil {
-			return nil, fmt.Errorf("git connector returned no repository map")
-		}
-		wm = rm.ToWorkspaceMap()
-		fmt.Fprintf(out, "  %d modules, %d units, %d edges\n", len(rm.Modules), len(wm.Units), len(wm.Edges))
-		if rm.Git != nil && rm.Git.HeadSHA != "" {
-			fmt.Fprintf(out, "  at %s on %s\n", shortRef(rm.Git.HeadSHA), rm.Git.Branch)
-		} else {
-			fmt.Fprintln(out, "  not a git repository; change detection uses content hashes")
-		}
-
-		router = routerFor(rm)
+	mat, err := materialize(ctx, out, req.Source)
+	defer mat.Close()
+	if err != nil {
+		return nil, err
 	}
-
-	// A second connector's material merges into the same map, so code and
-	// documents produce one wiki whose pages can link across the boundary
-	// rather than two wikis that cannot see each other.
-	if req.Source.DocsDir != "" {
-		docMap, docRouter, staging, err := syncDocs(ctx, out, req.Source.DocsDir)
-		if staging != "" {
-			defer os.RemoveAll(staging)
-		}
-		if err != nil {
-			return nil, err
-		}
-		merged, err := mapper.Merge(req.Source.Path, wm, docMap)
-		if err != nil {
-			return nil, err
-		}
-		wm = merged
-		maps.Copy(router.DocPaths, docRouter)
-		// Section units have no path of their own; register them under their
-		// parent so routing a document also routes its chapters.
-		router.DocSections = sectionsByParent(docMap)
-	}
-
-	// Web pages merge the same way: a third source kind, one wiki.
-	if len(req.Source.WebURLs) > 0 {
-		webMap, webRouter, staging, err := syncWeb(ctx, out, req.Source.WebURLs)
-		if staging != "" {
-			defer os.RemoveAll(staging)
-		}
-		if err != nil {
-			return nil, err
-		}
-		merged, err := mapper.Merge(req.Source.Path, wm, webMap)
-		if err != nil {
-			return nil, err
-		}
-		wm = merged
-		maps.Copy(router.DocPaths, webRouter)
-		for parent, sections := range sectionsByParent(webMap) {
-			if router.DocSections == nil {
-				router.DocSections = map[diff.Key][]diff.Key{}
-			}
-			router.DocSections[parent] = sections
-		}
-	}
+	wm, router, rm := mat.Map, mat.Router, mat.Repo
 
 	// Without a base ref, every unit is a candidate and the pipeline's hash
 	// gate decides — a repeat build still costs nothing. With one (webhook

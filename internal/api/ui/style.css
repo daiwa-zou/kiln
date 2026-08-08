@@ -349,6 +349,16 @@
   .review { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
   .review .detail { font-size: 13.5px; color: var(--ink-dim); margin: 6px 0 10px; white-space: pre-wrap; }
   .review .meta { margin-bottom: 6px; }
+  /* Findings are an answer to the question above them, not more of it, so they
+     are set off the way a correction is: a rule down the side, the accent
+     colour, and the question's own indent kept. */
+  .review .research-findings {
+    border-left: 3px solid var(--ember-soft);
+    padding: 2px 0 2px 12px;
+    margin: 10px 0;
+  }
+  .review .research-findings .meta { margin-bottom: 4px; }
+  .review .research-findings .detail { margin: 0; color: var(--ink); }
 
   .correction { border-left: 3px solid var(--ember-soft); padding: 4px 0 4px 12px; margin: 8px 0; }
   .correction.inactive { border-left-color: var(--border); color: var(--ink-faint); }

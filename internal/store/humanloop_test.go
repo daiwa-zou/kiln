@@ -226,6 +226,81 @@ func TestDeletionApprovalRoundTrip(t *testing.T) {
 	}
 }
 
+func TestResearchRequestClaimsTheBenchAndBindsToItsQuestion(t *testing.T) {
+	js, ws := jobStore(t)
+	ctx := context.Background()
+
+	if err := js.FileReview(ctx, ws, "gap", "retry-policy is missing", "two pages link to it"); err != nil {
+		t.Fatalf("FileReview: %v", err)
+	}
+	rows, err := js.ListReviews(ctx, ws, "open", 10, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListReviews = %d rows, %v", len(rows), err)
+	}
+	id := rows[0].ID
+	if rows[0].Researching {
+		t.Error("a fresh item reports research in flight")
+	}
+
+	runID, err := js.RequestResearch(ctx, ws, id)
+	if err != nil {
+		t.Fatalf("RequestResearch: %v", err)
+	}
+
+	// The worker reads the question back off the run, and gets the item the
+	// request was filed against rather than whatever is newest.
+	q, err := js.ResearchQuestionFor(ctx, runID)
+	if err != nil {
+		t.Fatalf("ResearchQuestionFor: %v", err)
+	}
+	if q.ReviewID != id || q.Kind != "gap" || !strings.Contains(q.Title, "retry-policy") {
+		t.Errorf("question = %+v, want the filed item", q)
+	}
+	// In flight is derived from the queue, so the item is still open and still
+	// in the inbox -- nobody has answered it.
+	rows, err = js.ListReviews(ctx, ws, "open", 10, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListReviews after request = %d rows, %v", len(rows), err)
+	}
+	if !rows[0].Researching {
+		t.Error("item does not report the research run queued against it")
+	}
+
+	// One job per bench: the slot is taken.
+	if _, err := js.RequestResearch(ctx, ws, id); !errors.Is(err, ErrRunActive) {
+		t.Errorf("second request = %v, want ErrRunActive", err)
+	}
+	if _, _, err := js.EnqueueRun(ctx, ws, "manual", ""); err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+}
+
+func TestResearchRefusesKindsReadingCannotSettle(t *testing.T) {
+	js, ws := jobStore(t)
+	ctx := context.Background()
+
+	if err := js.FileReview(ctx, ws, "budget", "budget window exceeded", "spent"); err != nil {
+		t.Fatalf("FileReview: %v", err)
+	}
+	rows, _ := js.ListReviews(ctx, ws, "open", 10, 0)
+	if len(rows) != 1 {
+		t.Fatalf("ListReviews = %d rows", len(rows))
+	}
+	if _, err := js.RequestResearch(ctx, ws, rows[0].ID); !errors.Is(err, ErrNotResearchable) {
+		t.Errorf("research on a budget item = %v, want ErrNotResearchable", err)
+	}
+	// Refused before anything was queued: the bench is still free to build.
+	buildID, created, err := js.EnqueueRun(ctx, ws, "manual", "")
+	if err != nil || !created {
+		t.Fatalf("EnqueueRun after a refused request = %v (created %v)", err, created)
+	}
+	// And an ordinary build carries no question, so a worker claiming one
+	// never mistakes it for research.
+	if _, err := js.ResearchQuestionFor(ctx, buildID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a build run answered a research question: %v", err)
+	}
+}
+
 func TestBacklinks(t *testing.T) {
 	js, ws := jobStore(t)
 	ctx := context.Background()

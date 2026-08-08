@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// Step distinguishes the two calls in one generation pass.
+// Step distinguishes the calls the pipeline makes.
 type Step string
 
 const (
@@ -21,6 +21,12 @@ const (
 	// StepGenerate writes pages, resuming the analyze session so the source
 	// context stays prompt-cached between the two.
 	StepGenerate Step = "generate"
+	// StepResearch answers one review item against the whole corpus and
+	// returns findings, writing nothing. It is not part of a generation pass:
+	// a build's units each see one slice of the material, which is why they
+	// raise questions they cannot settle, and this is the read that is not
+	// bounded to a slice.
+	StepResearch Step = "research"
 )
 
 // Request is one claude invocation.
@@ -104,6 +110,10 @@ type Result struct {
 	// Analysis is the structured plan from an analyze step, when the runner
 	// returns one.
 	Analysis *AnalysisResult `json:"-"`
+	// Research is the findings from a research step, when the runner returns
+	// one. Like Analysis, a runner that only returns envelope text leaves this
+	// nil and the caller parses Result instead.
+	Research *ResearchResult `json:"-"`
 }
 
 // PermissionDenial records a tool call the sandbox or hooks refused. The

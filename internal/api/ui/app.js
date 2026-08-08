@@ -959,6 +959,7 @@ const iconResolved = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><
 const iconApprove = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 12.6L1.9 8.3l1.6-1.6 2.7 2.7 6.3-6.3 1.6 1.6z"/></svg>`;
 const iconKeep = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.2l5.6 2.3v3.9c0 3.3-2.3 6.1-5.6 7.4-3.3-1.3-5.6-4.1-5.6-7.4V3.5L8 1.2z"/></svg>`;
 const iconDismiss = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.7 4.7l-1.4-1.4L8 6.6 4.7 3.3 3.3 4.7 6.6 8l-3.3 3.3 1.4 1.4L8 9.4l3.3 3.3 1.4-1.4L9.4 8z"/></svg>`;
+const iconResearch = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M6.9 1.4a5.5 5.5 0 1 0 3.3 9.9l3.1 3.1 1.3-1.3-3.1-3.1a5.5 5.5 0 0 0-4.6-8.6zm0 1.9a3.6 3.6 0 1 1 0 7.2 3.6 3.6 0 0 1 0-7.2z"/></svg>`;
 
 const REVIEW_KIND_ICONS = {
   deletion: iconDeletion, contradiction: iconContradiction, uncertain: iconUncertain,
@@ -974,6 +975,33 @@ const REVIEW_ACTION_ICONS = { approve: iconApprove, keep: iconKeep, dismiss: ico
 const iconChip = (icons, name) => icons[name]
   ? `<span class="chip icon-chip" title="${esc(name)}">${icons[name]}<span class="sr-only">${esc(name)}</span></span>`
   : `<span class="chip">${esc(name)}</span>`;
+
+// reviewResearch renders the research half of a card: the button that hands
+// the question to a worker, the note that one is already reading, and the
+// findings once they land.
+//
+// The server decides researchable, not this: whether reading can settle a
+// question is a property of the queue, and offering a button the API would
+// refuse is worse than offering none.
+function reviewResearch(r) {
+  // The findings body carries its own newlines and is rendered pre-wrap, so
+  // nothing may sit between its element tags but the text itself -- the
+  // template's own indentation would otherwise print as leading whitespace.
+  const findings = r.research
+    ? `<div class="research-findings">
+         <div class="meta">${iconChip({ research: iconResearch }, "research")}${timeTag(r.researched, "read ")}</div>
+         <div class="detail">${esc(r.research)}</div>
+       </div>`
+    : "";
+  if (r.researching) {
+    return `${findings}<p class="hint" role="status">A worker is reading the sources for this
+      question. Findings appear here when it finishes.</p>`;
+  }
+  if (!r.researchable) return findings;
+  return `${findings}
+    <button class="btn quiet icon-btn" data-research="${esc(r.id)}"
+      aria-label="research this question" title="research this question">${iconResearch}</button>`;
+}
 
 // showReviews renders the wiki's questions for its humans: contradictions and
 // uncertainties the agent flagged, and deletions awaiting approval.
@@ -996,7 +1024,9 @@ async function showReviews(all) {
     }
     if (!view.done(`<h1>Reviews</h1>
       <p class="hint">Decisions that require review. Resolving one records your
-        answer; an approved deletion is applied by the next build.
+        answer; an approved deletion is applied by the next build. Questions
+        about the material can be handed back to a worker, which re-reads the
+        sources and attaches what it finds — you still make the call.
         ${toggle}</p>
       <div id="review-note" class="hint" role="status"></div>
       ${reviews.map((r) => `
@@ -1010,12 +1040,30 @@ async function showReviews(all) {
           </div>
           <strong>${esc(r.title)}</strong>
           <div class="detail">${esc(r.detail)}</div>
+          ${reviewResearch(r)}
           ${r.status === "open" ? (r.actions && r.actions.length ? r.actions : ["dismiss"]).map((a) =>
             `<button class="btn ${a === "approve" ? "" : "quiet"}${REVIEW_ACTION_ICONS[a] ? " icon-btn" : ""}"
                data-review="${esc(r.id)}" data-action="${esc(a)}"
                aria-label="${esc(a)}" title="${esc(a)}">${REVIEW_ACTION_ICONS[a] || esc(a)}</button>`
           ).join("") : ""}
         </div>`).join("")}`)) return;
+
+    for (const b of document.querySelectorAll("[data-research]")) {
+      once(b, async () => {
+        try {
+          await api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews/${encodeURIComponent(b.dataset.research)}/research`,
+            { method: "POST", body: {} });
+          // Nothing is resolved, so the badge is left alone: the question is
+          // still waiting for a human, now with a reader working on it.
+          toast("Research queued");
+          showReviews(all);
+        } catch (err) {
+          if (err.handled) return;
+          const note = $("review-note");
+          if (note) { note.textContent = err.message; note.classList.add("error"); }
+        }
+      });
+    }
 
     for (const b of document.querySelectorAll("[data-review]")) {
       once(b, async () => {

@@ -101,10 +101,30 @@ func (f *FakeRunner) Run(ctx context.Context, req Request) (*Result, error) {
 	switch req.Step {
 	case StepAnalyze:
 		res.Analysis = f.analyze(unit, req)
+	case StepResearch:
+		res.Research = f.research(req)
 	default:
 		res.Generation = f.generate(unit, req)
 	}
 	return res, nil
+}
+
+// research answers the review item the prompt carries, without resolving it:
+// the interesting state to exercise locally is findings landing on a card that
+// is still waiting for a human, and a fake that closed its own questions would
+// leave the reviews inbox permanently empty.
+func (f *FakeRunner) research(req Request) *ResearchResult {
+	question := questionFromPrompt(req.Prompt)
+	if question == "" {
+		question = "the review item"
+	}
+	return &ResearchResult{
+		Findings: fmt.Sprintf(
+			"Fake-runner research on %q. No corpus was read and no API call was made: "+
+				"the run, the queue slot, the spend ledger, and this write-back are all real.",
+			question),
+		Evidence: []string{"fake-runner"},
+	}
 }
 
 // analyze proposes exactly one page for the unit, derived from its key so the
@@ -204,6 +224,17 @@ func unitFromPrompt(prompt string) string {
 		}
 	}
 	return "unknown"
+}
+
+// questionFromPrompt reads the "Question: <q>" line a research prompt opens
+// with, mirroring how unitFromPrompt recovers the unit from the other two.
+func questionFromPrompt(prompt string) string {
+	for line := range strings.Lines(prompt) {
+		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "Question: "); ok {
+			return after
+		}
+	}
+	return ""
 }
 
 // titleFromPrompt reads the optional "Title: <t>" line of an analyze prompt.

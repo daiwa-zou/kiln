@@ -17,10 +17,14 @@ import (
 
 // Tool sets. Bash is disallowed outright: Read/Grep/Glob/Write/Edit is enough
 // to write wiki pages, and dropping Bash removes most of the attack surface in
-// one move. Network tools are denied because research happens in Go, outside
-// the sandbox, where it can be cached, audited, and cost-bounded.
+// one move. Network tools are denied because acquisition happens in Go,
+// outside the sandbox, where it can be cached, audited, and cost-bounded.
+//
+// That holds for the research step too, despite the name: it investigates the
+// material the connectors already fetched, harder and without a unit boundary
+// around it, and reaches the network exactly as little as every other step.
 var (
-	analyzeTools  = []string{"Read", "Grep", "Glob"}
+	readOnlyTools = []string{"Read", "Grep", "Glob"}
 	generateTools = []string{"Read", "Grep", "Glob", "Write", "Edit"}
 	deniedTools   = []string{"Bash", "WebSearch", "WebFetch", "Task", "NotebookEdit", "TodoWrite"}
 )
@@ -202,7 +206,7 @@ func BuildArgs(req Request) []string {
 	switch req.Step {
 	case StepAnalyze:
 		args = append(args,
-			"--tools", strings.Join(analyzeTools, ","),
+			"--tools", strings.Join(readOnlyTools, ","),
 			"--permission-mode", "dontAsk",
 		)
 		if req.JSONSchema != "" {
@@ -210,6 +214,20 @@ func BuildArgs(req Request) []string {
 		}
 		if req.SessionID != "" {
 			args = append(args, "--session-id", SessionUUID(req.SessionID))
+		}
+
+	case StepResearch:
+		// The same read-only surface as analyze, and no session: research
+		// answers one question against the corpus and shares its context with
+		// nothing, so there is no earlier call to resume or later one to
+		// resume it.
+		args = append(args,
+			"--tools", strings.Join(readOnlyTools, ","),
+			"--disallowedTools", strings.Join(deniedTools, ","),
+			"--permission-mode", "dontAsk",
+		)
+		if req.JSONSchema != "" {
+			args = append(args, "--json-schema", req.JSONSchema)
 		}
 
 	case StepGenerate:

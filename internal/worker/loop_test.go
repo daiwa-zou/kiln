@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -38,6 +39,10 @@ type loopStore struct {
 	// requeued and sweeps record drain and GC activity.
 	requeued []string
 	sweeps   int
+	// question and researched script and record a research run's question and
+	// its write-back.
+	question   *store.ResearchQuestion
+	researched []string
 
 	claimErr   error
 	requeueErr error
@@ -168,6 +173,22 @@ func (l *loopStore) FileReview(_ context.Context, _, kind, title, _ string) erro
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.reviews = append(l.reviews, kind+":"+title)
+	return nil
+}
+
+func (l *loopStore) ResearchQuestionFor(_ context.Context, _ string) (*store.ResearchQuestion, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.question == nil {
+		return nil, store.ErrNotFound
+	}
+	return l.question, nil
+}
+
+func (l *loopStore) RecordResearch(_ context.Context, reviewID, findings string, resolved bool) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.researched = append(l.researched, fmt.Sprintf("%s|%v|%s", reviewID, resolved, findings))
 	return nil
 }
 

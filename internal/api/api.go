@@ -54,6 +54,7 @@ type WriteStore interface {
 	SetCorrectionActive(ctx context.Context, workspaceID, correctionID string, active bool) error
 	ListReviews(ctx context.Context, workspaceID, status string, limit, offset int) ([]store.ReviewRow, error)
 	ResolveReview(ctx context.Context, workspaceID, reviewID, action, resolvedBy string) error
+	RequestResearch(ctx context.Context, workspaceID, reviewID string) (runID string, err error)
 	Backlinks(ctx context.Context, workspaceID, slug string) ([]store.PageInfo, error)
 	WorkspaceRole(ctx context.Context, workspaceID, userID string) (string, error)
 }
@@ -318,6 +319,13 @@ func (s *Server) mountRoutes(r chi.Router) {
 					// dispatch to router tie-breaking rules.
 					r.Patch("/correction/{id}", s.handleCorrectionPatch)
 					r.Post("/reviews/{id}/resolve", s.handleReviewResolve)
+					// Queueing research spends real money, so it sits behind
+					// the same write limiter and role gate as a rebuild. The
+					// route mounts only when there is a queue to put it on:
+					// without one the button would file a run nothing claims.
+					if s.Runs != nil {
+						r.Post("/reviews/{id}/research", s.handleReviewResearch)
+					}
 				})
 			})
 		})

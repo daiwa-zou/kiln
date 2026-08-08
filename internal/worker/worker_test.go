@@ -22,6 +22,11 @@ type fakeStore struct {
 	byID       map[string]store.ConnectorRow
 	files      []store.FileRow
 	reviews    []string
+
+	// question is what a research run finds behind its run id, nil for a run
+	// whose review item is gone; recorded captures the write-back.
+	question *store.ResearchQuestion
+	recorded []string
 }
 
 func (f *fakeStore) ClaimNextRun(context.Context, string) (*store.QueuedRun, error) {
@@ -66,6 +71,16 @@ func (f *fakeStore) SpendInWindow(context.Context, string, time.Duration) (float
 }
 func (f *fakeStore) FileReview(_ context.Context, _, kind, title, _ string) error {
 	f.reviews = append(f.reviews, kind+":"+title)
+	return nil
+}
+func (f *fakeStore) ResearchQuestionFor(_ context.Context, _ string) (*store.ResearchQuestion, error) {
+	if f.question == nil {
+		return nil, store.ErrNotFound
+	}
+	return f.question, nil
+}
+func (f *fakeStore) RecordResearch(_ context.Context, reviewID, findings string, resolved bool) error {
+	f.recorded = append(f.recorded, fmt.Sprintf("%s|%v|%s", reviewID, resolved, findings))
 	return nil
 }
 

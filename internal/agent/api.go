@@ -156,8 +156,11 @@ func (r *APIRunner) buildSystem(req Request) []anthropic.TextBlockParam {
 }
 
 func schemaFor(req Request) map[string]any {
-	if req.Step == StepAnalyze {
+	switch req.Step {
+	case StepAnalyze:
 		return AnalysisSchemaJSON()
+	case StepResearch:
+		return ResearchSchemaJSON()
 	}
 	return GenerationSchemaJSON()
 }
@@ -287,6 +290,15 @@ func (r *APIRunner) buildResult(req Request, msg *anthropic.Message, model strin
 			return res, nil
 		}
 		res.Generation = parsed
+	case StepResearch:
+		parsed, err := ParseResearch(text)
+		if err != nil {
+			res.IsError = true
+			res.Subtype = "decode_error"
+			res.Result = fmt.Sprintf("decode research: %v", err)
+			return res, nil
+		}
+		res.Research = parsed
 	}
 
 	return res, nil
@@ -313,7 +325,7 @@ func (req Request) validateAPI() error {
 	switch {
 	case strings.TrimSpace(req.Prompt) == "":
 		return errors.New("agent: Prompt is required")
-	case req.Step != StepAnalyze && req.Step != StepGenerate:
+	case req.Step != StepAnalyze && req.Step != StepGenerate && req.Step != StepResearch:
 		return fmt.Errorf("agent: unknown step %q", req.Step)
 	}
 	return nil
