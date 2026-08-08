@@ -243,6 +243,7 @@ func (s *Server) handleReviews(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"id": rv.ID, "kind": rv.Kind, "title": rv.Title, "detail": rv.Detail,
 			"actions": rv.Actions, "status": rv.Status, "pageSlug": rv.PageSlug,
+			"unit":    rv.Unit,
 			"created": rv.CreatedAt, "resolved": rv.ResolvedAt,
 			// Whether the item can be handed to a worker is decided here rather
 			// than in the client: the kinds reading can settle are a property of

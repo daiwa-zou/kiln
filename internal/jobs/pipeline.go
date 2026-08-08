@@ -312,6 +312,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		Ref:       req.Ref,
 		Date:      now.Format(wiki.DateFormat),
 		Narrative: findings,
+		Sources:   sourceTallies(req.Map),
 	})
 
 	created, updated := countChanges(pages, written)
@@ -708,6 +709,32 @@ func planFrom(res *agent.Result) (plan string, planned map[string]bool, reviews 
 		}
 	}
 	return plan, planned, analysis.Reviews
+}
+
+// sourceTallies counts the map's units by the namespace that produced them, so
+// the overview can say what the bench is made of. Derived from the map on every
+// build rather than stored, which is what keeps the sentence true as sources
+// are connected and removed.
+//
+// Order is the namespaces' own, not a map iteration: the overview is rewritten
+// on every run and compared against the last, so an unstable order would read
+// as a change on a build where nothing changed.
+func sourceTallies(m *mapper.WorkspaceMap) []wiki.SourceTally {
+	if m == nil {
+		return nil
+	}
+	counts := map[string]int{}
+	for _, u := range m.Units {
+		counts[diff.Namespace(diff.Key(u.Key))]++
+	}
+	order := []string{"module", "doc", "doc:upload", "doc:web"}
+	out := make([]wiki.SourceTally, 0, len(order))
+	for _, kind := range order {
+		if n := counts[kind]; n > 0 {
+			out = append(out, wiki.SourceTally{Kind: kind, Count: n})
+		}
+	}
+	return out
 }
 
 // stampDates fills created/updated. Updated is always the run date -- the page

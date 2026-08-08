@@ -23,6 +23,15 @@
     <div id="wizard-body"></div>
   </div>
 </div>
+<div id="help" class="palette" hidden>
+  <div class="palette-panel help-panel" role="dialog" aria-modal="true" aria-labelledby="help-title">
+    <div class="wizard-head">
+      <strong id="help-title"></strong>
+      <button class="wizard-x" id="help-x" aria-label="Close">×</button>
+    </div>
+    <div id="help-body"></div>
+  </div>
+</div>
 <div id="palette" class="palette" hidden>
   <div class="palette-panel" role="dialog" aria-modal="true" aria-label="Go to page">
     <input id="palette-input" type="text" role="combobox" aria-expanded="true"
@@ -56,7 +65,7 @@
       <a href="#/graph" data-view="graph">Graph</a>
       <a href="#/gaps" data-view="gaps">Gaps</a>
       <div class="group-label">Change</div>
-      <a href="#/ingestion" data-view="sources">Ingestion</a>
+      <a href="#/ingest" data-view="sources">Ingest</a>
       <a href="#/log" data-view="log">Log</a>
       <a href="#/reviews" data-view="reviews">Reviews <span class="badge" id="reviews-badge" hidden></span></a>
       <div class="group-label">Configure</div>

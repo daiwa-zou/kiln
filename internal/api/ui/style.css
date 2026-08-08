@@ -409,6 +409,32 @@
     font-size: 20px; line-height: 1; color: var(--ink-dim);
   }
   .wizard-x:hover { color: var(--ink); }
+
+  /* The help sheet shares the wizard's panel: same backdrop, same dialog
+     contract, prose instead of a form. */
+  .help-panel { margin-top: 12vh; max-width: 560px; padding: 16px 18px; }
+  .help-panel #help-title { font-family: var(--serif); font-size: 19px; }
+  #help-body p { margin: 0 0 10px; font-size: 14.5px; line-height: 1.55; color: var(--ink-dim); }
+  #help-body p:last-child { margin-bottom: 0; }
+  #help-body em { color: var(--ink); font-style: italic; }
+
+  /* A view's title and the question mark that explains it sit on one line, the
+     mark aligned to the title's baseline rather than floating beside it. */
+  .view-head {
+    display: flex; align-items: baseline; gap: 9px;
+    flex-wrap: wrap; margin-bottom: 8px;
+  }
+  .view-head h1 { margin: 0; }
+  .help-btn {
+    flex: none; cursor: pointer;
+    width: 24px; height: 24px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: none; color: var(--ink-faint);
+    border: 1px solid var(--border);
+    font-size: 13px; line-height: 1; font-family: var(--sans);
+    transition: color var(--dur), border-color var(--dur);
+  }
+  .help-btn:hover { color: var(--ember); border-color: var(--ember); }
   .wizard-card {
     display: block; width: 100%; text-align: left; cursor: pointer;
     background: var(--bg); color: var(--ink);

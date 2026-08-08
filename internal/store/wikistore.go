@@ -527,17 +527,16 @@ func (s *WikiStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 	// Deduplicated against open items so a model that keeps flagging the same
 	// contradiction across runs asks the question once, not once per run.
 	for _, rv := range run.Reviews {
-		detail := rv.Detail
-		if rv.Unit != "" {
-			detail = fmt.Sprintf("%s\n\n(raised while generating %s)", detail, rv.Unit)
-		}
+		// The unit rides in its own column rather than being appended to the
+		// detail: which source raised a question is a fact about the review,
+		// and a reader should meet the document rather than its cache key.
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO review_items (workspace_id, run_id, kind, title, detail)
-			SELECT $1, $2, $3, $4, $5
+			INSERT INTO review_items (workspace_id, run_id, kind, title, detail, unit)
+			SELECT $1, $2, $3, $4, $5, $6
 			WHERE NOT EXISTS (
 			    SELECT 1 FROM review_items
 			    WHERE workspace_id = $1 AND kind = $3 AND title = $4 AND status = 'open')`,
-			run.WorkspaceID, runID, rv.Kind, rv.Title, detail); err != nil {
+			run.WorkspaceID, runID, rv.Kind, rv.Title, rv.Detail, rv.Unit); err != nil {
 			return fmt.Errorf("store: insert review item: %w", err)
 		}
 	}

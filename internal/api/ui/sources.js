@@ -132,6 +132,10 @@ function armButton(b, label) {
 const iconPause = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2h3v12H4zM9 2h3v12H9z"/></svg>`;
 const iconPlay = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2l9 6-9 6z"/></svg>`;
 const iconTrash = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 1h4v1h4v2H2V2h4zM3 5h10l-.8 10H3.8zM6 7v6h1V7zm3 0v6h1V7z"/></svg>`;
+// The two primary actions on the ingest view. A plus adds a source; the
+// funnel is the bench itself, material narrowing into one wiki.
+const iconPlus = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M7 2h2v5h5v2H9v5H7V9H2V7h5z"/></svg>`;
+const iconIngest = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 2h13l-5 6.2V14L6.5 12V8.2z"/></svg>`;
 
 // Glyphs for the source a unit came from. Names are distinct from app.js's
 // icon consts: both files are classic scripts sharing one global scope, where
@@ -778,7 +782,11 @@ function pollRuns(ws, view, connectors) {
     const btn = $("sources-build");
     if (btn) {
       btn.disabled = active;
-      btn.textContent = active ? "Ingestion is queued or running" : "Ingest now";
+      const label = active ? "An ingest is already queued or running" : "Ingest now";
+      // The button is a glyph, so its state lives in the accessible name
+      // and the tooltip rather than in text nobody would see change.
+      btn.setAttribute("aria-label", label);
+      btn.title = label;
     }
     // A finished run stops the poll: the feed is settled until someone acts.
     if (active) soon();
@@ -788,7 +796,7 @@ function pollRuns(ws, view, connectors) {
 }
 
 async function showSources() {
-  const view = beginView("Ingestion", "sources");
+  const view = beginView("Ingest", "sources");
   const ws = encodeURIComponent(state.workspace);
   try {
     // Connectors and credentials are owner-gated; files and runs are readable
@@ -890,14 +898,14 @@ async function showSources() {
         </span>
       </div>`;
 
-    if (!view.done(`<h1>Ingestion</h1>
-      <p class="hint">What this bench reads and when it read it: a repository,
-      web pages, and uploaded documents all fire into one wiki. Pausing a source
-      skips it without touching the pages it already produced.</p>
+    if (!view.done(`${viewHead("Ingest", "ingest")}
       <div class="meta sources-actions">
-        ${canAdmin ? `<button class="btn" id="sources-add">+ Add source</button>` : ""}
-        <button class="btn ${canAdmin ? "quiet" : ""}" id="sources-build" ${buildActive ? "disabled" : ""}>
-          ${buildActive ? "Ingestion is queued or running" : "Ingest now"}</button>
+        ${canAdmin ? `<button class="btn icon-btn" id="sources-add"
+          aria-label="Add a source" title="Add a source">${iconPlus}</button>` : ""}
+        <button class="btn ${canAdmin ? "quiet" : ""} icon-btn" id="sources-build"
+          ${buildActive ? "disabled" : ""}
+          aria-label="${buildActive ? "An ingest is already queued or running" : "Ingest now"}"
+          title="${buildActive ? "An ingest is already queued or running" : "Ingest now"}">${iconIngest}</button>
         <span class="hint" id="sources-build-note" role="status"></span>
       </div>
       <p class="hint" id="next-build">${esc(nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0))}</p>
@@ -906,10 +914,10 @@ async function showSources() {
       ${canAdmin
         ? sec("repos", "Repositories",
             connectors.filter((c) => c.kind === "git").map(connectorRow).join("") ||
-              `<div class="empty">No repository connected yet. Add one with + Add source.</div>`) +
+              `<div class="empty">No repository connected yet. Add one with the + button above.</div>`) +
           sec("web", "Web pages",
             connectors.filter((c) => c.kind === "web").map(connectorRow).join("") ||
-              `<div class="empty">No web pages connected yet. Add some with + Add source.</div>`)
+              `<div class="empty">No web pages connected yet. Add some with the + button above.</div>`)
         : sec("repos", "Repositories &amp; web pages",
             `<div class="empty">Managing sources needs an org owner or an instance
              admin. You can still add documents below if your role allows.</div>`)}
@@ -921,14 +929,11 @@ async function showSources() {
            ${filesErr ? `<div class="empty">${esc(filesErr)}</div>`
              : files.map(fileRow).join("") ||
                `<div class="empty">No documents yet. Add markdown, PDFs, Office
-                files, or HTML with + Add source, or drop files anywhere on this card.</div>`}
+                files, or HTML with the + button above, or drop files anywhere on this card.</div>`}
          </div>`)}
 
       ${sec("runs", "Recent runs",
-        `<p class="hint">Each ingest regenerates only the pages whose sources
-         changed; an unchanged bench incurs no cost. Runs execute one at a time
-         per bench.</p>
-         <div id="run-feed">${renderRunsHTML(runs, activeUnits)}</div>`)}`)) return;
+        `<div id="run-feed">${renderRunsHTML(runs, activeUnits)}</div>`)}`)) return;
 
     // Collapsed/expanded choices persist across renders and visits -- the
     // 5-second active-run refresh must not spring sections back open.
@@ -1132,7 +1137,7 @@ async function showGetStarted() {
         ? `Ingesting — ${running.unitsDone || 0} of ${running.unitsTotal} done. This page becomes your wiki when it finishes.`
         : "Ingesting now — this page becomes your wiki when it finishes.")
       : p.everRan
-        ? "Ingested. If no pages appeared, check Ingestion for what the run reported."
+        ? "Ingested. If no pages appeared, check Ingest for what the run reported."
         : "Reads every source and writes the pages. Only changed sources cost anything.";
     const ingestBar = running && running.unitsTotal
       ? `<div class="run-progress">

@@ -28,6 +28,11 @@ type ReviewRow struct {
 	Actions  []string
 	Status   string
 	PageSlug string
+	// Unit is the cache key of the unit whose generation raised this, empty
+	// for reviews raised outside unit generation (a deletion, say). Held as
+	// data rather than appended to Detail so a reader can be shown the source
+	// rather than the key.
+	Unit string
 	// Research is what a research run found, empty until one has run. It sits
 	// beside Detail rather than replacing it: the question and the reading done
 	// against it are two different things, and a human answering the question
@@ -190,13 +195,18 @@ type CorrectionRow struct {
 func (s *WikiStore) ListReviews(ctx context.Context, workspaceID, status string, limit, offset int) ([]ReviewRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.id, r.kind, r.title, r.detail, r.actions, r.status,
-		       coalesce(p.slug, ''), r.research, r.research_at,
+		       coalesce(p.slug, ''), r.unit, r.research, r.research_at,
 		       EXISTS (SELECT 1 FROM runs rn
 		               WHERE rn.review_id = r.id AND rn.status IN ('queued','running')),
 		       r.created_at, r.resolved_at
 		FROM review_items r
 		LEFT JOIN pages p ON p.id = r.page_id
-		WHERE r.workspace_id = $1 AND ($2 = '' OR r.status = $2)
+		WHERE r.workspace_id = $1
+		  AND ($2 = ''
+		       -- 'answered' is a filter, not a stored status: resolving writes
+		       -- 'resolved' or 'approved', and the history view wants both.
+		       OR ($2 = 'answered' AND r.status <> 'open')
+		       OR r.status = $2)
 		ORDER BY r.created_at DESC
 		LIMIT $3 OFFSET $4`,
 		workspaceID, status, limit, offset)
@@ -214,7 +224,7 @@ func (s *WikiStore) ListReviews(ctx context.Context, workspaceID, status string,
 			researchAt, resolvedAt *time.Time
 		)
 		if err := rows.Scan(&rv.ID, &rv.Kind, &rv.Title, &rv.Detail, &actions,
-			&rv.Status, &rv.PageSlug, &rv.Research, &researchAt, &rv.Researching,
+			&rv.Status, &rv.PageSlug, &rv.Unit, &rv.Research, &researchAt, &rv.Researching,
 			&createdAt, &resolvedAt); err != nil {
 			return nil, fmt.Errorf("store: scan review: %w", err)
 		}
