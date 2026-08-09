@@ -669,55 +669,77 @@ const runProgress = (r) => {
   </div>`;
 };
 
-const runRow = (r, activeUnits) => `
-  <div class="row" title="${esc(r.created)}">
-    <span><span class="run-dot run-${esc(r.status)}" aria-hidden="true"></span>${esc(runOutcome(r))}</span>
-    <span>
-      ${r.trigger && r.trigger !== "manual" ? (() => {
-        const known = triggerChip[r.trigger];
-        // .chip.help is dashed and cursor:help -- CSS that promises a hover
-        // reveals something. With no explanation to give, the plain chip is
-        // the honest one: the label still says what started the run.
-        if (!known) return `<span class="chip">${esc(r.trigger)}</span>`;
-        const [label, why] = known;
-        return `<span class="chip help" title="${esc(why)}">${esc(label)}</span>`;
-      })() : ""}
-      ${r.ref ? `<span class="count mono">${esc(r.ref)}</span>` : ""}
-      ${(() => {
-        // A live run's total climbs with its units; a finished one reports
-        // what the run row settled. Both are the same question asked at
-        // different moments, so they render in the same place.
-        const t = r.status === "running" ? liveTokens(activeUnits) : (Number(r.tokens) || 0);
-        return t > 0 ? `<span class="count">${esc(humanTokens(t))}</span>` : "";
-      })()}
-      ${r.costUsd > 0 ? `<span class="count">${money(r.costUsd)}</span>` : ""}
-    </span>
-  </div>
-  ${runErrorHTML(r)}
-  ${runProgress(r)}
-  ${r.status === "running" ? liveUnits(activeUnits) : ""}
-  ${r.status !== "running" && r.costUsd > 0
-    ? `<details class="run-units" data-run-items="${esc(r.id)}" data-keep="items:${esc(r.id)}">
-    <summary>tokens and cost by unit</summary>
-    <div class="detail">loading…</div>
-  </details>` : ""}`;
+// A run's shape at a glance: how much of its plan is written (ember), how much
+// is still to go (ember-soft), and the trough behind both. The old row said
+// what a run cost but not how much of it had happened.
+//
+// It deliberately does NOT claim to show the content-hash gate: how many units
+// the gate spared is not on the run row, and a segment invented for it would be
+// a number about kiln's central economic claim that nothing measured.
+const runMeter = (r) => {
+  const total = r.unitsTotal || 0;
+  if (!total) return "";
+  const done = r.unitsDone || 0;
+  const left = (r.unitsPending || 0) + (r.unitsRunning || 0);
+  return `<div class="tl-meter">
+    <div class="bar">
+      <span class="fill-ember" data-w="${Math.round(done / total * 100)}"></span>
+      <span class="fill-soft" data-w="${Math.round(left / total * 100)}"></span>
+    </div>
+    <span class="bar-note">${done} of ${total} unit${total === 1 ? "" : "s"} written</span>
+  </div>`;
+};
 
-// renderRunsHTML builds the whole feed. Runs group under day headers, newest
-// first; the repeated time chips go.
+const runRow = (r, activeUnits) => `
+  <div class="tl-row">
+    <div class="tl-when" title="${esc(r.created)}">${esc(relTime(r.created))}</div>
+    <div class="tl-rail" aria-hidden="true">
+      <span class="tl-dot run-${esc(r.status)}"></span><span class="tl-line"></span>
+    </div>
+    <div class="tl-body">
+      <div class="tl-top">
+        <strong>${esc(runOutcome(r))}</strong>
+        ${r.ref ? `<span class="mono">${esc(r.ref)}</span>` : ""}
+        ${r.trigger && r.trigger !== "manual" ? (() => {
+          const known = triggerChip[r.trigger];
+          // .chip.help is dashed and cursor:help -- CSS that promises a hover
+          // reveals something. With no explanation to give, the plain chip is
+          // the honest one: the label still says what started the run.
+          if (!known) return `<span class="chip">${esc(r.trigger)}</span>`;
+          const [label, why] = known;
+          return `<span class="chip help" title="${esc(why)}">${esc(label)}</span>`;
+        })() : ""}
+        <span class="tl-cost">${(() => {
+          // A live run's total climbs with its units; a finished one reports
+          // what the run row settled. Both are the same question asked at
+          // different moments, so they render in the same place.
+          const t = r.status === "running" ? liveTokens(activeUnits) : (Number(r.tokens) || 0);
+          const parts = [];
+          if (t > 0) parts.push(esc(humanTokens(t)));
+          if (r.costUsd > 0) parts.push(money(r.costUsd));
+          return parts.join(" · ");
+        })()}</span>
+      </div>
+      ${r.status === "running" ? runProgress(r) : runMeter(r)}
+      ${runErrorHTML(r)}
+      ${r.status === "running" ? liveUnits(activeUnits) : ""}
+      ${r.status !== "running" && r.costUsd > 0
+        ? `<details class="run-units" data-run-items="${esc(r.id)}" data-keep="items:${esc(r.id)}">
+        <summary>tokens and cost by unit</summary>
+        <div class="detail">loading…</div>
+      </details>` : ""}
+    </div>
+  </div>`;
+
+// renderRunsHTML builds the whole feed as one timeline: newest at the top, the
+// relative time in its own gutter, a connector line down the rail. The day
+// headers are gone -- the gutter says when, on every row.
 function renderRunsHTML(runs, activeUnits) {
-  const runGroups = [];
-  for (const r of runs) {
-    const label = relTime(r.created);
-    if (!runGroups.length || runGroups[runGroups.length - 1].label !== label) {
-      runGroups.push({ label, runs: [] });
-    }
-    runGroups[runGroups.length - 1].runs.push(r);
+  if (!runs.length) {
+    return `<div class="empty">No runs yet. Press Ingest now, or build from the
+      CLI with <span class="mono">kiln build</span>.</div>`;
   }
-  return runGroups.map((g) => `
-    <div class="run-day">${esc(g.label)}</div>
-    <div class="review run-list">${g.runs.map((r) => runRow(r, activeUnits)).join("")}</div>`).join("")
-    || `<div class="empty">No runs yet. Press Ingest now, or build from the
-        CLI with <span class="mono">kiln build</span>.</div>`;
+  return runs.map((r) => runRow(r, activeUnits)).join("");
 }
 
 // fetchRunFeed reads what the feed needs and nothing else: the runs, plus the
@@ -805,6 +827,7 @@ function pollRuns(ws, view, connectors) {
     const open = [...feed.querySelectorAll("[data-keep]")]
       .filter((d) => d.open).map((d) => d.dataset.keep);
     feed.innerHTML = renderRunsHTML(runs, activeUnits);
+    sizeBars(feed);
     wireRunItems(feed, ws);
     for (const d of feed.querySelectorAll("[data-keep]")) {
       if (open.includes(d.dataset.keep)) d.open = true;
@@ -819,12 +842,13 @@ function pollRuns(ws, view, connectors) {
     const btn = $("sources-build");
     if (btn) {
       btn.disabled = active;
-      const label = active ? "An ingest is already queued or running" : "Ingest now";
-      // The button is a glyph, so its state lives in the accessible name
-      // and the tooltip rather than in text nobody would see change.
-      btn.setAttribute("aria-label", label);
-      btn.title = label;
+      // The button carries its own label now, so only the reason it is
+      // unavailable needs saying -- in the tooltip, not over the visible text.
+      btn.title = active ? "An ingest is already queued or running" : "Ingest now";
     }
+    // The top bar reads the same feed; hand it what was just fetched rather
+    // than asking the server for it a second time.
+    adoptRunFeed(runs, activeUnits);
     // A finished run stops the poll: the feed is settled until someone acts.
     if (active) soon();
   }
@@ -873,15 +897,6 @@ async function showSources() {
       }
     }
 
-    // sec renders one collapsible section. Open is the default; a collapsed
-    // choice is read back at render time so re-renders (including the
-    // active-run refresh) respect it.
-    const sec = (name, labelHTML, bodyHTML) => `
-      <details class="sec" data-sec="${name}" ${lsGet(`kiln.ingest.${name}`, true) ? "open" : ""}>
-        <summary class="group-label">${labelHTML}</summary>
-        ${bodyHTML}
-      </details>`;
-
     // Each source reads as a sentence, not a row of internals: what it is,
     // where it points, when it ingests, and when it was last read.
     const kindLabel = { git: "repository", web: "web pages", upload: "documents" };
@@ -900,85 +915,138 @@ async function showSources() {
       const phrase = triggerPhrase[c.triggerMode];
       return phrase ? `${phrase}; ${read}.` : `${read[0].toUpperCase()}${read.slice(1)}.`;
     };
-    const connectorRow = (c) => `
-      <div class="review" data-connector-row="${esc(c.id)}">
-        <div class="meta">
-          <span class="chip kind-${esc(c.kind)}">${esc(kindLabel[c.kind] || c.kind)}</span>
-          ${c.enabled ? "" : `<span class="chip">paused</span>`}
+    // The health line is what the server actually knows: whether the source is
+    // enabled, whether the last read failed, and when it happened. There is no
+    // per-source unit count on the API, so the bar carries state rather than a
+    // proportion -- full when a source is reading cleanly, empty when it is
+    // paused, oxide when the last read failed.
+    const SRC_ICONS = { git: iconRepo, web: iconWeb, upload: iconDoc };
+    const connectorHealth = (c) => {
+      if (!c.enabled) return { pct: 0, cls: "fill-soft", note: "Paused — skipped on ingest" };
+      if (c.lastError) return { pct: 100, cls: "fill-err", note: "Last read failed" };
+      if (!c.lastSynced) return { pct: 0, cls: "fill-soft", note: "Not read yet" };
+      return { pct: 100, cls: "fill-ember", note: "Read cleanly" };
+    };
+
+    const connectorRow = (c) => {
+      const h = connectorHealth(c);
+      return `
+      <div class="src-row" data-connector-row="${esc(c.id)}">
+        <span class="src-icon kind-${esc(c.kind)}">${SRC_ICONS[c.kind] || iconDoc}</span>
+        <div class="src-main">
+          <div class="src-name">
+            <strong>${esc(c.name)}</strong>
+            <span class="chip">${esc(kindLabel[c.kind] || c.kind)}</span>
+            ${c.enabled ? "" : `<span class="chip">paused</span>`}
+          </div>
+          <div class="src-where" title="${esc(connectorSummary(c))}">${esc(connectorSummary(c))}</div>
         </div>
-        <strong>${esc(c.name)}</strong>
-        <span class="count mono">${esc(connectorSummary(c))}</span>
-        <div class="detail">${esc(connectorWhen(c))}</div>
-        ${c.lastError ? `<div class="detail hint error">${esc(c.lastError)}</div>` : ""}
-        <div class="meta">
-          <button class="btn quiet icon-btn" data-conn-toggle="${esc(c.id)}" data-enabled="${c.enabled}"
+        <div class="src-health">
+          <div class="bar"><span class="${h.cls}" data-w="${h.pct}"></span></div>
+          <div class="bar-note">${esc(h.note)}</div>
+        </div>
+        <span class="src-when" title="${esc(connectorWhen(c))}">${esc(
+          c.lastSynced ? relTime(c.lastSynced) : "never")}</span>
+        <div class="src-tools">
+          <button class="sq-btn" data-conn-toggle="${esc(c.id)}" data-enabled="${c.enabled}"
             aria-label="${c.enabled ? "Pause" : "Resume"} ${esc(c.name)}" title="${c.enabled ? "pause" : "resume"}">
             ${c.enabled ? iconPause : iconPlay}</button>
-          <button class="btn quiet icon-btn" data-conn-delete="${esc(c.id)}"
+          <button class="sq-btn rm" data-conn-delete="${esc(c.id)}"
             aria-label="Delete ${esc(c.name)}" title="delete">${iconTrash}</button>
         </div>
-      </div>`;
+      </div>
+      ${c.lastError ? `<div class="src-err">${esc(c.lastError)}</div>` : ""}`;
+    };
 
     const fileRow = (f) => `
-      <div class="row ${f.enabled === false ? "file-paused" : ""}" data-file-row="${esc(f.id)}">
-        <span class="mono">${esc(f.path)}
-          ${f.enabled === false ? `<span class="chip">paused</span>` : ""}</span>
-        <span>
-          <span class="count">${esc(humanBytes(f.size))}</span>
-          ${timeTag(f.updated)}
-          <button class="btn quiet icon-btn" data-file-toggle="${esc(f.id)}" data-enabled="${f.enabled !== false}"
+      <div class="src-row ${f.enabled === false ? "file-paused" : ""}" data-file-row="${esc(f.id)}">
+        <span class="src-icon kind-upload">${iconDoc}</span>
+        <div class="src-main">
+          <div class="src-name">
+            <strong>${esc(f.path.split("/").pop())}</strong>
+            <span class="chip">${esc(humanBytes(f.size))}</span>
+            ${f.enabled === false ? `<span class="chip">paused</span>` : ""}
+          </div>
+          <div class="src-where" title="${esc(f.path)}">${esc(f.path)}</div>
+        </div>
+        <span class="src-when">${timeTag(f.updated)}</span>
+        <div class="src-tools">
+          <button class="sq-btn" data-file-toggle="${esc(f.id)}" data-enabled="${f.enabled !== false}"
             aria-label="${f.enabled === false ? "Resume" : "Pause"} ${esc(f.path)}"
             title="${f.enabled === false ? "resume" : "pause"}">
             ${f.enabled === false ? iconPlay : iconPause}</button>
-          <button class="btn quiet icon-btn" data-file-delete="${esc(f.id)}"
+          <button class="sq-btn rm" data-file-delete="${esc(f.id)}"
             aria-label="Delete ${esc(f.path)}" title="delete">${iconTrash}</button>
-        </span>
+        </div>
       </div>`;
 
-    if (!view.done(`${viewHead("Ingest", "ingest")}
-      <div class="meta sources-actions">
-        ${canAdmin ? `<button class="btn icon-btn" id="sources-add"
-          aria-label="Add a source" title="Add a source">${iconPlus}</button>` : ""}
-        <button class="btn ${canAdmin ? "quiet" : ""} icon-btn" id="sources-build"
-          ${buildActive ? "disabled" : ""}
-          aria-label="${buildActive ? "An ingest is already queued or running" : "Ingest now"}"
-          title="${buildActive ? "An ingest is already queued or running" : "Ingest now"}">${iconIngest}</button>
-        <span class="hint" id="sources-build-note" role="status"></span>
+    // Spend is summed over the runs actually on screen rather than over a
+    // window the API does not report, and the note says which -- a "7 days"
+    // label over ten runs would be a number nothing measured.
+    const spend = runs.reduce((n, r) => n + (Number(r.costUsd) || 0), 0);
+    const stat = (label, value, note) => `<div class="stat">
+      <div class="stat-label">${esc(label)}</div>
+      <div class="stat-value">${esc(value)}</div>
+      <div class="stat-note">${esc(note)}</div>
+    </div>`;
+    const liveSources = connectors.filter((c) => c.enabled).length;
+
+    if (!view.done(`
+      <div class="head-row">
+        ${viewHead("Ingest", "ingest")}
+        <div class="head-actions">
+          ${canAdmin ? `<button class="btn quiet" id="sources-add">${iconPlus}Add source</button>` : ""}
+          <button class="btn" id="sources-build" ${buildActive ? "disabled" : ""}
+            title="${buildActive ? "An ingest is already queued or running" : "Ingest now"}">${iconIngest}Ingest now</button>
+        </div>
       </div>
-      <p class="hint" id="next-build">${runningNow(runs)
+      <p class="head-note" id="next-build">${runningNow(runs)
         || esc(nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0))}</p>
+      <div class="meta"><span class="hint" id="sources-build-note" role="status"></span></div>
+
+      <div class="stats n4">
+        ${stat("Pages", String(state.pages.length), "in this bench's wiki")}
+        ${stat("Sources", String(canAdmin ? connectors.length : "—"),
+          canAdmin ? `${liveSources} enabled` : "needs an owner to see")}
+        ${stat("Documents", String(files.length), files.length ? "uploaded to this bench" : "none uploaded yet")}
+        ${stat("Spend", `$${spend.toFixed(2)}`,
+          runs.length ? `across the last ${runs.length} run${runs.length === 1 ? "" : "s"}` : "no runs yet")}
+      </div>
 
       <div id="connector-note" class="hint" role="status"></div>
-      ${canAdmin
-        ? sec("repos", "Repositories",
-            connectors.filter((c) => c.kind === "git").map(connectorRow).join("") ||
-              `<div class="empty">No repository connected yet. Add one with the + button above.</div>`) +
-          sec("web", "Web pages",
-            connectors.filter((c) => c.kind === "web").map(connectorRow).join("") ||
-              `<div class="empty">No web pages connected yet. Add some with the + button above.</div>`)
-        : sec("repos", "Repositories &amp; web pages",
-            `<div class="empty">Managing sources needs an org owner or an instance
-             admin. You can still add documents below if your role allows.</div>`)}
 
-      ${sec("docs",
-        `Documents${uploadConn && !uploadConn.enabled ? ` <span class="chip">paused — skipped on ingest</span>` : ""}`,
-        `<div id="upload-progress" class="hint" role="status"></div>
-         <div class="review" id="file-drop" aria-label="Uploaded documents; drop files to add more">
-           ${filesErr ? `<div class="empty">${esc(filesErr)}</div>`
-             : files.map(fileRow).join("") ||
-               `<div class="empty">No documents yet. Add markdown, PDFs, Office
-                files, or HTML with the + button above, or drop files anywhere on this card.</div>`}
-         </div>`)}
+      <div class="sec-head">
+        <div class="group-label">Sources</div>
+        <span class="gloss">— what this bench reads</span>
+      </div>
+      <div class="card rows">
+        ${canAdmin
+          ? (connectors.map(connectorRow).join("") ||
+             `<div class="empty card-empty">No sources connected yet. Add one with the button above.</div>`)
+          : `<div class="empty card-empty">Managing sources needs an org owner or an
+             instance admin. You can still add documents below if your role allows.</div>`}
+      </div>
 
-      ${sec("runs", "Recent runs",
-        `<div id="run-feed">${renderRunsHTML(runs, activeUnits)}</div>`)}`)) return;
+      <div class="sec-head">
+        <div class="group-label">Documents</div>
+        <span class="gloss">— uploaded straight from this browser${
+          uploadConn && !uploadConn.enabled ? "; paused, so skipped on ingest" : ""}</span>
+      </div>
+      <div id="upload-progress" class="hint" role="status"></div>
+      <div class="card rows" id="file-drop" aria-label="Uploaded documents; drop files to add more">
+        ${filesErr ? `<div class="empty card-empty">${esc(filesErr)}</div>`
+          : files.map(fileRow).join("") ||
+            `<div class="empty card-empty">No documents yet. Add markdown, PDFs, Office
+             files, or HTML with the button above, or drop files anywhere on this card.</div>`}
+      </div>
 
-    // Collapsed/expanded choices persist across renders and visits -- the
-    // 5-second active-run refresh must not spring sections back open.
-    for (const d of document.querySelectorAll("details.sec")) {
-      d.addEventListener("toggle", () =>
-        lsSet(`kiln.ingest.${d.dataset.sec}`, d.open));
-    }
+      <div class="sec-head">
+        <div class="group-label">Run timeline</div>
+        <span class="gloss">— every run, what it cost, what it changed</span>
+      </div>
+      <div class="card timeline" id="run-feed">${renderRunsHTML(runs, activeUnits)}</div>`)) return;
+
+    sizeBars($("main"));
 
     // Per-unit cost attribution, fetched lazily on first expand: where the
     // money went, costliest unit first, estimate beside actual.
