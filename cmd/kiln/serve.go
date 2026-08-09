@@ -83,19 +83,21 @@ processes separately so builds scale independently of the API.`,
 
 			ws := store.NewWikiStore(db.Pool)
 			srv := &api.Server{
-				Store:              ws,
-				Writes:             ws,
-				Runs:               ws,
-				Admin:              ws,
-				Members:            ws,
-				Files:              ws,
-				Workspaces:         ws,
-				BudgetWindow:       cfg.Agent.BudgetWindow,
-				SourcePollInterval: cfg.Worker.SourcePollInterval,
-				DB:                 db,
-				Log:                log,
-				CORSOrigins:        cfg.CORSOrigins,
-				Metrics:            metrics,
+				Store:                  ws,
+				Writes:                 ws,
+				Runs:                   ws,
+				Admin:                  ws,
+				Members:                ws,
+				Files:                  ws,
+				Workspaces:             ws,
+				BudgetWindow:           cfg.Agent.BudgetWindow,
+				SourcePollInterval:     cfg.Worker.SourcePollInterval,
+				DB:                     db,
+				Log:                    log,
+				CORSOrigins:            cfg.CORSOrigins,
+				PublicURL:              cfg.PublicURL,
+				MCPAuthorizationServer: cfg.MCPAuthorizationServer,
+				Metrics:                metrics,
 			}
 			// Without object storage the upload route answers 503 with the
 			// fix; file listing and deletion keep working.
@@ -150,7 +152,18 @@ processes separately so builds scale independently of the API.`,
 			}
 
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "kiln %s listening on %s\n", observability.Version, cfg.HTTPAddr)
+			scheme := "http"
+			if cfg.TLSCert != "" && cfg.TLSKey != "" {
+				scheme = "https"
+			}
+			fmt.Fprintf(out, "kiln %s listening on %s (%s)\n", observability.Version, cfg.HTTPAddr, scheme)
+			// The MCP endpoint is the one route whose address a person has to
+			// paste somewhere else, so say it rather than make them derive it.
+			mcpURL := strings.TrimRight(cfg.PublicURL, "/")
+			if mcpURL == "" {
+				mcpURL = scheme + "://" + cfg.HTTPAddr
+			}
+			fmt.Fprintf(out, "  MCP endpoint at %s/mcp\n", mcpURL)
 			// Metrics listen on their own port so the API's ingress never
 			// publishes them. Failing to bind must not take the server down:
 			// serving the wiki matters more than reporting on it.
@@ -182,7 +195,7 @@ processes separately so builds scale independently of the API.`,
 			}
 			fmt.Fprintln(out, "  press ctrl-c to stop")
 
-			err = srv.Serve(ctx, cfg.HTTPAddr)
+			err = srv.Serve(ctx, cfg.HTTPAddr, cfg.TLSCert, cfg.TLSKey)
 			if metricsDone != nil {
 				<-metricsDone
 			}

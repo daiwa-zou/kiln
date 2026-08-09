@@ -32,8 +32,9 @@ LLM-bound jobs at runs-per-hour throughput gain nothing from one, and would lose
 the single-transaction claim this gets for free. That reasoning is unchanged by
 MCP, which adds *read* traffic only.
 
-**MCP does not pressure the store.** `kiln mcp` reads through the HTTP API, so
-agent traffic is the same queries the UI issues. Reads scale the usual way
+**MCP does not pressure the store.** Both the `/mcp` endpoint and the `kiln mcp`
+subprocess read through the HTTP API, so agent traffic is the same queries the
+UI issues. Reads scale the usual way
 (replicas), and the API already sends an ETag derived from the workspace
 revision, bumped inside the import transaction — so a polling agent gets `304`s
 until something actually changes.

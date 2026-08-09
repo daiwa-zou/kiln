@@ -120,6 +120,7 @@ func searchPaths() []string {
 func bindEnv(v *viper.Viper) error {
 	keys := []string{
 		"http_addr", "metrics_addr", "public_url", "log_level", "cors_origins",
+		"tls_cert", "tls_key", "mcp_authorization_server",
 		"database.url", "database.host", "database.port", "database.name",
 		"database.user", "database.password", "database.sslmode", "database.sslrootcert",
 		"database.max_conns", "database.min_conns",

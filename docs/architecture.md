@@ -74,8 +74,8 @@ flowchart TB
     end
 
     subgraph kiln["kiln (one image, four roles)"]
-        API["kiln serve<br/>HTTP API + UI"]
-        MCP["kiln mcp<br/><i>stdio</i>"]
+        API["kiln serve<br/>HTTP API + UI + /mcp"]
+        MCP["kiln mcp<br/><i>stdio, local agents</i>"]
         W1["kiln worker"]
         W2["kiln worker"]
         WN["kiln worker …"]
@@ -86,7 +86,8 @@ flowchart TB
     Claude["Anthropic API<br/><i>or claude CLI</i>"]
 
     Browser --> API
-    Agent --> MCP
+    Agent -->|"Streamable HTTP + token"| API
+    Agent -.->|"or spawns"| MCP
     MCP -->|"HTTP + token"| API
     GH -->|"push webhook"| API
     API --> PG
@@ -104,13 +105,14 @@ flowchart TB
     CLI --> Claude
 ```
 
-**Roles.** `kiln serve` runs the HTTP API and the embedded reading UI.
-`kiln worker` claims queued runs and builds them. `kiln build` runs the same
-pipeline against a local directory with no server and no database. `kiln mcp`
-serves a bench to agents over stdio, reading through the API rather than the
-database (see [Serving the wiki to agents](#serving-the-wiki-to-agents)).
-`kiln serve --with-worker` runs the first two in one process, which is the
-right shape for a single node.
+**Roles.** `kiln serve` runs the HTTP API, the embedded reading UI, and the MCP
+endpoint at `/mcp`. `kiln worker` claims queued runs and builds them.
+`kiln build` runs the same pipeline against a local directory with no server and
+no database. `kiln mcp` serves the same tools to a *local* agent over stdio, for
+the case where there is no reachable URL to give one (see
+[Serving the wiki to agents](#serving-the-wiki-to-agents)). `kiln serve
+--with-worker` runs the first two in one process, which is the right shape for a
+single node.
 
 Only `serve` and `worker` touch Postgres, which is why only those two have
 pool settings. `build` needs neither a server nor a database; `mcp` needs a
@@ -812,15 +814,19 @@ Prometheus does not want to use.
 
 ## Serving the wiki to agents
 
-`kiln mcp` exposes a bench over the Model Context Protocol on stdio. The wiki
-is already the artifact worth reading — prose compiled from sources and kept
+kiln exposes a bench over the Model Context Protocol two ways. The wiki is
+already the artifact worth reading — prose compiled from sources and kept
 current — so an agent that can reach it answers from compiled knowledge instead
 of re-deriving it from raw material on every question.
 
 ```mermaid
 flowchart LR
-    Agent["MCP-capable agent"] -->|"stdio · JSON-RPC"| M["kiln mcp"]
-    M -->|"HTTP + bearer token"| API["kiln serve"]
+    Remote["Remote agent<br/><i>Claude Code, a connector</i>"]
+    Local["Local agent<br/><i>the desktop app</i>"]
+
+    Remote -->|"Streamable HTTP · /mcp"| API["kiln serve"]
+    Local -->|"stdio · JSON-RPC"| M["kiln mcp"]
+    M -->|"HTTP + bearer token"| API
     API --> PG[("Postgres")]
 
     subgraph tools["tools"]
@@ -829,15 +835,25 @@ flowchart LR
         T2["wiki_overview · list_benches · list_pages<br/><i>orientation</i>"]
         T3["page_backlinks · wiki_gaps<br/><i>context and known unknowns</i>"]
     end
-    M -.- tools
+    API -.- tools
 ```
 
-Three decisions shape it:
+**One endpoint, one subprocess, same tools.** `kiln serve` mounts them at
+`/mcp` over Streamable HTTP, which is what a client that can only reach a URL
+needs — it cannot spawn a process on the server's host. `kiln mcp` runs the
+same tools as a subprocess for an agent on the machine that has the binary,
+which needs no reachable address and no TLS. Neither replaces the other:
+`docs/mcp.md` maps each Claude surface onto one of them.
+
+Four decisions shape it:
 
 **It reads the HTTP API, not the database.** An agent's machine needs no
 Postgres credentials, the server works against a kiln running anywhere, and the
 token it carries decides what it can see — so an agent reads exactly the benches
-that token reads.
+that token reads. The endpoint holds to this even though it is mounted on that
+same API: its tool calls are dispatched back into the router in-process, so they
+pass every visibility rule the handlers enforce rather than reaching around
+them. No socket, no port to discover, and no internal hop anyone else can reach.
 
 **Search-first, seven tools.** An agent that can search, read, and follow links
 has what it needs; a tool per endpoint would spend the model's attention on
@@ -848,6 +864,17 @@ takes those slugs back.
 page is a normal thing for an agent to hit, so each one returns text naming the
 recovery (`list_benches` for the former, `search_wiki` for the latter) rather
 than a transport failure the host reports as a broken server.
+
+**Except the one failure that is a protocol error.** A caller with no valid
+token gets `401` carrying
+`WWW-Authenticate: Bearer resource_metadata="…"`, and RFC 9728 metadata is
+served at `/.well-known/oauth-protected-resource/mcp` and at the bare path
+clients probe as a fallback. That is the handshake a client follows to discover
+how to authenticate, and it only works on a `401` — a tool error instead leaves
+it with nothing to read. `authorization_servers` stays out of the document
+until `mcp_authorization_server` names one: kiln is not itself an OAuth
+authorization server, and advertising an issuer that cannot mint tokens for
+this resource would send every client through a flow that ends in a refusal.
 
 Two details exist because the model is the reader. `wiki_gaps` distinguishes
 *"the wiki says nothing about X"* from *"the wiki has not covered X yet"*, which
@@ -891,9 +918,11 @@ deliver them.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `http_addr` | `:8080` | API and UI listener. |
+| `http_addr` | `:8080` | API, UI, and `/mcp` listener. |
 | `metrics_addr` | `:9090` | Separate Prometheus listener. Empty disables. |
-| `public_url` | — | External URL, for OAuth callbacks and links. |
+| `public_url` | — | External URL, for OAuth callbacks and links. Also what the MCP discovery documents advertise, so behind a TLS-terminating proxy it is the only place the real scheme is known. Must be `https` unless it is a loopback address. |
+| `tls_cert` / `tls_key` | — | Serve HTTPS directly, for a deployment with no proxy in front. Set together. |
+| `mcp_authorization_server` | — | Issuer URL of an OAuth authorization server that mints tokens for `/mcp`. Empty omits `authorization_servers` from the protected-resource metadata. |
 | `log_level` | `info` | |
 | `cors_origins` | — | Empty means same-origin only. |
 

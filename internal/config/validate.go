@@ -16,6 +16,20 @@ func (c *Config) Validate() error {
 		problems = append(problems, "http_addr is empty")
 	}
 
+	// A half-configured pair serves plain HTTP silently, which is the failure
+	// nobody notices until a client refuses to connect.
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		problems = append(problems, "tls_cert and tls_key must be set together")
+	}
+	// public_url is what the MCP discovery documents advertise, and a client
+	// that reads http:// there will refuse the connector. Behind a terminating
+	// proxy this is the only place the real scheme is known.
+	if u := strings.TrimSpace(c.PublicURL); u != "" && !strings.HasPrefix(u, "https://") &&
+		!strings.HasPrefix(u, "http://localhost") && !strings.HasPrefix(u, "http://127.0.0.1") {
+		problems = append(problems, fmt.Sprintf(
+			"public_url must be https (or a loopback address for local use), got %q", u))
+	}
+
 	if c.Database.URL == "" {
 		if c.Database.Host == "" {
 			problems = append(problems, "database: neither url nor host is set")

@@ -50,7 +50,17 @@ token with the read scope (unless auth.mode is "none"). Point an agent at it:
   }
 
 With --workspace set, tools default to that bench and agents need not name one.
-Without it, every call takes a "bench" argument and list_benches enumerates them.`,
+Without it, every call takes a "bench" argument and list_benches enumerates them.
+
+This subprocess is for an agent on the same machine as the config file. A
+remote client -- a Claude connector, another team's agent -- cannot spawn it,
+and does not need to: ` + "`kiln serve`" + ` publishes the same tools over Streamable
+HTTP at /mcp. There is nothing to install and nothing to run:
+
+  claude mcp add --transport http kiln https://your-kiln/mcp \
+    --header "Authorization: Bearer kiln_..."
+
+See docs/mcp.md for connecting Claude to it.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: false,

@@ -27,8 +27,25 @@ type Config struct {
 	// queue depth and spend to every reader or inventing an auth scheme
 	// Prometheus does not want to use. Empty disables the listener.
 	MetricsAddr string `mapstructure:"metrics_addr"`
-	PublicURL   string `mapstructure:"public_url"`
-	LogLevel    string `mapstructure:"log_level"`
+	// PublicURL is the absolute origin clients reach this instance on,
+	// including the scheme. It is what the MCP discovery documents are built
+	// from: behind a TLS-terminating proxy the request arrives as plain HTTP
+	// on an internal host, so a URL derived from the request would be wrong in
+	// exactly the deployments that need it to be right.
+	PublicURL string `mapstructure:"public_url"`
+	// TLSCert and TLSKey serve HTTPS directly, for a deployment with no proxy
+	// in front. Remote MCP clients require https, so an instance meant to be a
+	// connector needs TLS from somewhere: here, or a terminating proxy with
+	// public_url set to the https origin.
+	TLSCert string `mapstructure:"tls_cert"`
+	TLSKey  string `mapstructure:"tls_key"`
+	// MCPAuthorizationServer is the issuer URL of an OAuth authorization
+	// server that mints tokens for the MCP endpoint. Empty leaves
+	// authorization_servers out of the protected-resource metadata: naming an
+	// issuer that cannot mint tokens for this resource sends every client
+	// through a handshake that ends in a refusal.
+	MCPAuthorizationServer string `mapstructure:"mcp_authorization_server"`
+	LogLevel               string `mapstructure:"log_level"`
 	// CORSOrigins are browser origins allowed to call the API, for a
 	// separately hosted frontend. Empty means same-origin only.
 	CORSOrigins []string `mapstructure:"cors_origins"`

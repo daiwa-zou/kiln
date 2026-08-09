@@ -90,10 +90,10 @@ Modular monolith: one Go binary, four roles, against Postgres.
 
 | Command | Role |
 | --- | --- |
-| `kiln serve` | HTTP API and the embedded reading UI. `--with-worker` also builds, which is the right shape for one node. |
+| `kiln serve` | HTTP API, the embedded reading UI, and the MCP endpoint at `/mcp`. `--with-worker` also builds, which is the right shape for one node. |
 | `kiln worker` | Claims queued runs and builds them. Scale by adding processes. |
 | `kiln build` | Runs the pipeline against a local directory — no server, no database. |
-| `kiln mcp` | Serves a bench to agents over MCP. Reads through the API. |
+| `kiln mcp` | Serves a bench to a local agent over stdio. Reads through the API. |
 | `kiln admin` | Tokens, migrations, key rotation, `doctor`. |
 
 Builds scale by adding worker processes — the queue is the runs table itself,
@@ -110,8 +110,20 @@ Planned, not yet built: a Next.js frontend in its own container.
 
 ## Agents can read it
 
-`kiln mcp` serves a bench to any MCP-capable agent over stdio, so an agent
-answers from the compiled wiki instead of re-reading your sources every time.
+kiln serves a bench to any MCP-capable agent, so an agent answers from the
+compiled wiki instead of re-reading your sources every time. Two ways in, same
+seven tools.
+
+`kiln serve` publishes them over Streamable HTTP at `/mcp`. Nothing to install
+and nothing to run:
+
+```bash
+claude mcp add --transport http kiln https://your-kiln/mcp \
+  --header "Authorization: Bearer kiln_..."
+```
+
+`kiln mcp` runs the same tools as a subprocess on stdio, for an agent on the
+same machine as the binary — no reachable URL, no TLS:
 
 ```json
 {
@@ -125,16 +137,22 @@ answers from the compiled wiki instead of re-reading your sources every time.
 }
 ```
 
-Seven tools: `search_wiki` and `read_page` carry most traffic, with
+The endpoint is what a remote client needs; the subprocess is what the Claude
+desktop app needs, because a connector added there is fetched by Anthropic's
+servers and cannot reach a private address. See
+[docs/mcp.md](docs/mcp.md).
+
+The seven: `search_wiki` and `read_page` carry most traffic, with
 `wiki_overview` for orientation, `list_benches` and `list_pages` for
 enumeration, `page_backlinks` for context, and `wiki_gaps` — which is what
 lets an agent tell *"the wiki says nothing about X"* from *"the wiki has not
 covered X yet"*.
 
-It reads over the HTTP API rather than the database, so it needs no Postgres
-credentials and works against an instance running anywhere; the token decides
-which benches it can see. Omit `--workspace` and every tool takes a `bench`
-argument instead.
+Either way an agent reads over the HTTP API rather than the database, so it
+needs no Postgres credentials and the token decides which benches it can see.
+The subprocess takes `--workspace` because whoever starts it knows which bench
+they mean; the endpoint is one URL across benches, so every tool takes a `bench`
+argument there and `list_benches` enumerates them.
 
 ## Configuring it
 
@@ -372,6 +390,7 @@ stack, not a small production one — for that, use the Helm chart.
 | [docs/deployment.md](docs/deployment.md) | Running it: requirements, Compose and Kubernetes, upgrades, backups, operating notes. |
 | [docs/storage-and-retrieval.md](docs/storage-and-retrieval.md) | Why Postgres stays the primary store, where full-text search falls down for agent queries, and what to do about it. |
 | [docs/observability.md](docs/observability.md) | Metrics, alerts, and the health endpoints. |
+| [docs/mcp.md](docs/mcp.md) | Serving the wiki to agents: the HTTP endpoint, the stdio subprocess, HTTPS, and connecting each Claude surface. |
 | [docs/accessibility.md](docs/accessibility.md) | What WCAG 2.2 AA means for the reading UI, and what was measured. |
 | [ROADMAP.md](ROADMAP.md) | What each shipped milestone contained. |
 
