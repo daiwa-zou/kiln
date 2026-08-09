@@ -468,9 +468,17 @@
   /* Prose keeps a reading measure; data views grow to the room their tables
      need; the reader, reviews and the graph run their own full-bleed layouts. */
   main { padding: 34px 44px 90px; max-width: 1180px; min-width: 0; }
-  main[data-view="page"], main[data-view="reviews"], main[data-view="graph"] {
-    padding: 0; max-width: none;
-  }
+  /* The reader, the inbox and the graph supply their own padding, so main
+     gives them none.
+     Keyed on the layout actually being there, not on the view's name: those
+     three views also render ordinary content -- an empty graph, a failed page
+     load, a search result list (which carries the reader's own view id) -- and
+     a name-keyed rule handed that content the full-bleed zero, leaving it
+     flush against the rail with no room above it.
+     view.done() sets the class from what it actually rendered. Not :has(),
+     which would put every browser lacking it on the wrong side of the choice,
+     and the wrong side here is a graph canvas inset and capped like prose. */
+  main.bleed { padding: 0; max-width: none; }
   main[data-view="overview"] { max-width: 900px; }
   main[data-view="index"] { max-width: 1060px; }
   main[data-view="gaps"] { max-width: 860px; }
@@ -1316,7 +1324,10 @@
   @keyframes fade-up { from { opacity: 0; transform: translateY(6px); } }
   .view-in { animation: fade-up var(--dur) var(--ease); }
 
-  .skel { max-width: 60ch; padding: 34px 44px; }
+  /* No padding of its own any more: the skeleton renders before a view's
+     full-bleed layout exists, so main is padded at that moment and a second
+     inset here would double it. */
+  .skel { max-width: 60ch; }
   .skel-title, .skel-line {
     border-radius: 6px; margin: 10px 0;
     background: linear-gradient(90deg, var(--surface) 25%, var(--border) 50%, var(--surface) 75%);

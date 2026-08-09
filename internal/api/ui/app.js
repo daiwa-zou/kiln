@@ -414,6 +414,7 @@ let tokenFormShown = false;
 function showTokenForm(hadToken) {
   if (tokenFormShown) return;
   tokenFormShown = true;
+  $("main").classList.remove("bleed");
   $("main").innerHTML = `
     ${hadToken ? `<div class="banner" role="alert">That token was rejected. It may be revoked or expired.</div>` : ""}
     <svg class="logo logo-signin" aria-hidden="true"><use href="#logo-mark"/></svg>
@@ -771,6 +772,13 @@ function beginView(title, view, activeSlug) {
       if (my !== nav) return false;
       m.removeAttribute("aria-busy");
       m.innerHTML = html;
+      // Three views run a full-bleed layout that supplies its own padding, and
+      // the same three also render ordinary content -- an empty graph, a page
+      // that failed to load, a search result list. Which one just happened is
+      // a property of the markup, not of the view's name, so it is read back
+      // off the markup rather than assumed from the route.
+      m.classList.toggle("bleed",
+        Boolean(m.querySelector(":scope > .reader, :scope > .inbox, :scope > .graph-view")));
       // Entrance animation on already-committed content only: an exit
       // animation would delay the swap behind a timer, which is exactly the
       // race the nav token exists to prevent.
@@ -2858,6 +2866,9 @@ async function showSearch(query, live = false) {
   const paint = (html) => {
     if (nav !== myNav) return false; // the user navigated away mid-flight
     if (view) return view.done(html);
+    // Live search never renders a full-bleed layout, and it writes here
+    // directly rather than through view.done(), so it clears the class itself.
+    main.classList.remove("bleed");
     main.innerHTML = html;
     return true;
   };
@@ -3395,6 +3406,7 @@ async function boot() {
       document.body.classList.add("no-bench");
       // A dead end before this: a signed-in user with no bench was told to
       // run a CLI command on a machine they may not have.
+      $("main").classList.remove("bleed");
       $("main").innerHTML = `<h1>Welcome</h1>
         <p class="hint">A bench is one wiki and the sources it is compiled from.
         Create one, then add a repository, web pages, or documents to it.</p>
@@ -3460,6 +3472,7 @@ async function boot() {
     await loadWorkspace(initial);
   } catch (err) {
     if (err.handled) return;
+    $("main").classList.remove("bleed");
     $("main").innerHTML = banner(err, true);
     wireBannerRetry();
   }
