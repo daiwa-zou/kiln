@@ -117,6 +117,11 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 	}
 	opts := &mcpauth.RequireBearerTokenOptions{
 		ResourceMetadataURL: strings.TrimRight(s.PublicURL, "/") + resourceMetadataPath,
+		// Every tool is a read, and read is the scope kiln gives a token by
+		// default. Requiring it here turns a token that cannot read into one
+		// clean 403 at the door, rather than seven tools that each fail
+		// somewhere inside with a message about the wiki.
+		Scopes: []string{mcpScope},
 		// kiln tokens are opaque and long-lived; the tokens table holds the
 		// expiry and IdentityForToken already refuses a lapsed one. There is no
 		// `exp` claim to read out-of-band, so the middleware must not insist on

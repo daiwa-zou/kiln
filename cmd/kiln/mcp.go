@@ -43,14 +43,17 @@ token with the read scope (unless auth.mode is "none"). Point an agent at it:
     "mcpServers": {
       "kiln": {
         "command": "kiln",
-        "args": ["mcp", "--url", "http://127.0.0.1:8080", "--workspace", "my-bench"],
+        "args": ["mcp", "--url", "http://127.0.0.1:8080"],
         "env": {"KILN_TOKEN": "..."}
       }
     }
   }
 
-With --workspace set, tools default to that bench and agents need not name one.
-Without it, every call takes a "bench" argument and list_benches enumerates them.
+Every bench the token can read is served, and no others. list_benches
+enumerates them and every other tool takes a "bench" argument.
+
+--workspace narrows the server to one bench and makes the rest unreachable,
+which is worth doing only when an agent should not see them.
 
 This subprocess is for an agent on the same machine as the config file. A
 remote client -- a Claude connector, another team's agent -- cannot spawn it,
@@ -96,7 +99,7 @@ See docs/mcp.md for connecting Claude to it.`,
 	f := cmd.Flags()
 	f.StringVar(&endpoint, "url", "http://127.0.0.1:8080", "base URL of the kiln instance to read")
 	f.StringVar(&token, "token", "", "API token with the read scope (default: $KILN_TOKEN)")
-	f.StringVar(&workspace, "workspace", "", "default bench slug, so agents need not name one on every call")
+	f.StringVar(&workspace, "workspace", "", "confine the server to one bench; omit to serve every bench the token can read")
 
 	return cmd
 }

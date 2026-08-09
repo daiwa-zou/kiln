@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -130,6 +131,51 @@ func TestMCPToolsReadThroughTheAPI(t *testing.T) {
 		"bench": "demo", "query": "dispatch",
 	}); !strings.Contains(strings.ToLower(out), "ripple") {
 		t.Errorf("search_wiki = %q, want the seeded page", out)
+	}
+}
+
+// The endpoint serves every bench the key can read, and no others. Both halves
+// matter and neither is obvious from the code: the tools reach the wiki through
+// a loopback back into this same router, so what a token can see is decided by
+// the ordinary API handlers rather than by anything in the MCP layer. This is
+// the test that says so.
+func TestMCPServesExactlyTheBenchesTheTokenAllows(t *testing.T) {
+	srv, js, ws := testServer(t)
+	seed(t, js, ws)
+
+	// A second bench in an org this caller does not belong to.
+	other, err := js.EnsureWorkspace(context.Background(), "other-org", "hidden", "Hidden")
+	if err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	if other == ws {
+		t.Fatal("second bench collided with the first")
+	}
+
+	s := openMCP(t, srv.URL, "")
+
+	// testServer runs without auth, so the caller is admin-equivalent and sees
+	// both. The point being locked in is that the list comes from the same
+	// visibility query the REST API uses, not from a hardcoded set.
+	out := s.call(t, "list_benches", map[string]any{})
+	for _, want := range []string{"demo", "hidden"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list_benches = %q, want it to include %q", out, want)
+		}
+	}
+
+	// No bench is the default: every tool names one, so a connector shared
+	// across benches cannot silently answer from whichever was configured.
+	if out := s.call(t, "search_wiki", map[string]any{"query": "dispatch"}); !strings.Contains(out, "bench") {
+		t.Errorf("search_wiki with no bench = %q, want it to ask for one", out)
+	}
+
+	// A bench that does not exist reads the same as one the caller cannot see:
+	// absence and inaccessibility must not be distinguishable, or the error
+	// message becomes a way to enumerate other tenants' benches.
+	missing := s.call(t, "search_wiki", map[string]any{"bench": "no-such-bench", "query": "x"})
+	if !strings.Contains(missing, "list_benches") {
+		t.Errorf("unknown bench = %q, want it to point at list_benches", missing)
 	}
 }
 

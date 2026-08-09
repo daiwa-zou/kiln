@@ -130,7 +130,7 @@ same machine as the binary — no reachable URL, no TLS:
   "mcpServers": {
     "kiln": {
       "command": "kiln",
-      "args": ["mcp", "--url", "http://127.0.0.1:8080", "--workspace", "my-bench"],
+      "args": ["mcp", "--url", "http://127.0.0.1:8080"],
       "env": {"KILN_TOKEN": "..."}
     }
   }
@@ -150,9 +150,9 @@ covered X yet"*.
 
 Either way an agent reads over the HTTP API rather than the database, so it
 needs no Postgres credentials and the token decides which benches it can see.
-The subprocess takes `--workspace` because whoever starts it knows which bench
-they mean; the endpoint is one URL across benches, so every tool takes a `bench`
-argument there and `list_benches` enumerates them.
+Both serve every bench the key can read and no others, so `list_benches` is
+where an agent starts and every other tool takes a `bench` argument. Pass
+`--workspace <slug>` to confine a subprocess to one bench.
 
 ## Configuring it
 

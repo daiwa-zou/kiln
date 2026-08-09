@@ -26,10 +26,14 @@ kiln dev listening on 127.0.0.1:8080 (https)
 Tools: `list_benches`, `search_wiki`, `read_page`, `wiki_overview`, `list_pages`,
 `page_backlinks`, `wiki_gaps`. Every one is a read.
 
-There is no default bench. The subprocess takes `--workspace` because whoever
-starts it knows which bench they mean; a URL is shared across benches, so every
-tool takes a `bench` argument and `list_benches` enumerates what the caller's
-token can reach.
+**Every bench the key can read is served, and no others.** `list_benches`
+enumerates them, and every other tool takes a `bench` argument. A token sees
+exactly what its owner sees: naming a bench the token cannot read answers
+identically to naming one that does not exist.
+
+Neither form pins a bench by default. `kiln mcp --workspace <slug>` narrows the
+subprocess to one, which is worth doing only when the agent should not see the
+rest — it makes the other benches unreachable rather than merely un-defaulted.
 
 ## HTTPS
 
@@ -93,7 +97,7 @@ Windows):
   "mcpServers": {
     "kiln": {
       "command": "kiln",
-      "args": ["mcp", "--url", "http://127.0.0.1:8080", "--workspace", "my-bench"],
+      "args": ["mcp", "--url", "http://127.0.0.1:8080"],
       "env": {"KILN_TOKEN": "kiln_..."}
     }
   }
@@ -101,7 +105,9 @@ Windows):
 ```
 
 Restart the app afterwards. `kiln` must be on your `PATH`, or give an absolute
-path.
+path. Add `"--workspace", "<slug>"` to the args only if you want the agent
+confined to one bench; without it, it can reach every bench the key allows and
+`list_benches` shows them.
 
 ### Claude.ai (web and mobile)
 
