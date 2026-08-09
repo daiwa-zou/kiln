@@ -149,7 +149,6 @@
   body.no-bench .bench,
   body.no-bench .nav,
   body.no-bench [role="search"],
-  body.no-bench #tree-filter,
   body.no-bench #tree,
   body.no-bench .sidebar-foot { display: none; }
 
