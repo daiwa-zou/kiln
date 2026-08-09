@@ -310,8 +310,20 @@ const api = async (path, opts = {}) => {
   try {
     res = await fetch(`/api/v1${path}`, { method, headers, body, signal: opts.signal });
   } catch (err) {
-    if (err?.name === "AbortError") { err.aborted = true; err.handled = true; }
-    throw err;
+    if (err?.name === "AbortError") {
+      err.aborted = true;
+      err.handled = true;
+      throw err;
+    }
+    // Any other rejected fetch is a network-level failure: the server stopped,
+    // the connection dropped, the laptop slept. The browser's own words for it
+    // are "Load failed" in Safari and "Failed to fetch" in Chrome, and both
+    // reach the reader verbatim -- beside a filename, "Load failed" reads as
+    // the document having been rejected rather than as nothing having been
+    // asked. Say which of the two it was.
+    const wrapped = new Error("could not reach the server — check that kiln is still running", { cause: err });
+    wrapped.offline = true;
+    throw wrapped;
   }
   if (res.status === 304 && cached) return cached.data;
   if (res.status === 401) {
@@ -600,7 +612,9 @@ function renderTree(active) {
 }
 
 function setNav(view) {
-  for (const a of document.querySelectorAll(".nav a")) {
+  // Sidebar-wide, not .nav-only: Steering and Members moved to the settings
+  // menu at the foot of the rail and would otherwise never mark themselves.
+  for (const a of document.querySelectorAll("#sidebar a[data-view]")) {
     if (a.dataset.view === view) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
@@ -2291,11 +2305,20 @@ async function boot() {
   document.addEventListener("click", (e) => {
     const btn = e.target.closest?.("[data-help]");
     if (btn) openHelp(btn.dataset.help);
+
+    // The settings menu is a popup, so it closes the way popups do: on a click
+    // anywhere outside it, and on choosing something inside it.
+    const settings = $("settings");
+    if (settings?.open && (!settings.contains(e.target) || e.target.closest("#settings-menu a"))) {
+      settings.open = false;
+    }
   });
   document.addEventListener("keydown", (e) => {
     // Escape priority: palette (handled inside its own overlay) -> hover
     // preview -> drawer.
     if (e.key === "Escape") {
+      const settings = $("settings");
+      if (settings?.open) { settings.open = false; settings.querySelector("summary")?.focus(); return; }
       if (hidePreview()) return;
       if (document.body.classList.contains("nav-open")) setDrawer(false);
       return;

@@ -53,19 +53,41 @@ function connectorSummary(c) {
   return "";
 }
 
-// nextBuildLine answers the question every visitor to this page has: when
-// does the wiki next catch up with its sources? Priority order matters -- an
-// actual run in motion beats any schedule.
-function nextBuildLine(runs, connectors, pollSeconds) {
+// kilnFiring draws the one state this whole page exists to produce: a bench
+// being fired. "A build is running now" spent a sentence telling the reader
+// something the page could simply show them, so the kiln says it instead --
+// the ember in its mouth glows while material is being turned into pages, and
+// is gone the moment the run is.
+//
+// The count rides alongside rather than inside: it is the part a screen reader
+// needs, and the part that changes every poll.
+const kilnFiring = (detail) => `
+  <span class="kiln-firing">
+    <svg class="kiln-flame" viewBox="0 0 24 24" aria-hidden="true">
+      <path class="kiln-shell" fill-rule="evenodd" d="M3 22 L3 12 Q3 2 12 2 Q21 2 21 12 L21 22 Z
+        M8 22 L8 15 Q8 10 12 10 Q16 10 16 15 L16 22 Z"/>
+      <circle class="kiln-glow" cx="12" cy="18.5" r="4.6"/>
+      <circle class="kiln-ember" cx="12" cy="18.5" r="2.2"/>
+    </svg>
+    <span class="kiln-firing-text">Firing${detail ? ` — ${esc(detail)}` : ""}</span>
+  </span>`;
+
+// runningNow returns the firing kiln when a run is in motion, and nothing
+// otherwise, so a caller can put the animation where its own prose would go.
+function runningNow(runs) {
   const running = runs.find((r) => r.status === "running");
-  if (running) {
-    // How far along, when that is known. A build with no plan yet has decided
-    // nothing to report, and guessing at a number would be worse than silence.
-    if (running.unitsTotal) {
-      return `A build is running now — ${running.unitsDone || 0} of ${running.unitsTotal} done.`;
-    }
-    return "A build is running now.";
-  }
+  if (!running) return "";
+  // How far along, when that is known. A build with no plan yet has decided
+  // nothing to report, and guessing at a number would be worse than silence.
+  return kilnFiring(running.unitsTotal
+    ? `${running.unitsDone || 0} of ${running.unitsTotal} done`
+    : "");
+}
+
+// nextBuildLine answers the question every visitor to this page has: when
+// does the wiki next catch up with its sources? A run already in motion is
+// not a schedule and is not answered here -- runningNow draws it.
+function nextBuildLine(runs, connectors, pollSeconds) {
   const queued = runs.find((r) => r.status === "queued");
   if (queued) {
     if (queued.notBefore) {
@@ -195,7 +217,10 @@ const unitKeyHTML = (key) => {
 
 // uploadWorkspaceFiles pushes a FileList one request at a time, reporting
 // progress into progressEl. Shared by the page dropzone and the wizard's.
-// Calls onDone(okCount, lastBuildState) when at least one file landed.
+// Calls onDone(okCount, lastBuildState, failedCount) when at least one file
+// landed. The failure count is what lets a caller tell a clean batch from a
+// partial one, which is the difference between closing the dialog and keeping
+// it open with the error still readable.
 async function uploadWorkspaceFiles(ws, fileList, progressEl, onDone) {
   if (!fileList.length) return;
   const progress = (msg, isErr) => {
@@ -226,7 +251,7 @@ async function uploadWorkspaceFiles(ws, fileList, progressEl, onDone) {
     toast(lastBuild === "queued"
       ? `${ok} document${ok === 1 ? "" : "s"} uploaded — build queued`
       : `${ok} document${ok === 1 ? "" : "s"} uploaded — changes pending until the next build`);
-    onDone?.(ok, lastBuild);
+    onDone?.(ok, lastBuild, failures.length);
   }
 }
 
@@ -481,12 +506,21 @@ function openSourceWizard(ctx) {
 
     once($("wizard-upload"), async () => {
       const batch = staged;
-      await uploadWorkspaceFiles(ctx.ws, batch, $("upload-progress-wizard"), () => {
+      await uploadWorkspaceFiles(ctx.ws, batch, $("upload-progress-wizard"), (_ok, _build, failed) => {
         changed = true;
         staged = [];
+        if (!failed) {
+          // Pressing Upload is the end of this errand: everything asked for
+          // went up, the toast says so, and the page behind is what the reader
+          // wants to see. Closing refreshes it through the overlay's own close
+          // handler, so the refresh is not also done here.
+          finish();
+          return;
+        }
+        // A partial batch keeps the dialog: the failures are written into the
+        // progress line, and closing over them would destroy the only account
+        // of what did not make it.
         renderStaged();
-        // The page behind the overlay catches up immediately; the wizard
-        // stays open for another batch, or the X closes it.
         ctx.refresh();
       });
     });
@@ -778,7 +812,10 @@ function pollRuns(ws, view, connectors) {
 
     const active = runs.some((r) => r.status === "queued" || r.status === "running");
     const note = $("next-build");
-    if (note) note.textContent = nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0);
+    if (note) {
+      note.innerHTML = runningNow(runs)
+        || esc(nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0));
+    }
     const btn = $("sources-build");
     if (btn) {
       btn.disabled = active;
@@ -908,7 +945,8 @@ async function showSources() {
           title="${buildActive ? "An ingest is already queued or running" : "Ingest now"}">${iconIngest}</button>
         <span class="hint" id="sources-build-note" role="status"></span>
       </div>
-      <p class="hint" id="next-build">${esc(nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0))}</p>
+      <p class="hint" id="next-build">${runningNow(runs)
+        || esc(nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0))}</p>
 
       <div id="connector-note" class="hint" role="status"></div>
       ${canAdmin
@@ -1132,10 +1170,11 @@ async function showGetStarted() {
     // watched from here on an otherwise empty page. Saying how far along it is
     // costs one number and answers the only question the reader has.
     const running = p.runs.find((r) => r.status === "running");
+    // A run in motion is drawn rather than described here too, so the first
+    // ingest -- the longest wait a bench ever imposes, watched from an
+    // otherwise empty page -- shows the kiln alight instead of a sentence.
     const ingestDetail = p.active
-      ? (running && running.unitsTotal
-        ? `Ingesting — ${running.unitsDone || 0} of ${running.unitsTotal} done. This page becomes your wiki when it finishes.`
-        : "Ingesting now — this page becomes your wiki when it finishes.")
+      ? "This page becomes your wiki when it finishes."
       : p.everRan
         ? "Ingested. If no pages appeared, check Ingest for what the run reported."
         : "Reads every source and writes the pages. Only changed sources cost anything.";
@@ -1161,17 +1200,20 @@ async function showGetStarted() {
           <div><strong>Add a source</strong>
             <span class="hint">${esc(sourceDetail)}</span>
             ${p.canAdmin
-              ? `<div class="meta"><button class="btn" id="gs-add">+ Add source</button></div>`
+              ? `<div class="meta"><button class="btn icon-btn" id="gs-add"
+                   aria-label="Add a source" title="Add a source">${iconPlus}</button></div>`
               : `<div class="hint">Ask an owner of this bench's org to connect one.</div>`}
           </div>
         </li>
         <li class="step ${ingestState}">
           ${stepIcon(ingestState)}
           <div><strong>Ingest</strong>
+            ${p.active ? runningNow(p.runs) : ""}
             <span class="hint">${esc(ingestDetail)}</span>
             ${ingestBar}
             ${p.hasSource && !p.active
-              ? `<div class="meta"><button class="btn ${p.everRan ? "quiet" : ""}" id="gs-ingest">Ingest now</button>
+              ? `<div class="meta"><button class="btn ${p.everRan ? "quiet" : ""} icon-btn" id="gs-ingest"
+                   aria-label="Ingest now" title="Ingest now">${iconIngest}</button>
                  <span class="hint" id="gs-note" role="status"></span></div>`
               : ""}
           </div>

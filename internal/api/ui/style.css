@@ -48,10 +48,14 @@
 
   .shell { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; min-height: 100dvh; }
 
+  /* A column, so the page tree takes the slack and scrolls while the settings
+     footer stays put. The rail itself no longer scrolls: a footer that scrolls
+     out of reach is not a footer. */
   aside {
     background: var(--surface); border-right: 1px solid var(--border);
-    padding: 18px 16px; overflow-y: auto;
+    padding: 18px 16px;
     position: sticky; top: 0; height: 100vh; height: 100dvh;
+    display: flex; flex-direction: column; min-height: 0;
   }
   .brand {
     display: flex; align-items: center; gap: 7px;
@@ -147,7 +151,7 @@
   body.no-bench [role="search"],
   body.no-bench #tree-filter,
   body.no-bench #tree,
-  body.no-bench .signout { display: none; }
+  body.no-bench .sidebar-foot { display: none; }
 
   .nav { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
   .nav a {
@@ -193,6 +197,9 @@
      label rather than set on .group-label, because the class is also worn by
      <summary>, and display:block there drops the disclosure triangle. */
   label.group-label { display: block; }
+  /* The tree takes the rail's slack and scrolls inside it, so a long page
+     list never pushes the settings footer off the bottom. */
+  .tree { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
   .tree a {
     display: block; padding: 3px 7px; border-radius: 5px;
     color: var(--ink-dim); font-size: 13.5px;
@@ -219,11 +226,46 @@
   /* --ink-dim rather than --ink-faint, and a target tall enough to hit:
      12px faint text measured 4.28:1 on the sidebar, under the AA floor. */
   .signout {
-    margin-top: 18px; font-size: 12px; color: var(--ink-dim);
-    background: none; border: none; padding: 4px 0; cursor: pointer;
-    min-height: 24px; text-decoration: underline; font-family: var(--sans);
+    display: block; width: 100%; text-align: left;
+    font-size: 13px; color: var(--ink-dim);
+    background: none; border: none; padding: 6px 9px; cursor: pointer;
+    min-height: 24px; border-radius: 6px; font-family: var(--sans);
   }
-  .signout:hover { color: var(--oxide); }
+  .signout:hover { color: var(--oxide); background: var(--surface); }
+
+  /* Settings live at the foot of the rail rather than as a third nav group:
+     they are visited rarely, and the group heading spent permanent vertical
+     space on two links. Pinned, so scrolling a long page tree never carries
+     the way out of the bench off the bottom of the screen. */
+  .sidebar-foot {
+    flex: none; position: relative;
+    margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .settings-btn {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    padding: 6px 10px; border-radius: 6px; min-height: 24px;
+    color: var(--ink-dim); font-size: 13px; list-style: none;
+    transition: background-color var(--dur), color var(--dur);
+  }
+  .settings-btn::-webkit-details-marker { display: none; }
+  .settings-btn:hover { background: var(--bg); color: var(--ink); }
+  .settings-btn .icon { width: 14px; height: 14px; fill: currentColor; flex: none; }
+  .settings[open] .settings-btn { background: var(--bg); color: var(--ink); }
+  /* Opens upward and out of flow: in flow it would grow past the bottom edge
+     of a rail that no longer scrolls. */
+  .settings-menu {
+    position: absolute; bottom: calc(100% + 6px); left: 0; right: 0;
+    display: flex; flex-direction: column; gap: 2px; z-index: 5;
+    padding: 4px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 6px 20px rgb(0 0 0 / 0.10);
+  }
+  .settings-menu a {
+    padding: 6px 9px; border-radius: 6px; font-size: 13px; color: var(--ink-dim);
+  }
+  .settings-menu a:hover { background: var(--surface); color: var(--ink); text-decoration: none; }
+  .settings-menu a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
 
   /* Two width tiers sharing ONE left edge, so titles and content never hop
      sideways between views. Prose keeps the 74ch reading measure — a line
@@ -418,10 +460,12 @@
   #help-body p:last-child { margin-bottom: 0; }
   #help-body em { color: var(--ink); font-style: italic; }
 
-  /* A view's title and the question mark that explains it sit on one line, the
-     mark aligned to the title's baseline rather than floating beside it. */
+  /* A view's title and the question mark that explains it sit on one line.
+     Centered, not baseline-aligned: a round button on the text baseline hangs
+     visibly below the title, because its own centre is above its baseline by
+     half the glyph height. Centre is what reads as "beside the title". */
   .view-head {
-    display: flex; align-items: baseline; gap: 9px;
+    display: flex; align-items: center; gap: 9px;
     flex-wrap: wrap; margin-bottom: 8px;
   }
   .view-head h1 { margin: 0; }
@@ -435,6 +479,39 @@
     transition: color var(--dur), border-color var(--dur);
   }
   .help-btn:hover { color: var(--ember); border-color: var(--ember); }
+
+  /* A bench being fired. This replaced the sentence "A build is running now",
+     which spent a line telling the reader something the page could show them.
+     The ember burns in the kiln's mouth while units are being written. */
+  .kiln-firing { display: inline-flex; align-items: center; gap: 9px; }
+  .kiln-flame { display: block; width: 22px; height: 22px; flex: none; }
+  .kiln-shell { fill: var(--ink-faint); }
+  .kiln-glow { fill: var(--ember); opacity: 0.14; }
+  .kiln-ember { fill: var(--ember); }
+  .kiln-firing-text { color: var(--ink-dim); }
+
+  /* transform-box/-origin are both required: an SVG child's transform origin
+     defaults to the viewBox corner, which would swing the ember rather than
+     let it breathe in place. */
+  .kiln-glow, .kiln-ember { transform-box: view-box; transform-origin: 12px 18.5px; }
+  @keyframes kiln-ember-breathe {
+    0%, 100% { opacity: 0.6; transform: scale(0.88); }
+    50%      { opacity: 1;   transform: scale(1.06); }
+  }
+  @keyframes kiln-glow-breathe {
+    0%, 100% { opacity: 0.10; transform: scale(0.82); }
+    50%      { opacity: 0.28; transform: scale(1.16); }
+  }
+  .kiln-ember { animation: kiln-ember-breathe 1.8s ease-in-out infinite; }
+  .kiln-glow { animation: kiln-glow-breathe 1.8s ease-in-out infinite; }
+
+  /* Motion is opt-out everywhere else here, and a fire that will not stop
+     flickering is exactly what that setting is for. Held still the kiln still
+     reads as lit, which is the whole message. */
+  @media (prefers-reduced-motion: reduce) {
+    .kiln-ember, .kiln-glow { animation: none; }
+    .kiln-glow { opacity: 0.22; }
+  }
   .wizard-card {
     display: block; width: 100%; text-align: left; cursor: pointer;
     background: var(--bg); color: var(--ink);
