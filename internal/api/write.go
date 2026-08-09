@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -361,4 +362,59 @@ func (s *Server) handleBacklinks(w http.ResponseWriter, r *http.Request) {
 		out = append(out, PageSummary{Path: p.Path, Slug: p.Slug, Type: p.Type, Title: p.Title})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleGapRequest files a gap review for a page the wiki wants and does not
+// have, so the next plan covers it. This is what the Gaps view's "Ask for it"
+// does: the wiki has already said the page is missing, and this records that a
+// human agrees it should exist.
+//
+// The slug is checked against the live gap list rather than trusted. Filing a
+// review for an arbitrary string would be harmless in itself -- it is only a
+// question in a queue -- but that queue is what people read when deciding what
+// to build, and it should hold only questions the wiki actually raised.
+//
+// The store deduplicates open items on (kind, title), so asking twice asks
+// once, while asking again after someone dismissed it files it afresh.
+func (s *Server) handleGapRequest(w http.ResponseWriter, r *http.Request) {
+	ws, _, ok := s.guardWrite(w, r, maxResolveBytes)
+	if !ok {
+		return
+	}
+	slug := chi.URLParam(r, "slug")
+
+	gaps, err := s.Store.Gaps(r.Context(), ws.ID, maxPageLimit, 0)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	wanted := 0
+	for _, g := range gaps {
+		if g.Slug == slug {
+			wanted = g.WantedBy
+			break
+		}
+	}
+	if wanted == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "no page links to that slug, so it is not a gap"})
+		return
+	}
+
+	pages := "pages"
+	if wanted == 1 {
+		pages = "page"
+	}
+	// The detail says only what is true. Nothing in the pipeline reads the
+	// review queue when planning, so this does not cause the page to be
+	// written -- it records the request where a human will see it, and `gap`
+	// is researchable, so a worker can be sent to read the sources first.
+	title := fmt.Sprintf("Write the missing page %q", slug)
+	detail := fmt.Sprintf("%d %s link to %q and it has never been written. "+
+		"Asked for from the Gaps view.", wanted, pages, slug)
+	if err := s.Runs.FileReview(r.Context(), ws.ID, "gap", title, detail); err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"slug": slug, "status": "filed"})
 }

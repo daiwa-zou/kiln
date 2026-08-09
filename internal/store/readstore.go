@@ -27,12 +27,17 @@ type WorkspaceRow struct {
 // PageInfo is a page without its body, for listings. Loading bodies to render
 // a sidebar was the single largest waste on the read path.
 type PageInfo struct {
-	Path    string
-	Slug    string
-	Type    string
-	Title   string
-	Tags    []string
+	Path  string
+	Slug  string
+	Type  string
+	Title string
+	Tags  []string
+	// Updated is the calendar day the page was last written.
 	Updated string
+	// BuiltAtRef is the source revision the page reflects. It rides on the
+	// summary rather than only on the page body so a reader can be told which
+	// pages have fallen behind their sources without one request per page.
+	BuiltAtRef string
 }
 
 // SearchHit is one full-text match.
@@ -135,7 +140,7 @@ func (s *WikiStore) LoadPageSummaries(ctx context.Context, workspaceID string, l
 		if len(fm) > 0 {
 			var meta wiki.Frontmatter
 			if err := json.Unmarshal(fm, &meta); err == nil {
-				p.Tags, p.Updated = meta.Tags, meta.Updated
+				p.Tags, p.Updated, p.BuiltAtRef = meta.Tags, meta.Updated, meta.BuiltAtRef
 			}
 		}
 		out = append(out, p)
