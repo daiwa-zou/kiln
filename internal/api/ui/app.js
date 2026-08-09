@@ -2380,6 +2380,17 @@ function onSearchInput() {
   const inline = onSearchView();
   sugQuery = q;
   clearTimeout(sugTimer);
+
+  // The page tree narrows to the same query. This was a second input four rows
+  // below this one: identical to look at, answering a different question, and
+  // advertising a "/" shortcut that opens the command palette instead of
+  // focusing it. One box now covers both halves of finding something -- the
+  // tree shows which pages are *called* this, the dropdown offers the jump,
+  // and Enter searches what the pages actually *say*.
+  if (treeFilter !== q) {
+    treeFilter = q;
+    renderTree(lastActiveSlug);
+  }
   if (inline || !q) closeSuggest();
   else renderSuggest(q); // instant, local, no network
 
@@ -2583,26 +2594,6 @@ async function boot() {
     if (li) { e.preventDefault(); pickPalette([...$("palette-list").children].indexOf(li)); }
   });
 
-  // Sidebar quick-filter: instant, client-side, Enter opens the first match.
-  $("tree-filter").addEventListener("input", (e) => {
-    treeFilter = e.target.value.trim();
-    renderTree(lastActiveSlug);
-  });
-  $("tree-filter").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      const first = $("tree").querySelector("a");
-      if (first) {
-        e.target.value = "";
-        treeFilter = "";
-        location.hash = first.getAttribute("href");
-      }
-    } else if (e.key === "Escape" && e.target.value) {
-      e.stopPropagation();
-      e.target.value = "";
-      treeFilter = "";
-      renderTree(lastActiveSlug);
-    }
-  });
   // Tapping the backdrop strip dismisses the drawer.
   document.addEventListener("click", (e) => {
     if (document.body.classList.contains("nav-open") &&
