@@ -68,15 +68,24 @@
       <a href="#/ingest" data-view="sources">Ingest</a>
       <a href="#/log" data-view="log">Log</a>
       <a href="#/reviews" data-view="reviews">Reviews <span class="badge" id="reviews-badge" hidden></span></a>
-      <div class="group-label">Configure</div>
-      <a href="#/steering" data-view="steering">Steering</a>
-      <a href="#/members" data-view="members">Members</a>
     </nav>
     <input id="tree-filter" type="search" placeholder="Filter pages…  ( / )" aria-label="Filter pages"
            autocomplete="off" spellcheck="false">
     <span class="sr-only" id="filter-status" role="status"></span>
     <nav class="tree" id="tree" aria-label="Pages"></nav>
-    <button class="signout" id="signout" hidden>Sign out of this kiln</button>
+    <div class="sidebar-foot">
+      <details class="settings" id="settings">
+        <summary class="settings-btn">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M6.9 1h2.2l.3 1.8 1.3.8 1.7-.7 1.1 1.9-1.4 1.2v1.5l1.4 1.2-1.1 1.9-1.7-.7-1.3.8-.3 1.8H6.9l-.3-1.8-1.3-.8-1.7.7-1.1-1.9 1.4-1.2V6l-1.4-1.2 1.1-1.9 1.7.7 1.3-.8zM8 5.7a2.3 2.3 0 1 0 0 4.6 2.3 2.3 0 0 0 0-4.6z"/></svg>
+          <span>Settings</span>
+        </summary>
+        <div class="settings-menu" id="settings-menu">
+          <a href="#/steering" data-view="steering">Steering</a>
+          <a href="#/members" data-view="members">Members</a>
+          <button class="signout" id="signout" hidden>Sign out of this kiln</button>
+        </div>
+      </details>
+    </div>
   </aside>
   <main id="main" tabindex="-1"><div class="empty">Loading…</div></main>
 </div>
