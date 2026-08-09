@@ -233,39 +233,57 @@
   }
   .signout:hover { color: var(--oxide); background: var(--surface); }
 
-  /* Settings live at the foot of the rail rather than as a third nav group:
-     they are visited rarely, and the group heading spent permanent vertical
-     space on two links. Pinned, so scrolling a long page tree never carries
-     the way out of the bench off the bottom of the screen. */
+  /* Two glyphs at the foot of the rail: what this bench is configured with,
+     and who you are on it. Labels are gone because the rail is narrow and
+     these are visited rarely -- the tooltip and the accessible name carry the
+     word, and the sheet that opens names itself. Pinned, so scrolling a long
+     page tree never carries the way out of the bench off the bottom. */
   .sidebar-foot {
     flex: none; position: relative;
+    display: flex; align-items: center; gap: 6px;
     margin-top: 10px; padding-top: 10px;
     border-top: 1px solid var(--border);
   }
-  .settings-btn {
-    display: flex; align-items: center; gap: 8px; cursor: pointer;
-    padding: 6px 10px; border-radius: 6px; min-height: 24px;
-    color: var(--ink-dim); font-size: 13px; list-style: none;
+  .footer-menu { position: relative; }
+  .footer-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 7px; cursor: pointer;
+    color: var(--ink-dim); list-style: none;
     transition: background-color var(--dur), color var(--dur);
   }
-  .settings-btn::-webkit-details-marker { display: none; }
-  .settings-btn:hover { background: var(--bg); color: var(--ink); }
-  .settings-btn .icon { width: 14px; height: 14px; fill: currentColor; flex: none; }
-  .settings[open] .settings-btn { background: var(--bg); color: var(--ink); }
+  .footer-btn::-webkit-details-marker { display: none; }
+  .footer-btn:hover { background: var(--bg); color: var(--ink); }
+  .footer-menu[open] .footer-btn { background: var(--bg); color: var(--ink); }
+  .footer-btn .icon { width: 15px; height: 15px; fill: currentColor; }
+
   /* Opens upward and out of flow: in flow it would grow past the bottom edge
-     of a rail that no longer scrolls. */
-  .settings-menu {
-    position: absolute; bottom: calc(100% + 6px); left: 0; right: 0;
-    display: flex; flex-direction: column; gap: 2px; z-index: 5;
-    padding: 4px; background: var(--bg);
+     of a rail that no longer scrolls. Anchored to its own button's left edge
+     and free to be wider than it, since a 30px button is narrower than any
+     label the sheet holds. */
+  .footer-sheet {
+    position: absolute; bottom: calc(100% + 6px); left: 0;
+    min-width: 190px; z-index: 5;
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 5px; background: var(--bg);
     border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 6px 20px rgb(0 0 0 / 0.10);
   }
-  .settings-menu a {
-    padding: 6px 9px; border-radius: 6px; font-size: 13px; color: var(--ink-dim);
+  .footer-sheet-label {
+    padding: 3px 9px 5px; font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint);
   }
-  .settings-menu a:hover { background: var(--surface); color: var(--ink); text-decoration: none; }
-  .settings-menu a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
+  .footer-sheet a {
+    padding: 6px 9px; border-radius: 6px; font-size: 13px; color: var(--ink-dim);
+    white-space: nowrap;
+  }
+  .footer-sheet a:hover { background: var(--surface); color: var(--ink); text-decoration: none; }
+  .footer-sheet a[aria-current="page"] { background: var(--ember); color: var(--on-ember); }
+  /* Who you are, above the way out. Not a control, so it is not styled as one. */
+  .account-who {
+    padding: 2px 9px 6px; font-size: 13px; color: var(--ink);
+    border-bottom: 1px solid var(--border); margin-bottom: 3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
 
   /* Two width tiers sharing ONE left edge, so titles and content never hop
      sideways between views. Prose keeps the 74ch reading measure — a line

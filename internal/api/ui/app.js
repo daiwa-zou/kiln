@@ -2442,6 +2442,35 @@ function wireSearchBox() {
   });
 }
 
+// showAccount fills the account sheet with whoever is signed in. Three
+// answers are possible and each is worth saying plainly: a named user, a
+// deployment with authentication switched off, and a bearer token with no
+// profile behind it.
+async function showAccount() {
+  const who = $("account-who");
+  if (!who) return;
+  try {
+    const me = await api("/me");
+    if (me?.anonymous) {
+      who.textContent = "Signed in as nobody — this instance has authentication disabled";
+      return;
+    }
+    who.textContent = me?.login || me?.name || "Signed in";
+    if (me?.name && me?.login) who.title = me.name;
+  } catch (err) {
+    if (err?.handled) return;
+    // /me is absent on a deployment without browser sign-in. What that means
+    // depends on how the caller got this far: with a token they are
+    // authenticated and there is simply no profile behind it, and without one
+    // the request would have been refused had authentication been on at all --
+    // so reaching here unauthenticated means it is off. "Not signed in" would
+    // read as a problem in a deployment where nothing is wrong.
+    who.textContent = localStorage.getItem(TOKEN_KEY)
+      ? "Signed in with a token"
+      : "No account — this instance has authentication disabled";
+  }
+}
+
 // slugify turns a typed name into the URL-safe slug the API accepts. The
 // server validates independently; this only spares the user from having to
 // know the rule.
@@ -2512,19 +2541,23 @@ async function boot() {
     const btn = e.target.closest?.("[data-help]");
     if (btn) openHelp(btn.dataset.help);
 
-    // The settings menu is a popup, so it closes the way popups do: on a click
-    // anywhere outside it, and on choosing something inside it.
-    const settings = $("settings");
-    if (settings?.open && (!settings.contains(e.target) || e.target.closest("#settings-menu a"))) {
-      settings.open = false;
+    // The footer menus are popups, so they close the way popups do: on a click
+    // anywhere outside, and on choosing something inside. Opening one closes
+    // the other -- two sheets over a narrow rail would overlap.
+    const opened = e.target.closest?.(".footer-menu");
+    for (const m of document.querySelectorAll(".footer-menu")) {
+      if (!m.open) continue;
+      if (m !== opened || e.target.closest(".footer-sheet a, .footer-sheet button")) {
+        m.open = false;
+      }
     }
   });
   document.addEventListener("keydown", (e) => {
     // Escape priority: palette (handled inside its own overlay) -> hover
     // preview -> drawer.
     if (e.key === "Escape") {
-      const settings = $("settings");
-      if (settings?.open) { settings.open = false; settings.querySelector("summary")?.focus(); return; }
+      const openMenu = document.querySelector(".footer-menu[open]");
+      if (openMenu) { openMenu.open = false; openMenu.querySelector("summary")?.focus(); return; }
       if (hidePreview()) return;
       if (document.body.classList.contains("nav-open")) setDrawer(false);
       return;
@@ -2652,6 +2685,11 @@ async function boot() {
     });
     window.addEventListener("hashchange", route);
     wireSearchBox();
+    // Who the account sheet is about. Asked once at boot rather than on every
+    // open: it does not change while the page is loaded, and a menu that waits
+    // on a request to say your own name reads as broken.
+    showAccount();
+
     if (localStorage.getItem(TOKEN_KEY) || csrfToken()) {
       const so = $("signout");
       so.hidden = false;

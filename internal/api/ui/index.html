@@ -74,15 +74,24 @@
     <span class="sr-only" id="filter-status" role="status"></span>
     <nav class="tree" id="tree" aria-label="Pages"></nav>
     <div class="sidebar-foot">
-      <details class="settings" id="settings">
-        <summary class="settings-btn">
+      <details class="footer-menu" id="settings">
+        <summary class="footer-btn" aria-label="Settings" title="Settings">
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M6.9 1h2.2l.3 1.8 1.3.8 1.7-.7 1.1 1.9-1.4 1.2v1.5l1.4 1.2-1.1 1.9-1.7-.7-1.3.8-.3 1.8H6.9l-.3-1.8-1.3-.8-1.7.7-1.1-1.9 1.4-1.2V6l-1.4-1.2 1.1-1.9 1.7.7 1.3-.8zM8 5.7a2.3 2.3 0 1 0 0 4.6 2.3 2.3 0 0 0 0-4.6z"/></svg>
-          <span>Settings</span>
         </summary>
-        <div class="settings-menu" id="settings-menu">
+        <div class="footer-sheet" id="settings-menu">
+          <div class="footer-sheet-label">Configure</div>
           <a href="#/steering" data-view="steering">Steering</a>
           <a href="#/members" data-view="members">Members</a>
           <a href="#/mcp" data-view="mcp">Agent access (MCP)</a>
+        </div>
+      </details>
+      <details class="footer-menu" id="account">
+        <summary class="footer-btn" aria-label="Account" title="Account">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M8 1.6a3.1 3.1 0 1 1 0 6.2 3.1 3.1 0 0 1 0-6.2zM2.3 14.4c0-2.9 2.6-5 5.7-5s5.7 2.1 5.7 5z"/></svg>
+        </summary>
+        <div class="footer-sheet" id="account-menu">
+          <div class="footer-sheet-label">Account</div>
+          <div class="account-who" id="account-who"></div>
           <button class="signout" id="signout" hidden>Sign out of this kiln</button>
         </div>
       </details>
