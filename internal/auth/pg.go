@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -152,4 +153,112 @@ func Revoke(ctx context.Context, pool *pgxpool.Pool, login, name string) (int64,
 		return 0, fmt.Errorf("auth: revoke: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// TokenInfo is one API token as its owner may see it. The token itself is
+// absent by construction: only a hash is stored, and the plaintext exists for
+// exactly one response, at mint time.
+type TokenInfo struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Scopes    []string  `json:"scopes"`
+	CreatedAt time.Time `json:"-"`
+	LastUsed  *time.Time
+	ExpiresAt *time.Time
+}
+
+// MintForUser issues a token for an existing user and returns the plaintext
+// once.
+//
+// Deliberately narrower than Mint, which the CLI uses: that one creates users
+// and org memberships and can grant admin, because an operator at a shell is
+// bootstrapping a deployment. This is a signed-in person asking for a key for
+// their own agent, so it attaches to the caller's own user and grants only the
+// scopes it is handed -- there is no way to name a different user, an org, or
+// admin through it.
+func MintForUser(ctx context.Context, pool *pgxpool.Pool, userID, name string, scopes []string, ttl time.Duration) (string, TokenInfo, error) {
+	if userID == "" {
+		return "", TokenInfo{}, errors.New("auth: a user is required to mint a token")
+	}
+	if name == "" {
+		name = "agent"
+	}
+	if len(scopes) == 0 {
+		scopes = []string{"read"}
+	}
+
+	plain, hash, err := NewToken()
+	if err != nil {
+		return "", TokenInfo{}, err
+	}
+	var expires any
+	if ttl > 0 {
+		expires = time.Now().Add(ttl)
+	}
+
+	var info TokenInfo
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO tokens (user_id, name, token_hash, scopes, expires_at)
+		VALUES ($1,$2,$3,$4,$5)
+		RETURNING id, name, scopes, created_at, expires_at`,
+		userID, name, hash, scopes, expires,
+	).Scan(&info.ID, &info.Name, &info.Scopes, &info.CreatedAt, &info.ExpiresAt); err != nil {
+		return "", TokenInfo{}, fmt.Errorf("auth: mint token for user: %w", err)
+	}
+	return plain, info, nil
+}
+
+// ListForUser returns a user's live tokens, newest first. Revoked and expired
+// ones are omitted: the list answers "what can reach my benches right now",
+// and a key that cannot is noise in that answer.
+func ListForUser(ctx context.Context, pool *pgxpool.Pool, userID string) ([]TokenInfo, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT id, name, scopes, created_at, last_used_at, expires_at
+		FROM tokens
+		WHERE user_id = $1
+		  AND revoked_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > now())
+		ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("auth: list tokens: %w", err)
+	}
+	defer rows.Close()
+
+	out := []TokenInfo{}
+	for rows.Next() {
+		var t TokenInfo
+		if err := rows.Scan(&t.ID, &t.Name, &t.Scopes, &t.CreatedAt, &t.LastUsed, &t.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("auth: scan token: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ErrNoSuchToken is returned when a revoke matches nothing the caller owns.
+var ErrNoSuchToken = errors.New("auth: no such token")
+
+// RevokeID revokes one of a user's own tokens.
+//
+// Ownership is part of the statement rather than a check beforehand: a token
+// id belonging to someone else must be indistinguishable from one that never
+// existed, or the endpoint answers "that key is not yours" and becomes a way
+// to confirm ids.
+func RevokeID(ctx context.Context, pool *pgxpool.Pool, userID, tokenID string) error {
+	tag, err := pool.Exec(ctx, `
+		UPDATE tokens SET revoked_at = now()
+		WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`, tokenID, userID)
+	if err != nil {
+		// A malformed uuid can only come from an id the caller invented, so it
+		// is the same answer as one that does not exist.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+			return ErrNoSuchToken
+		}
+		return fmt.Errorf("auth: revoke token: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNoSuchToken
+	}
+	return nil
 }
