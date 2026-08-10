@@ -3002,6 +3002,7 @@ async function showGraph() {
 // rather than a broken form.
 async function showMembers() {
   const view = beginView("Members", "members");
+  const bench = state.benches.find((b) => b.slug === state.workspace);
   try {
     let members;
     try {
@@ -3033,12 +3034,58 @@ async function showMembers() {
           </select>
           <button class="btn" id="member-add">Add</button>
         </span>
-      </div>`)) return;
+      </div>
+
+      <div class="sec-head"><div class="group-label">Delete this bench</div></div>
+      <p class="hint">Removes <strong>${esc(bench?.name || state.workspace)}</strong> and
+        everything in it — every page, run, review, connector and uploaded document.
+        Unlike an approved deletion review, which only tells the next build to drop
+        some pages, this is immediate and there is no undo.</p>
+      <div class="row">
+        <input id="bench-delete-slug" placeholder="type ${esc(state.workspace)} to confirm"
+               aria-label="Repeat the bench slug to confirm deletion"
+               autocomplete="off" spellcheck="false">
+        <button class="btn danger" id="bench-delete" disabled>Delete bench</button>
+      </div>
+      <div id="bench-delete-note" class="hint" role="status"></div>`)) return;
 
     const note = (msg, isError) => {
       const n = $("member-note");
       if (n) { n.textContent = msg; n.classList.toggle("error", Boolean(isError)); }
     };
+
+    // Deleting a bench is gated three times over, which is proportionate to it
+    // being the one action here that destroys work: the server requires an org
+    // owner, the button stays disabled until the slug is typed exactly, and the
+    // click itself arms before it commits. Typing the name is the gate that
+    // actually matters -- it is the only one a person cannot pass by reflex.
+    const delBtn = $("bench-delete");
+    const delSlug = $("bench-delete-slug");
+    const delNote = (msg, isError) => {
+      const n = $("bench-delete-note");
+      if (n) { n.textContent = msg || ""; n.classList.toggle("error", Boolean(isError)); }
+    };
+    delSlug.addEventListener("input", () => {
+      delBtn.disabled = delSlug.value.trim() !== state.workspace;
+    });
+    delBtn.addEventListener("click", async () => {
+      if (delBtn.disabled) return;
+      if (!armButton(delBtn, "delete")) return;
+      delBtn.disabled = true;
+      try {
+        await api(`/workspaces/${encodeURIComponent(state.workspace)}`,
+          { method: "DELETE", body: { slug: delSlug.value.trim() } });
+        // The remembered bench no longer exists, so clear it before reloading:
+        // boot would otherwise resolve a slug that 404s and land the reader on
+        // an error instead of on whatever bench they still have.
+        try { localStorage.removeItem(WORKSPACE_KEY); } catch { /* private mode */ }
+        location.reload();
+      } catch (err) {
+        delBtn.disabled = false;
+        if (!err.handled) delNote(err.message, true);
+      }
+    });
+
     for (const sel of document.querySelectorAll("select[data-member]")) {
       sel.addEventListener("change", async () => {
         try {

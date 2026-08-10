@@ -288,6 +288,12 @@ func (s *Server) mountRoutes(r chi.Router) {
 
 			r.Route("/workspaces/{workspace}", func(r chi.Router) {
 				r.Get("/", s.handleWorkspace)
+				if s.Workspaces != nil {
+					// Deleting a bench is admin-gated inside the handler and
+					// shares the write limiter with every other mutation.
+					r.With(writeLimiter(s.writeLimit)).
+						Delete("/", s.handleWorkspaceDelete)
+				}
 				r.Get("/pages", s.handlePages)
 				r.Get("/pages/*", s.handlePage)
 				r.Get("/index", s.handleArtifact("index"))
