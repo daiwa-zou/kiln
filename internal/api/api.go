@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -77,6 +78,16 @@ type Server struct {
 	// CORSOrigins are origins allowed to call the API from a browser, for a
 	// separately hosted frontend. Empty means same-origin only.
 	CORSOrigins []string
+	// PublicURL is the absolute origin clients reach this instance on. It is
+	// the only thing that survives a reverse proxy, so the MCP discovery
+	// documents are built from it rather than from the inbound request.
+	PublicURL string
+	// MCPAuthorizationServer is the issuer URL of an OAuth authorization
+	// server that mints tokens for the MCP endpoint. Empty leaves
+	// authorization_servers out of the protected-resource metadata, which is
+	// the honest document for a deployment that authenticates with kiln API
+	// tokens or not at all.
+	MCPAuthorizationServer string
 	// Runs backs the run queue routes. Nil leaves them unmounted, matching
 	// how Writes disables the human loop.
 	Runs RunStore
@@ -128,6 +139,14 @@ type Server struct {
 	// a folder of documents is one user action that arrives as many requests,
 	// so it gets a roomier bucket than the human-paced write surface.
 	uploadLimit *limiter
+
+	// built is the router Router() last returned, so the MCP endpoint's tools
+	// can dispatch their reads back through it without leaving the process.
+	// Set at the end of Router(), read long afterwards on a request, so it is
+	// guarded: Router() may be called again by a test while requests are in
+	// flight from an earlier call.
+	built   http.Handler
+	builtMu sync.RWMutex
 
 	// Metrics, when set, instruments every route. Nil leaves the server
 	// uninstrumented, which is what tests and embedded uses want.
@@ -183,13 +202,33 @@ func (s *Server) Router() http.Handler {
 		})
 	}
 
+	// The MCP endpoint sits outside the 30-second handler timeout: Streamable
+	// HTTP holds a response open to stream results back, which that timeout
+	// would sever mid-session. Claude allows five minutes for a tool call, and
+	// the transport-level WriteTimeout is the real backstop.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Timeout(mcpTimeout))
+		s.mountMCP(r)
+	})
+
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Timeout(30 * time.Second))
 		s.mountRoutes(r)
 	})
 
 	mountUI(r)
+
+	s.builtMu.Lock()
+	s.built = r
+	s.builtMu.Unlock()
 	return r
+}
+
+// handler returns the router, for the MCP endpoint's in-process reads.
+func (s *Server) handler() http.Handler {
+	s.builtMu.RLock()
+	defer s.builtMu.RUnlock()
+	return s.built
 }
 
 // mountRoutes registers everything except the upload route, under the
@@ -677,22 +716,33 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// Serve runs the HTTP server until the context is cancelled.
-func (s *Server) Serve(ctx context.Context, addr string) error {
+// Serve runs the HTTP server until the context is cancelled. certFile and
+// keyFile, when both set, serve HTTPS directly rather than expecting a
+// terminating proxy in front.
+func (s *Server) Serve(ctx context.Context, addr, certFile, keyFile string) error {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           s.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Full-cycle timeouts so a slow-loris client or a stalled write cannot
-		// pin a connection forever. The handler-level chi Timeout (30s) fires
-		// first for well-behaved requests; these are the transport backstop.
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		// pin a connection forever. The handler-level chi Timeout fires first
+		// for well-behaved requests; these are the transport backstop.
+		ReadTimeout: 30 * time.Second,
+		// Longer than the rest of the API needs, because the MCP endpoint
+		// streams: a Streamable HTTP response stays open while a tool call
+		// runs, and a 60-second write deadline would cut it mid-session.
+		WriteTimeout: mcpTimeout + 30*time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
+	go func() {
+		if certFile != "" && keyFile != "" {
+			errc <- srv.ListenAndServeTLS(certFile, keyFile)
+			return
+		}
+		errc <- srv.ListenAndServe()
+	}()
 
 	select {
 	case <-ctx.Done():
