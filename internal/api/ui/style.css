@@ -1452,10 +1452,21 @@
      those. */
   #graph-svg { width: 100%; height: 100%; display: block; touch-action: none; }
   .graph-toolbar {
-    position: absolute; top: 16px; left: 18px; right: 18px; z-index: 2;
-    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    position: absolute; top: 14px; left: 16px; right: 16px; z-index: 5;
+    display: flex; gap: 10px; align-items: flex-start;
   }
-  .graph-legend { display: flex; flex-wrap: wrap; gap: 6px; }
+  /* The chips scroll rather than wrap. The graph column is often far narrower
+     than the screen, and a wrapping chip row builds a vertical tower of debris
+     over the canvas -- the one thing the toolbar must not become. */
+  .graph-legend {
+    /* Basis 0, not auto: with auto the row demands its full content width and
+       the search field is shrunk to its floor even on a wide screen. The chips
+       scroll, so they can start from nothing and take whatever is left. */
+    flex: 1 1 0; min-width: 0; display: flex; gap: 6px;
+    overflow-x: auto; scrollbar-width: none;
+  }
+  .graph-legend::-webkit-scrollbar { display: none; }
+  .graph-legend .chip-count { font-variant-numeric: tabular-nums; }
   .graph-legend .chip {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 4px 10px; background: var(--panel); cursor: pointer;
@@ -1463,7 +1474,7 @@
   .graph-legend .chip .dot { width: 7px; height: 7px; }
   .graph-legend .chip.graph-off { opacity: 0.4; text-decoration: line-through; }
   .graph-controls {
-    margin-left: auto; display: flex; gap: 4px; align-items: center;
+    flex: none; display: flex; gap: 4px; align-items: center;
     background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 3px;
   }
   .graph-controls button {
@@ -1477,27 +1488,150 @@
     font-size: 11.5px; color: var(--ink-faint); align-self: center;
     min-width: 34px; text-align: center; font-variant-numeric: tabular-nums;
   }
-  /* Finding by name. Sits at the head of the toolbar because it is the control
-     most likely to be wanted on a graph too big to read. */
-  .graph-find {
+  /* Finding by name. The field, its result panel and the scope footer are one
+     shape; the type chips scroll rather than wrap beside it, because the graph
+     column is often far narrower than the screen and a wrapped chip row builds
+     a tower over the canvas. */
+  .graph-search { flex: 1 1 328px; min-width: 272px; max-width: 328px; position: relative; }
+  .graph-search-field {
+    display: flex; align-items: center; gap: 8px; height: 34px;
+    padding: 0 6px 0 10px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  }
+  /* Open, the field and the panel below it read as one object. */
+  .graph-search-field.graph-field-open {
+    border-color: var(--ember-soft); border-radius: 10px 10px 0 0;
+  }
+  .graph-search-glyph { width: 13px; height: 13px; flex: none; fill: var(--ink-faint); }
+  .graph-search-field:focus-within .graph-search-glyph { fill: var(--ember); }
+  .graph-search input {
+    flex: 1 1 auto; min-width: 0; border: none; background: none; outline: none;
+    font-family: var(--sans); font-size: 13px; color: var(--ink);
+  }
+  .graph-search input::placeholder { color: var(--ink-faint); }
+  .graph-search input::-webkit-search-cancel-button { display: none; }
+  .graph-find-count {
+    font-size: 11.5px; color: var(--ink-faint); white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .graph-find-count.graph-find-none { color: var(--oxide); }
+  .graph-find-clear {
+    width: 20px; height: 20px; flex: none; border: none; border-radius: 5px;
+    background: none; color: var(--ink-faint); cursor: pointer; font-size: 14px;
+    line-height: 1; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .graph-find-clear:hover { background: var(--surface); color: var(--ink); }
+  .graph-find-clear[hidden], .graph-find-slash[hidden] { display: none; }
+  .graph-find-slash {
+    flex: none; font-family: var(--mono); font-size: 10px; padding: 2px 5px;
+    border: 1px solid var(--border); border-radius: 4px; color: var(--ink-faint);
+  }
+
+  .graph-panel {
+    position: absolute; top: 33px; left: 0; right: 0; z-index: 6;
+    background: var(--panel); border: 1px solid var(--ember-soft); border-top: none;
+    border-radius: 0 0 10px 10px; box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+    animation: graph-panel-in 120ms ease;
+  }
+  .graph-panel[hidden] { display: none; }
+  @keyframes graph-panel-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) { .graph-panel { animation: none; } }
+  .graph-panel-list { max-height: 296px; overflow-y: auto; padding: 6px; }
+  .graph-panel-label {
+    padding: 7px 9px 4px; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.09em; font-weight: 600; color: var(--ink-faint);
+  }
+  .graph-row {
+    display: flex; align-items: center; gap: 9px; padding: 6px 9px;
+    border-radius: 7px; cursor: pointer;
+  }
+  .graph-row-on { background: var(--ember-tint); outline: 1px solid var(--ember-soft); }
+  .graph-row-name {
+    flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--ink);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .graph-row-meta { flex: none; font-size: 10.5px; color: var(--ink-faint); white-space: nowrap; }
+  mark.graph-hit { background: var(--ember-soft); color: var(--ink); border-radius: 3px; padding: 0; }
+
+  .graph-nohit { padding: 16px 10px 18px; text-align: center; }
+  .graph-nohit-line { font-size: 12.5px; color: var(--ink-dim); margin-bottom: 10px; }
+  .graph-nohit-btn {
+    display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    font-family: var(--sans); font-size: 12.5px; color: var(--ink); cursor: pointer;
+  }
+  .graph-nohit-btn:hover { border-color: var(--ember); }
+  .graph-nohit-btn kbd {
+    font-family: var(--mono); font-size: 10px; padding: 1px 4px;
+    border: 1px solid var(--border); border-radius: 4px; color: var(--ink-faint);
+  }
+
+  .graph-scope {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px 9px;
+    padding: 8px 10px; border-top: 1px solid var(--border-soft); background: var(--surface);
+  }
+  /* A real button, so the pressed state is the thing screen readers read. */
+  .graph-switch {
+    display: inline-flex; align-items: center; gap: 8px; border: none; background: none;
+    padding: 0; cursor: pointer; font-family: var(--sans); font-size: 11.5px;
+    color: var(--ink-dim); text-align: left;
+  }
+  .graph-switch-track {
+    position: relative; width: 26px; height: 15px; flex: none; border-radius: 999px;
+    background: var(--ember); border: 1px solid var(--ember);
+  }
+  .graph-switch-knob {
+    position: absolute; top: 1px; left: 12px; width: 11px; height: 11px;
+    border-radius: 999px; background: var(--on-ember); transition: left 140ms ease;
+  }
+  .graph-switch-off .graph-switch-track { background: var(--sunk); border-color: var(--border); }
+  .graph-switch-off .graph-switch-knob { left: 1px; background: var(--ink-faint); }
+  @media (prefers-reduced-motion: reduce) { .graph-switch-knob { transition: none; } }
+  .graph-seg {
+    margin-left: auto; display: inline-flex; gap: 2px; padding: 2px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 7px;
+  }
+  .graph-seg[hidden] { display: none; }
+  .graph-seg button {
+    padding: 2px 9px; border: none; border-radius: 5px; background: none;
+    font-family: var(--sans); font-size: 11px; color: var(--ink-dim); cursor: pointer;
+  }
+  .graph-seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); }
+  .graph-scope-hint { margin-left: auto; font-size: 11px; color: var(--ink-faint); }
+  .graph-scope-hint[hidden] { display: none; }
+
+  /* Says why the canvas is dimmed, once the panel is no longer saying it. */
+  .graph-pill {
+    position: absolute; top: 60px; left: 16px; z-index: 4;
     display: flex; align-items: center; gap: 6px;
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 9px; padding: 3px 3px 3px 9px;
+    padding: 5px 6px 5px 11px; background: var(--ember-tint);
+    border: 1px solid var(--ember-soft); border-radius: 999px;
+    font-size: 11.5px; color: var(--ember);
   }
-  .graph-find input {
-    width: 148px; border: none; background: none; outline: none;
-    font-family: var(--sans); font-size: 12.5px; color: var(--ink); min-height: 24px;
+  .graph-pill[hidden] { display: none; }
+  .graph-pill-x {
+    width: 19px; height: 19px; border: none; border-radius: 999px;
+    background: rgba(224, 135, 47, 0.16); color: var(--ember);
+    cursor: pointer; font-size: 13px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
   }
-  .graph-find input::placeholder { color: var(--ink-faint); }
-  .graph-find input::-webkit-search-cancel-button { display: none; }
-  .graph-find .chip { padding: 3px 9px; cursor: pointer; white-space: nowrap; }
-  .graph-find .chip.graph-off { opacity: 0.45; text-decoration: line-through; }
-  .graph-find-status {
-    font-size: 11.5px; color: var(--ink-faint); min-width: 0; padding-right: 6px;
-    font-variant-numeric: tabular-nums; white-space: nowrap;
+
+  /* Nothing matched: the graph greys out rather than emptying, because an
+     empty rectangle reads as a view that broke rather than a search that
+     found nothing. */
+  #graph-svg.graph-blank { opacity: 0.18; filter: grayscale(0.7); }
+  .graph-nomatch {
+    position: absolute; inset: 0; z-index: 3; pointer-events: none;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    text-align: center; padding: 0 24px;
   }
-  .graph-find-status.graph-find-none { color: var(--oxide); }
-  @media (max-width: 720px) { .graph-find input { width: 104px; } }
+  .graph-nomatch[hidden] { display: none; }
+  .graph-nomatch-head { font-family: var(--serif); font-size: 19px; color: var(--ink-dim); }
+  .graph-nomatch-sub { font-size: 12.5px; color: var(--ink-faint); }
 
   .graph-node { cursor: pointer; outline: none; }
   .graph-node:focus-visible circle { stroke: var(--ember); stroke-width: 2; }

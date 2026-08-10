@@ -2083,18 +2083,36 @@ async function showGraph() {
       <h1 class="sr-only">Graph</h1>
       <div id="graph-wrap">
         <div class="graph-toolbar">
-          <div class="graph-find">
-            <input id="graph-find" type="search" autocomplete="off" spellcheck="false"
-              placeholder="Find in graph…" aria-label="Filter the graph by name or type"
-              aria-describedby="graph-find-status">
-            <button id="graph-find-neighbours" class="chip" aria-pressed="true"
-              title="Keep what the matches link to, so the relationship is visible"
-              >+ links</button>
-            <span class="graph-find-status" id="graph-find-status" role="status"></span>
+          <div class="graph-search">
+            <div class="graph-search-field" id="graph-search-field">
+              <svg class="graph-search-glyph" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M6.9 1.4a5.5 5.5 0 1 0 3.3 9.9l3.1 3.1 1.3-1.3-3.1-3.1a5.5 5.5 0 0 0-4.6-8.6zm0 1.9a3.6 3.6 0 1 1 0 7.2 3.6 3.6 0 0 1 0-7.2z"/></svg>
+              <input id="graph-find" type="search" role="combobox" aria-expanded="false"
+                aria-controls="graph-results" aria-autocomplete="list"
+                autocomplete="off" spellcheck="false" placeholder="Find in graph"
+                aria-label="Find a page in the graph by name or type">
+              <span class="graph-find-count" id="graph-find-count" aria-live="polite"></span>
+              <button class="graph-find-clear" id="graph-find-clear" aria-label="Clear the search" hidden>&times;</button>
+              <kbd class="graph-find-slash" id="graph-find-slash">/</kbd>
+            </div>
+            <div class="graph-panel" id="graph-panel" hidden>
+              <div class="graph-panel-list" id="graph-results" role="listbox"
+                   aria-label="Pages in this graph"></div>
+              <div class="graph-scope">
+                <button class="graph-switch" id="graph-hop-toggle" aria-pressed="true">
+                  <span class="graph-switch-track" aria-hidden="true"><span class="graph-switch-knob"></span></span>
+                  <span>Include what matches link to</span>
+                </button>
+                <div class="graph-seg" id="graph-hops" role="group" aria-label="How far to follow links">
+                  <button data-hops="1" aria-pressed="true">1 hop</button>
+                  <button data-hops="2" aria-pressed="false">2 hops</button>
+                </div>
+                <span class="graph-scope-hint" id="graph-scope-hint" hidden>↑↓ move · ↵ open · esc clear</span>
+              </div>
+            </div>
           </div>
           <div class="graph-legend" role="group" aria-label="Filter by page type">
             ${Object.entries(typeCounts).map(([t, c]) =>
-              `<button class="chip" data-type="${esc(t)}" aria-pressed="true">${typeDot(t, "")}${esc(t)} ${c}</button>`).join("")}
+              `<button class="chip" data-type="${esc(t)}" aria-pressed="true">${typeDot(t, "")}${esc(t)}<span class="chip-count" data-count-for="${esc(t)}">${c}</span></button>`).join("")}
           </div>
           <div class="graph-controls" role="group" aria-label="View controls">
             <button id="graph-zoom-out" aria-label="Zoom out" title="Zoom out">&minus;</button>
@@ -2105,6 +2123,16 @@ async function showGraph() {
           </div>
         </div>
         <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>
+        <!-- Says why the canvas is dimmed once the panel is closed, so a
+             filtered graph is never a mystery. -->
+        <div class="graph-pill" id="graph-pill" hidden></div>
+        <!-- A query that matches nothing greys the graph rather than emptying
+             it: an empty rectangle reads as a broken view, and the thing the
+             reader wants back is still there behind this. -->
+        <div class="graph-nomatch" id="graph-nomatch" hidden>
+          <div class="graph-nomatch-head" id="graph-nomatch-head"></div>
+          <div class="graph-nomatch-sub">The graph is behind this — clear the search to bring it back.</div>
+        </div>
       </div>
       <div class="graph-rail" id="graph-rail">
         <div class="group-label">Selected</div>
@@ -2549,71 +2577,235 @@ async function showGraph() {
     });
 
     // --- filters: page type, and finding by name --------------------------
-    // Both filters resolve in one pass, because they answer to the same
+    // Finding a page in a graph is not the same as filtering one. Dimming the
+    // canvas answers "is it here" but leaves "where" to the eye, which on a
+    // dense graph means hunting for an ember ring among two hundred dots. So
+    // the field opens a ranked list: the answer is readable as text, and the
+    // canvas filtering happens alongside it rather than instead of it.
+    //
+    // Both filters still resolve in one pass, because they answer to the same
     // pixels: a type switched off and a node the search did not reach are the
     // same "not on screen right now", and two handlers each setting the class
     // from its own half of the state meant whichever ran last won.
     const hidden = new Set();
     let findText = "";
     let withNeighbours = true;
+    let hops = 1;
+    let panelOpen = false;
+    let cursor = 0;
+    let results = [];
 
-    // A node matches on what a reader can see of it: its title, its slug, and
-    // its type -- so "concept" narrows to concepts the same way the legend
-    // does, and a half-remembered name finds its page. Substring rather than
-    // the fuzzy matcher the rail uses: on a canvas the reader is looking for a
-    // word they can see, and a subsequence match lights up nodes that share
-    // only scattered letters.
-    const matchesFind = (i) => {
-      if (!findText) return false;
+    const degree = (i) => neighbors[i].size;
+
+    // Where the query first appears in anything a reader can see of a node --
+    // its title, its slug, or its type, so "concept" narrows the way the legend
+    // does. -1 for no match. Position rather than a boolean because it is also
+    // the ranking key: a page whose name STARTS with the word is the one being
+    // looked for far more often than one that merely contains it.
+    const matchPos = (i) => {
+      if (!findText) return -1;
       const n = nodes[i];
-      return (n.title || "").toLowerCase().includes(findText)
-        || n.slug.toLowerCase().includes(findText)
-        || (n.type || "").toLowerCase().includes(findText);
+      let best = -1;
+      for (const field of [n.title || "", n.slug, n.type || ""]) {
+        const at = field.toLowerCase().indexOf(findText);
+        if (at >= 0 && (best < 0 || at < best)) best = at;
+      }
+      return best;
+    };
+    const matchesFind = (i) => matchPos(i) >= 0;
+
+    // What the panel lists. With no query it is the way in to an unfamiliar
+    // graph: the best-connected pages, which are the ones worth reading first.
+    // With one it is the matches, nearest-first.
+    const rankResults = () => {
+      const live = nodes.map((_, i) => i).filter((i) => !hidden.has(nodes[i].type));
+      if (!findText) {
+        return live.sort((a, b) => degree(b) - degree(a) || byTitle(nodes[a], nodes[b])).slice(0, 6);
+      }
+      return live.filter(matchesFind)
+        .sort((a, b) => matchPos(a) - matchPos(b) || degree(b) - degree(a)
+          || byTitle(nodes[a], nodes[b]))
+        .slice(0, 8);
+    };
+
+    // The matched run, marked. Indices are computed on the raw string and the
+    // escaping happens per run, so they cannot desynchronize the way they would
+    // if the string were escaped first and searched afterwards.
+    const markMatch = (text) => {
+      if (!findText) return esc(text);
+      const at = text.toLowerCase().indexOf(findText);
+      if (at < 0) return esc(text);
+      return esc(text.slice(0, at))
+        + `<mark class="graph-hit">${esc(text.slice(at, at + findText.length))}</mark>`
+        + esc(text.slice(at + findText.length));
+    };
+
+    const panel = $("graph-panel");
+    const findBox = $("graph-find");
+    const list = $("graph-results");
+
+    const renderPanel = () => {
+      results = rankResults();
+      if (cursor >= results.length) cursor = 0;
+      const label = findText ? plural(results.length, "matching page") : "Most connected";
+      if (findText && !results.length) {
+        // Name-only search coming up empty is the moment people learn that it
+        // is name-only, so the way to the full-text search is the answer here
+        // rather than a suggestion tucked under one.
+        list.innerHTML = `<div class="graph-panel-label">0 matching pages</div>
+          <div class="graph-nohit">
+            <div class="graph-nohit-line">No page name matches “${esc(findText)}”.</div>
+            <button class="graph-nohit-btn" id="graph-fulltext">Search every page for
+              “${esc(findText)}”<kbd>⌘K</kbd></button>
+          </div>`;
+        $("graph-fulltext").addEventListener("click", () => {
+          closeGraphPanel();
+          openPalette(findText);
+        });
+        findBox.removeAttribute("aria-activedescendant");
+        return;
+      }
+      list.innerHTML = `<div class="graph-panel-label">${esc(label)}</div>` + results.map((i, k) => {
+        const n = nodes[i];
+        return `<div class="graph-row${k === cursor ? " graph-row-on" : ""}" role="option"
+          id="graph-opt-${k}" aria-selected="${k === cursor}" data-k="${k}">
+          <span class="dot dot-7 t-${esc(n.type)}" aria-hidden="true"></span>
+          <span class="graph-row-name">${markMatch(n.title || n.slug)}</span>
+          <span class="graph-row-meta">${esc(n.type)} · ${degree(i)}</span>
+        </div>`;
+      }).join("");
+      findBox.setAttribute("aria-activedescendant", results.length ? `graph-opt-${cursor}` : "");
+      for (const row of list.querySelectorAll(".graph-row")) {
+        row.addEventListener("mouseenter", () => { cursor = Number(row.dataset.k); paintCursor(); });
+        row.addEventListener("click", () => commitCursor());
+      }
+    };
+
+    // Moving the cursor repaints two attributes rather than the list: a
+    // re-render would drop the row the pointer is over out from under it.
+    const paintCursor = () => {
+      for (const row of list.querySelectorAll(".graph-row")) {
+        const on = Number(row.dataset.k) === cursor;
+        row.classList.toggle("graph-row-on", on);
+        row.setAttribute("aria-selected", String(on));
+      }
+      findBox.setAttribute("aria-activedescendant", results.length ? `graph-opt-${cursor}` : "");
+    };
+    const commitCursor = () => {
+      const i = results[cursor];
+      if (i === undefined) return;
+      select(i);
+      closeGraphPanel();
+    };
+
+    const openGraphPanel = () => {
+      if (panelOpen) return;
+      panelOpen = true;
+      panel.hidden = false;
+      $("graph-search-field").classList.add("graph-field-open");
+      findBox.setAttribute("aria-expanded", "true");
+      renderPanel();
+      applyFilters();
+    };
+    const closeGraphPanel = () => {
+      if (!panelOpen) return;
+      panelOpen = false;
+      panel.hidden = true;
+      $("graph-search-field").classList.remove("graph-field-open");
+      findBox.setAttribute("aria-expanded", "false");
+      // The query and its filtering survive the panel closing -- that is what
+      // the pill is for -- so only the list goes away.
+      applyFilters();
     };
 
     const applyFilters = () => {
       const typeOK = (i) => !hidden.has(nodes[i].type);
       const isMatch = nodes.map((_, i) => typeOK(i) && matchesFind(i));
       const matchCount = isMatch.filter(Boolean).length;
+      const blank = Boolean(findText) && matchCount === 0;
 
       // Neighbours of a match are kept as context, not as results. That is the
       // whole point of searching a graph rather than a list: the answer to
       // "what does this concept touch" is the ring around it, and hiding
       // everything but the matches themselves leaves a scatter of dots with no
-      // relationships left to read.
+      // relationships left to read. Two hops reaches what those touch in turn.
       const keep = nodes.map((_, i) => isMatch[i]);
       if (findText && withNeighbours) {
-        isMatch.forEach((m, i) => {
-          if (m) for (const j of neighbors[i]) if (typeOK(j)) keep[j] = true;
-        });
+        for (let h = 0; h < hops; h++) {
+          const front = keep.slice();
+          front.forEach((on, i) => {
+            if (on) for (const j of neighbors[i]) if (typeOK(j)) keep[j] = true;
+          });
+        }
       }
 
       nodeEls.forEach((el, i) => {
-        el.classList.toggle("graph-hidden", !typeOK(i) || (Boolean(findText) && !keep[i]));
-        el.classList.toggle("graph-match", Boolean(findText) && isMatch[i]);
-        // Context is visible but quiet, so the matches read as the answer.
-        el.classList.toggle("graph-context", Boolean(findText) && keep[i] && !isMatch[i]);
+        // A query that matches nothing greys the whole graph instead of
+        // emptying it: an empty rectangle reads as a broken view.
+        el.classList.toggle("graph-hidden", !typeOK(i) || (Boolean(findText) && !blank && !keep[i]));
+        el.classList.toggle("graph-match", !blank && Boolean(findText) && isMatch[i]);
+        el.classList.toggle("graph-context", !blank && Boolean(findText) && keep[i] && !isMatch[i]);
       });
       for (const el of edgeEls) {
         const a = el._a, b = el._b;
-        const live = typeOK(a) && typeOK(b) && (!findText || (keep[a] && keep[b]));
+        const live = typeOK(a) && typeOK(b) && (!findText || blank || (keep[a] && keep[b]));
         el.classList.toggle("graph-hidden", !live);
-        // An edge with a match at one end is the relationship being asked
-        // about; one between two pieces of context is just scenery.
         // Its own class, not graph-hot: hover owns that one and clears it on
         // pointerout, which would wipe the find highlight on the way past.
-        el.classList.toggle("graph-find-edge", live && Boolean(findText) && (isMatch[a] || isMatch[b]));
+        el.classList.toggle("graph-find-edge",
+          live && !blank && Boolean(findText) && (isMatch[a] || isMatch[b]));
+      }
+      $("graph-svg").classList.toggle("graph-blank", blank);
+      const nomatch = $("graph-nomatch");
+      nomatch.hidden = !blank;
+      if (blank) $("graph-nomatch-head").textContent = `No page name matches “${findText}”`;
+
+      // The count lives in the field, so it costs no width when there is no
+      // query to count.
+      const count = $("graph-find-count");
+      count.textContent = !findText ? "" : matchCount === 0 ? "no matches"
+        : `${matchCount} of ${nodes.length}`;
+      count.classList.toggle("graph-find-none", blank);
+      $("graph-find-clear").hidden = !findText;
+      $("graph-find-slash").hidden = Boolean(findText) || document.activeElement === findBox;
+
+      // Each chip says what the query left it, so the filter's bite per type is
+      // visible rather than inferred from the canvas.
+      for (const el of document.querySelectorAll("[data-count-for]")) {
+        const t = el.dataset.countFor;
+        if (!findText) { el.textContent = String(typeCounts[t]); continue; }
+        const shown = nodes.reduce((n, x, i) => n + (x.type === t && !blank && keep[i] ? 1 : 0), 0);
+        el.textContent = `${shown}/${typeCounts[t]}`;
       }
 
-      const status = $("graph-find-status");
-      if (status) {
-        status.textContent = !findText ? ""
-          : matchCount === 0 ? "no matches"
-          : `${matchCount} of ${nodes.length}`;
-        status.classList.toggle("graph-find-none", Boolean(findText) && matchCount === 0);
+      // A dimmed graph with no panel over it has to say why it is dimmed.
+      const pill = $("graph-pill");
+      const shownTotal = nodes.filter((_, i) => !nodeEls[i].classList.contains("graph-hidden")).length;
+      // Not while nothing matched: the overlay on the canvas already says so,
+      // and a pill reading "showing 25 of 25" beside it would be contradicting
+      // it -- the nodes are all still drawn, which is the point, but none of
+      // them is an answer.
+      if (findText && !panelOpen && !blank) {
+        pill.hidden = false;
+        pill.innerHTML = `<span>Showing ${shownTotal} of ${nodes.length} pages${
+          withNeighbours && matchCount
+            ? ` — ${matchCount} matched, rest are links` : ""}</span>
+          <button class="graph-pill-x" id="graph-pill-x" aria-label="Clear the search">&times;</button>`;
+        $("graph-pill-x").addEventListener("click", clearFind);
+      } else {
+        pill.hidden = true;
       }
       return matchCount;
     };
+
+    function clearFind() {
+      findBox.value = "";
+      findText = "";
+      cursor = 0;
+      closeGraphPanel();
+      renderPanel();
+      applyFilters();
+    }
 
     for (const b of document.querySelectorAll(".graph-legend [data-type]")) {
       // CSSOM, not a style attribute: the CSP (style-src 'self') refuses
@@ -2624,47 +2816,96 @@ async function showGraph() {
         hidden.has(t) ? hidden.delete(t) : hidden.add(t);
         b.setAttribute("aria-pressed", String(!hidden.has(t)));
         b.classList.toggle("graph-off", hidden.has(t));
+        if (panelOpen) renderPanel();
         applyFilters();
       });
     }
 
-    const findBox = $("graph-find");
-    const neighbourBtn = $("graph-find-neighbours");
     let findTimer = null;
     const runFind = () => {
       findText = findBox.value.trim().toLowerCase();
+      cursor = 0;
+      renderPanel();
       applyFilters();
     };
     findBox.addEventListener("input", () => {
-      // Debounced like the rail's box: the work is O(nodes + edges) class
-      // toggles, cheap but not free, and a keystroke should not have to wait
-      // for the frame before it.
+      // Debounced: the work is a rank plus O(nodes + edges) class toggles --
+      // cheap, but a keystroke should not wait on the frame before it.
       clearTimeout(findTimer);
       findTimer = setTimeout(runFind, 120);
     });
+    findBox.addEventListener("focus", () => { $("graph-find-slash").hidden = true; openGraphPanel(); });
     findBox.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         // Stopped here so it never reaches the document handler, which would
         // leave full screen instead of clearing the box.
         e.stopPropagation();
-        if (findBox.value) { findBox.value = ""; clearTimeout(findTimer); runFind(); }
+        if (findBox.value) { clearTimeout(findTimer); clearFind(); }
+        else closeGraphPanel();
+        findBox.blur();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (!results.length) return;
+        e.preventDefault();
+        openGraphPanel();
+        cursor = (cursor + (e.key === "ArrowDown" ? 1 : -1) + results.length) % results.length;
+        paintCursor();
+        list.querySelector(".graph-row-on")?.scrollIntoView({ block: "nearest" });
       } else if (e.key === "Enter") {
-        // Enter goes to the answer: the first match becomes the selection, so
-        // the rail names it and its neighbours are listed without hunting for
-        // the dot on the canvas.
         e.preventDefault();
         clearTimeout(findTimer);
         runFind();
-        const first = nodes.findIndex((_, i) => !hidden.has(nodes[i].type) && matchesFind(i));
-        if (first >= 0) select(first);
+        commitCursor();
       }
     });
-    neighbourBtn.addEventListener("click", () => {
+    $("graph-find-clear").addEventListener("click", () => { clearFind(); findBox.focus(); });
+
+    // Clicking away closes the panel and keeps the filtering, which is the
+    // moment the pill has to appear.
+    const onDocDown = (e) => {
+      if (!panelOpen) return;
+      if (e.target.closest(".graph-search")) return;
+      closeGraphPanel();
+    };
+    document.addEventListener("pointerdown", onDocDown);
+
+    // "/" focuses the field from anywhere on this view, unless the keystroke
+    // belongs to something already being typed into.
+    const onSlash = (e) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      e.preventDefault();
+      findBox.focus();
+    };
+    document.addEventListener("keydown", onSlash);
+    onViewCleanup(() => {
+      document.removeEventListener("pointerdown", onDocDown);
+      document.removeEventListener("keydown", onSlash);
+    });
+
+    const hopToggle = $("graph-hop-toggle");
+    const hopSeg = $("graph-hops");
+    const paintScope = () => {
+      hopToggle.setAttribute("aria-pressed", String(withNeighbours));
+      hopToggle.classList.toggle("graph-switch-off", !withNeighbours);
+      hopSeg.hidden = !withNeighbours;
+      $("graph-scope-hint").hidden = withNeighbours;
+    };
+    hopToggle.addEventListener("click", () => {
       withNeighbours = !withNeighbours;
-      neighbourBtn.setAttribute("aria-pressed", String(withNeighbours));
-      neighbourBtn.classList.toggle("graph-off", !withNeighbours);
+      paintScope();
       applyFilters();
     });
+    for (const b of hopSeg.querySelectorAll("[data-hops]")) {
+      b.addEventListener("click", () => {
+        hops = Number(b.dataset.hops);
+        for (const other of hopSeg.querySelectorAll("[data-hops]")) {
+          other.setAttribute("aria-pressed", String(Number(other.dataset.hops) === hops));
+        }
+        applyFilters();
+      });
+    }
+    paintScope();
   } catch (err) {
     if (!err.handled) view.done(banner(err));
   }
@@ -3328,10 +3569,13 @@ function pickPalette(i) {
   else location.hash = row.hash;
 }
 
-function openPalette() {
+// `seed` pre-fills the box. The graph's find is name-only, and the moment it
+// comes up empty is the moment to hand the query to the search that reads what
+// pages say -- carrying the words across rather than making someone retype them.
+function openPalette(seed = "") {
   if (closePalette) return;
-  $("palette-input").value = "";
-  renderPalette("");
+  $("palette-input").value = seed;
+  renderPalette(seed);
   closePalette = openOverlay($("palette"), () => { closePalette = null; });
 }
 
