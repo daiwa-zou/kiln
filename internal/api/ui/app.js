@@ -278,6 +278,16 @@ const VIEW_HELP = {
       <p>Keys are shown once. kiln stores a hash, not the key, so a lost one is
       replaced rather than recovered.</p>`,
   },
+  bench: {
+    title: "Bench configuration",
+    body: `<p>What this bench is, and what can be done to it as a whole.</p>
+      <p>The slug is what URLs and agents call it, and it is what deleting asks
+      you to type back — a name you have to read off the page is a name you
+      cannot supply by reflex.</p>
+      <p>Deleting is immediate and total: every page, run, review, connector and
+      uploaded document goes with it. It is not the same as approving a deletion
+      review, which only tells the next build to drop some pages.</p>`,
+  },
   members: {
     title: "Members",
     body: `<p>Who can reach this bench and what they may do. Viewers can read,
@@ -2997,12 +3007,94 @@ async function showGraph() {
   }
 }
 
+// showBench is what the bench itself is, and what can be done to it as a
+// whole. Deletion started out at the foot of Members, which was the wrong
+// room: Members is about who may reach this bench, and the one control there
+// that destroyed it had nothing to do with the list above it. A page about the
+// bench is where someone goes looking for it, and the account sheet is where
+// the other two bench-level pages already live.
+//
+// It opens with the facts that identify the bench, because the slug is what
+// deletion asks to have typed back, and reading it off the page you are
+// deleting from beats hunting for it in the picker.
+async function showBench() {
+  const view = beginView("Bench configuration", "bench");
+  const bench = state.benches.find((b) => b.slug === state.workspace);
+  const pages = state.pages.length;
+  try {
+    if (!view.done(`${viewHead("Bench configuration", "bench")}
+      <div class="stats n3">
+        <div class="stat">
+          <div class="stat-label">Name</div>
+          <div class="stat-value stat-text">${esc(bench?.name || state.workspace)}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Slug</div>
+          <div class="stat-value stat-text mono">${esc(state.workspace)}</div>
+          <div class="stat-note">what URLs and agents call it</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Pages</div>
+          <div class="stat-value">${pages}</div>
+          <div class="stat-note">${pages ? "written by past builds" : "nothing built yet"}</div>
+        </div>
+      </div>
+
+      <div class="sec-head"><div class="group-label">Delete this bench</div></div>
+      <p class="hint">Removes <strong>${esc(bench?.name || state.workspace)}</strong> and
+        everything in it — every page, run, review, connector and uploaded document.
+        Unlike an approved deletion review, which only tells the next build to drop
+        some pages, this is immediate and there is no undo.</p>
+      <div class="row">
+        <input id="bench-delete-slug" placeholder="type ${esc(state.workspace)} to confirm"
+               aria-label="Repeat the bench slug to confirm deletion"
+               autocomplete="off" spellcheck="false">
+        <button class="btn danger" id="bench-delete" disabled>Delete bench</button>
+      </div>
+      <div id="bench-delete-note" class="hint" role="status"></div>`)) return;
+
+    // Deleting a bench is gated three times over, which is proportionate to it
+    // being the one control in the UI that destroys work outright: the server
+    // requires an org owner, the button stays disabled until the slug is typed
+    // exactly, and the click itself arms before it commits. Typing the name is
+    // the gate that actually matters -- it is the only one a person cannot
+    // pass by reflex.
+    const delBtn = $("bench-delete");
+    const delSlug = $("bench-delete-slug");
+    const delNote = (msg, isError) => {
+      const n = $("bench-delete-note");
+      if (n) { n.textContent = msg || ""; n.classList.toggle("error", Boolean(isError)); }
+    };
+    delSlug.addEventListener("input", () => {
+      delBtn.disabled = delSlug.value.trim() !== state.workspace;
+    });
+    delBtn.addEventListener("click", async () => {
+      if (delBtn.disabled) return;
+      if (!armButton(delBtn, "delete")) return;
+      delBtn.disabled = true;
+      try {
+        await api(`/workspaces/${encodeURIComponent(state.workspace)}`,
+          { method: "DELETE", body: { slug: delSlug.value.trim() } });
+        // The remembered bench no longer exists, so clear it before reloading:
+        // boot would otherwise resolve a slug that 404s and land the reader on
+        // an error instead of on whatever bench they still have.
+        try { localStorage.removeItem(WORKSPACE_KEY); } catch { /* private mode */ }
+        location.reload();
+      } catch (err) {
+        delBtn.disabled = false;
+        if (!err.handled) delNote(err.message, true);
+      }
+    });
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
+}
+
 // showMembers manages the org behind this bench: who belongs, with what
 // role. Owners and instance admins only; everyone else sees the explanation
 // rather than a broken form.
 async function showMembers() {
   const view = beginView("Members", "members");
-  const bench = state.benches.find((b) => b.slug === state.workspace);
   try {
     let members;
     try {
@@ -3035,56 +3127,12 @@ async function showMembers() {
           <button class="btn" id="member-add">Add</button>
         </span>
       </div>
-
-      <div class="sec-head"><div class="group-label">Delete this bench</div></div>
-      <p class="hint">Removes <strong>${esc(bench?.name || state.workspace)}</strong> and
-        everything in it — every page, run, review, connector and uploaded document.
-        Unlike an approved deletion review, which only tells the next build to drop
-        some pages, this is immediate and there is no undo.</p>
-      <div class="row">
-        <input id="bench-delete-slug" placeholder="type ${esc(state.workspace)} to confirm"
-               aria-label="Repeat the bench slug to confirm deletion"
-               autocomplete="off" spellcheck="false">
-        <button class="btn danger" id="bench-delete" disabled>Delete bench</button>
-      </div>
-      <div id="bench-delete-note" class="hint" role="status"></div>`)) return;
+`)) return;
 
     const note = (msg, isError) => {
       const n = $("member-note");
       if (n) { n.textContent = msg; n.classList.toggle("error", Boolean(isError)); }
     };
-
-    // Deleting a bench is gated three times over, which is proportionate to it
-    // being the one action here that destroys work: the server requires an org
-    // owner, the button stays disabled until the slug is typed exactly, and the
-    // click itself arms before it commits. Typing the name is the gate that
-    // actually matters -- it is the only one a person cannot pass by reflex.
-    const delBtn = $("bench-delete");
-    const delSlug = $("bench-delete-slug");
-    const delNote = (msg, isError) => {
-      const n = $("bench-delete-note");
-      if (n) { n.textContent = msg || ""; n.classList.toggle("error", Boolean(isError)); }
-    };
-    delSlug.addEventListener("input", () => {
-      delBtn.disabled = delSlug.value.trim() !== state.workspace;
-    });
-    delBtn.addEventListener("click", async () => {
-      if (delBtn.disabled) return;
-      if (!armButton(delBtn, "delete")) return;
-      delBtn.disabled = true;
-      try {
-        await api(`/workspaces/${encodeURIComponent(state.workspace)}`,
-          { method: "DELETE", body: { slug: delSlug.value.trim() } });
-        // The remembered bench no longer exists, so clear it before reloading:
-        // boot would otherwise resolve a slug that 404s and land the reader on
-        // an error instead of on whatever bench they still have.
-        try { localStorage.removeItem(WORKSPACE_KEY); } catch { /* private mode */ }
-        location.reload();
-      } catch (err) {
-        delBtn.disabled = false;
-        if (!err.handled) delNote(err.message, true);
-      }
-    });
 
     for (const sel of document.querySelectorAll("select[data-member]")) {
       sel.addEventListener("change", async () => {
@@ -3677,6 +3725,8 @@ function route() {
   // routable so bookmarks and habit survive.
   if (hash === "ingest" || hash === "ingestion" || hash === "sources" || hash === "runs") return showSources();
   if (hash === "members") return showMembers();
+  // "settings" is what people guess before they have seen the menu.
+  if (hash === "bench" || hash === "settings") return showBench();
   if (hash === "mcp") return showMCP();
   if (hash === "steering") return showSteering();
   // The default landing, and the explicit one, both route through the same
@@ -3709,6 +3759,7 @@ const PALETTE_DESTINATIONS = [
   { title: "Log", hash: "#/log" }, { title: "Reviews", hash: "#/reviews" },
   { title: "Ingest", hash: "#/ingest" }, { title: "Steering", hash: "#/steering" },
   { title: "Members", hash: "#/members" }, { title: "Agent access (MCP)", hash: "#/mcp" },
+  { title: "Bench configuration", hash: "#/bench" },
 ];
 
 // ingestNow queues a build from wherever you are. The one palette entry that
