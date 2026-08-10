@@ -251,6 +251,11 @@ const VIEW_HELP = {
       <p>The agent reads over the HTTP API, so it needs no database credentials
       and works against this instance from anywhere it can reach it. A key
       carries the read scope only and sees exactly the benches you do.</p>
+      <p>There are two ways in: this server's own <span class="mono">/mcp</span>
+      endpoint, and the <span class="mono">kiln mcp</span> subprocess. Which one
+      an agent can use is not a preference — a connector added in the Claude
+      apps is dialled by Anthropic's servers, so it needs a public https address,
+      while an agent on your machine reaches whatever you can.</p>
       <p>Keys are shown once. kiln stores a hash, not the key, so a lost one is
       replaced rather than recovered.</p>`,
   },
@@ -2995,11 +3000,22 @@ async function showMembers() {
 
 // showSteering edits the purpose and schema documents: the main lever for
 // changing a wiki's character, injected into every prompt from the next run.
+// Which agent's instructions are showing. View state, not persisted: most
+// people connect one agent once, and the first panel is the common case.
+let mcpAgent = "claude-code";
+
 // showMCP is the setup page for reading this bench from an agent. Everything an
 // agent needs is here rather than in a README the reader would have to go and
-// find: the command, the URL of this very instance, the bench slug, and the key
-// -- which used to require a shell on the host running `kiln admin token
-// create`, a step nobody with only a browser could take.
+// find: the endpoint of this very instance, the exact command or config for the
+// agent doing the connecting, and the key -- which used to require a shell on
+// the host running `kiln admin token create`, a step nobody with only a browser
+// could take.
+//
+// The page used to offer one answer, the `kiln mcp` subprocess, which is now
+// the answer for exactly one of the four agents below. Serving MCP over HTTP
+// made the endpoint the primary way in, and the reader's first question became
+// which of the two their agent wants -- so the page asks that first and then
+// says one thing.
 async function showMCP() {
   const view = beginView("Agent access", "mcp");
   try {
@@ -3028,34 +3044,126 @@ async function showMCP() {
 
     const ws = state.workspace || "your-bench";
     const origin = location.origin;
-    const config = JSON.stringify({
+    const endpoint = `${origin}/mcp`;
+    // The key is a placeholder in every snippet on this page. Substituting a
+    // real one would put it in the DOM of a page that stays open, and the
+    // whole point of showing a key once is that it does not linger.
+    const keyish = anonymous ? "" : "kiln_...";
+
+    // Two ways in, and which one an agent can use is not a preference: a
+    // connector added in the Claude apps is dialled by Anthropic's servers, so
+    // a loopback or private address is unreachable no matter how it is spelled.
+    // The panel for each agent says which side of that line it is on rather
+    // than offering both and letting the reader find out by failing.
+    const remoteReachable = /^https:$/.test(location.protocol);
+
+    const agents = [
+      { key: "claude-code", label: "Claude Code" },
+      { key: "claude-desktop", label: "Claude Desktop" },
+      { key: "claude-web", label: "Claude.ai" },
+      { key: "other", label: "Other client" },
+    ];
+
+    const desktopConfig = JSON.stringify({
       mcpServers: {
         kiln: {
           command: "kiln",
-          args: ["mcp", "--url", origin, "--workspace", ws],
-          ...(anonymous ? {} : { env: { KILN_TOKEN: "<your key>" } }),
+          args: ["mcp", "--url", origin],
+          ...(anonymous ? {} : { env: { KILN_TOKEN: keyish } }),
         },
       },
     }, null, 2);
+
+    const codeCmd = anonymous
+      ? `claude mcp add --transport http kiln ${endpoint}`
+      : `claude mcp add --transport http kiln ${endpoint} \\\n  --header "Authorization: Bearer ${keyish}"`;
+
+    // Each panel is the whole answer for one agent: what to run or paste, where
+    // it goes, and the one caveat that actually bites. Written out rather than
+    // generated from a table because the caveats do not rhyme with each other.
+    const panels = {
+      "claude-code": `
+        <p class="hint">Runs on your machine and dials the endpoint itself, so any
+          address you can reach works — including this one over plain http.</p>
+        <div class="copybox">
+          <pre class="mono" id="mcp-snip-claude-code">${esc(codeCmd)}</pre>
+          <button class="btn quiet" data-copy="mcp-snip-claude-code">Copy</button>
+        </div>
+        <p class="hint">Check it with <span class="mono">claude mcp list</span> — the
+          entry should read <span class="mono">✔ Connected</span>.</p>`,
+      "claude-desktop": `
+        <p class="hint">The desktop app's connector list is fetched by Anthropic's
+          servers, so it cannot reach a private address. Run kiln as a local
+          subprocess instead — no reachable URL, no TLS.</p>
+        <p class="hint">Paste into <span class="mono">claude_desktop_config.json</span>
+          (<span class="mono">~/Library/Application Support/Claude/</span> on macOS,
+          <span class="mono">%APPDATA%\\Claude\\</span> on Windows), then restart the app.</p>
+        <div class="copybox">
+          <pre class="mono" id="mcp-snip-claude-desktop">${esc(desktopConfig)}</pre>
+          <button class="btn quiet" data-copy="mcp-snip-claude-desktop">Copy</button>
+        </div>
+        <p class="hint"><span class="mono">kiln</span> must be on your
+          <span class="mono">PATH</span>, or give an absolute path. Add
+          <span class="mono">"--workspace", "${esc(ws)}"</span> to the args only to
+          confine the agent to this bench — without it, it reaches every bench the
+          key allows.</p>`,
+      "claude-web": `
+        <p class="hint"><em>Settings → Connectors → Add custom connector</em>, with this
+          endpoint.</p>
+        <div class="copybox">
+          <pre class="mono" id="mcp-snip-claude-web">${esc(endpoint)}</pre>
+          <button class="btn quiet" data-copy="mcp-snip-claude-web">Copy</button>
+        </div>
+        ${remoteReachable ? "" : `<div class="banner">This page is served over
+          <span class="mono">${esc(location.protocol.replace(":", ""))}</span>, and a
+          custom connector is fetched by Anthropic's servers over the public internet.
+          It will not reach this address. Serve kiln over https on a public name —
+          set <span class="mono">public_url</span> behind a terminating proxy — and
+          use that origin here.</div>`}
+        ${anonymous
+          ? `<p class="hint">This instance runs with authentication disabled, so the
+             connector needs no credential once it is reachable.</p>`
+          : `<p class="hint">Put the key in the dialog's <strong>Request headers</strong>
+             section: name <span class="mono">Authorization</span>, value
+             <span class="mono">Bearer ${esc(keyish)}</span> — including the word
+             <span class="mono">Bearer</span>. That field is in beta; kiln does not
+             implement the OAuth flows the other connector auth types need.</p>`}`,
+      other: `
+        <p class="hint">Anything that speaks Streamable HTTP takes the endpoint
+          ${anonymous ? "as it is" : "plus a bearer header"}.</p>
+        <div class="copybox">
+          <pre class="mono" id="mcp-snip-other">${esc(anonymous
+            ? endpoint
+            : `${endpoint}\nAuthorization: Bearer ${keyish}`)}</pre>
+          <button class="btn quiet" data-copy="mcp-snip-other">Copy</button>
+        </div>
+        <p class="hint">A client that wants a command rather than a URL — or that runs
+          somewhere this address does not resolve — takes the subprocess form under
+          Claude Desktop instead. Both run the same tools against the same API.</p>`,
+    };
 
     if (!view.done(`${viewHead("Agent access", "mcp")}
       <p class="hint">Point Claude, or any MCP-capable agent, at this bench so it
         answers from the compiled wiki instead of re-reading your sources.</p>
 
-      <div class="group-label">1 · Configuration</div>
-      <p class="hint">Add this to your agent's MCP configuration. The command runs
-        the same <span class="mono">kiln</span> binary that serves this page.</p>
+      <div class="group-label">1 · Endpoint</div>
+      <p class="hint">This instance serves MCP over Streamable HTTP. There is nothing
+        to enable and nothing to run — the server holding this page is the server an
+        agent talks to.</p>
       <div class="copybox">
-        <pre class="mono" id="mcp-config">${esc(config)}</pre>
-        <button class="btn quiet" data-copy="mcp-config">Copy</button>
+        <pre class="mono" id="mcp-endpoint">${esc(endpoint)}</pre>
+        <button class="btn quiet" data-copy="mcp-endpoint">Copy</button>
       </div>
-      <p class="hint">Reading is over the HTTP API, so the agent needs no database
-        credentials and works against this instance from anywhere it can reach
-        <span class="mono">${esc(origin)}</span>. Drop
-        <span class="mono">--workspace</span> and every tool takes a bench argument
-        instead.</p>
 
-      <div class="group-label">2 · Keys</div>
+      <div class="group-label">2 · Your agent</div>
+      <div class="pills" role="group" aria-label="Choose an agent">
+        ${agents.map((a) => `<button class="pill" data-agent="${a.key}"
+          aria-pressed="${mcpAgent === a.key}">${esc(a.label)}</button>`).join("")}
+      </div>
+      ${agents.map((a) => `<div data-agent-panel="${a.key}"
+        ${mcpAgent === a.key ? "" : "hidden"}>${panels[a.key]}</div>`).join("")}
+
+      <div class="group-label">3 · Keys</div>
       ${keys
         ? `<p class="hint">A key carries the read scope and nothing else, and sees
              exactly the benches you do. It is shown once — kiln stores only a
@@ -3074,7 +3182,7 @@ async function showMCP() {
                 the configuration above.`
              : esc(keysErr || "This instance does not issue keys.")}</div>`}
 
-      <div class="group-label">3 · What the agent gets</div>
+      <div class="group-label">4 · What the agent gets</div>
       <p class="hint">Seven tools. <span class="mono">search_wiki</span> and
         <span class="mono">read_page</span> carry most traffic, with
         <span class="mono">wiki_overview</span> for orientation,
@@ -3085,6 +3193,22 @@ async function showMCP() {
         <em>"the wiki has not covered X yet"</em>.</p>`)) return;
 
     wireCopyButtons();
+
+    // Switching agents swaps panels rather than re-rendering the view: a key
+    // generated a moment ago is sitting in the markup below, shown once, and a
+    // re-render would take it away while the reader was still copying it.
+    for (const b of document.querySelectorAll("[data-agent]")) {
+      b.addEventListener("click", () => {
+        mcpAgent = b.dataset.agent;
+        for (const p of document.querySelectorAll("[data-agent-panel]")) {
+          p.hidden = p.dataset.agentPanel !== mcpAgent;
+        }
+        for (const other of document.querySelectorAll("[data-agent]")) {
+          other.setAttribute("aria-pressed", String(other.dataset.agent === mcpAgent));
+        }
+      });
+    }
+
     if (!keys) return;
 
     const note = (msg, isErr) => {
