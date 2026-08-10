@@ -168,6 +168,57 @@ func TestReviewQueueThroughTheAPI(t *testing.T) {
 	}
 }
 
+// Asking for a gap is the one place a human adds to the review queue directly.
+// It must file exactly one question however many times it is asked, and must
+// refuse a slug the wiki never asked for -- the queue is what people read when
+// deciding what to build.
+func TestAskingForAGapFilesOneReview(t *testing.T) {
+	srv, js, ws := testServer(t)
+	seed(t, js, ws)
+
+	// The seeded wiki links to a page nobody has written.
+	const ask = "/api/v1/workspaces/demo/gaps/never-written/request"
+	if code := send(t, srv, http.MethodPost, ask, "", map[string]any{}, nil); code != http.StatusAccepted {
+		t.Fatalf("ask = %d, want 202", code)
+	}
+
+	var reviews []map[string]any
+	if code := send(t, srv, http.MethodGet, "/api/v1/workspaces/demo/reviews", "", nil, &reviews); code != http.StatusOK {
+		t.Fatalf("GET reviews = %d, want 200", code)
+	}
+	if len(reviews) != 1 {
+		t.Fatalf("open reviews = %d, want 1", len(reviews))
+	}
+	if kind, _ := reviews[0]["kind"].(string); kind != "gap" {
+		t.Errorf("kind = %q, want gap", kind)
+	}
+	if title, _ := reviews[0]["title"].(string); !strings.Contains(title, "never-written") {
+		t.Errorf("title = %q, want it to name the missing page", title)
+	}
+	// The detail counts the pages that wanted it, so the question carries its
+	// own evidence rather than sending the reader back to the Gaps view.
+	if detail, _ := reviews[0]["detail"].(string); !strings.Contains(detail, "1 page link") {
+		t.Errorf("detail = %q, want the inbound count", detail)
+	}
+
+	// Asking twice asks once: the queue holds a question, not a click count.
+	if code := send(t, srv, http.MethodPost, ask, "", map[string]any{}, nil); code != http.StatusAccepted {
+		t.Fatalf("second ask = %d, want 202", code)
+	}
+	if code := send(t, srv, http.MethodGet, "/api/v1/workspaces/demo/reviews", "", nil, &reviews); code != http.StatusOK {
+		t.Fatal("GET reviews after asking twice failed")
+	}
+	if len(reviews) != 1 {
+		t.Errorf("open reviews after asking twice = %d, want 1", len(reviews))
+	}
+
+	// A slug nothing links to is not a gap, so there is nothing to ask for.
+	if code := send(t, srv, http.MethodPost,
+		"/api/v1/workspaces/demo/gaps/not-a-gap/request", "", map[string]any{}, nil); code != http.StatusNotFound {
+		t.Errorf("ask for a non-gap = %d, want 404", code)
+	}
+}
+
 // fileReview puts one open review item of a given kind on the bench and
 // returns its id, so a test can act on it through the API.
 func fileReview(t *testing.T, js *store.WikiStore, ws, kind, title string) string {

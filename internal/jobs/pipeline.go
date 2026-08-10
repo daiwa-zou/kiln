@@ -641,7 +641,7 @@ func (p *Pipeline) generateUnit(
 			return res
 		}
 
-		p.stampDates(collected, sc.existingCreated)
+		p.stampDates(collected, sc.existingCreated, req.Ref)
 
 		lastViolations = append(parseViolations, wiki.ValidateBatch(collected, wiki.ValidateOptions{
 			KnownSlugs:     sc.known,
@@ -737,10 +737,17 @@ func sourceTallies(m *mapper.WorkspaceMap) []wiki.SourceTally {
 	return out
 }
 
-// stampDates fills created/updated. Updated is always the run date -- the page
-// was regenerated today -- while Created survives from the page being replaced,
-// which is the contract the frontmatter documents.
-func (p *Pipeline) stampDates(pages []*wiki.Page, existingCreated map[string]string) {
+// stampDates fills created/updated and the revision the page was written from.
+// Updated is always the run date -- the page was regenerated today -- while
+// Created survives from the page being replaced, which is the contract the
+// frontmatter documents.
+//
+// BuiltAtRef is what lets a reader be told which pages have fallen behind their
+// sources. The field and its column already existed but only the generated
+// overview ever filled them, so every page reported "unknown" and freshness
+// could not be shown at all. A run with no ref (uploads, web pages) leaves it
+// empty, which reads as unknown rather than as current.
+func (p *Pipeline) stampDates(pages []*wiki.Page, existingCreated map[string]string, ref string) {
 	today := p.now().Format(wiki.DateFormat)
 	for _, pg := range pages {
 		if pg.Meta.Created == "" {
@@ -751,6 +758,7 @@ func (p *Pipeline) stampDates(pages []*wiki.Page, existingCreated map[string]str
 			}
 		}
 		pg.Meta.Updated = today
+		pg.Meta.BuiltAtRef = ref
 	}
 }
 
