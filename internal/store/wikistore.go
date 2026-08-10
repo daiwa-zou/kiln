@@ -222,6 +222,30 @@ func (s *WikiStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 	return tx.Commit(ctx)
 }
 
+// RenameDocuments records what ingest worked out each uploaded document is
+// called. Keyed on path, which is what the row is unique on; a file deleted
+// between the sync and this call simply matches nothing.
+//
+// Only writes where the name actually differs, so a rebuild that learned
+// nothing new leaves updated_at alone -- the Ingest list sorts and reports on
+// that column, and touching every row on every build would make an unchanged
+// bench look freshly edited.
+func (s *WikiStore) RenameDocuments(ctx context.Context, workspaceID string, names map[string]string) error {
+	for path, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, err := s.pool.Exec(ctx, `
+			UPDATE workspace_files
+			SET display_name = $3, updated_at = now()
+			WHERE workspace_id = $1 AND path = $2 AND display_name IS DISTINCT FROM $3`,
+			workspaceID, path, name); err != nil {
+			return fmt.Errorf("store: rename document %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
 // writeArtifacts persists the derived index, overview, and log.
 //
 // The index and overview are replaced wholesale: they are pure functions of the

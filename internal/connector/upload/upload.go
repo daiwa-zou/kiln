@@ -21,6 +21,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/extract"
 	"github.com/daiwa-zou/kiln/internal/mapper/docmap"
+	"github.com/daiwa-zou/kiln/internal/naming"
 )
 
 // Connector reads a directory of documents.
@@ -115,14 +116,14 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		set.Items = append(set.Items, connector.Item{
 			Key:    key,
 			Kind:   "doc",
-			Title:  titleOf(rel, res.Text),
+			Title:  naming.FromDocument(rel, res.Text),
 			Hash:   res.Hash,
 			Path:   staged,
 			Origin: rel,
 			Meta:   map[string]any{"format": string(res.Format), "tool": res.Tool},
 		})
 		docs = append(docs, docmap.Doc{
-			Key: key, Path: staged, Title: titleOf(rel, res.Text),
+			Key: key, Path: staged, Title: naming.FromDocument(rel, res.Text),
 			Text: res.Text, Hash: res.Hash, Origin: rel,
 		})
 	}
@@ -224,17 +225,4 @@ func stage(dst, rel, text string) (string, error) {
 		return "", fmt.Errorf("connector/upload: stage %s: %w", rel, err)
 	}
 	return staged, nil
-}
-
-// titleOf prefers the document's first heading and falls back to its filename.
-func titleOf(rel, text string) string {
-	for _, line := range strings.Split(text, "\n") {
-		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "# "); ok {
-			if title := strings.TrimSpace(after); title != "" {
-				return title
-			}
-		}
-	}
-	base := filepath.Base(rel)
-	return strings.TrimSuffix(base, filepath.Ext(base))
 }
