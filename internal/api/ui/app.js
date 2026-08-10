@@ -197,6 +197,17 @@ const VIEW_HELP = {
       their sources next change, or on a forced rebuild — steering shapes pages
       as they are written rather than rewriting what is already there.</p>`,
   },
+  mcp: {
+    title: "Agent access (MCP)",
+    body: `<p>MCP is how an agent reads this bench: it asks the compiled wiki
+      instead of re-reading your sources every time, which is faster and far
+      cheaper than handing it the raw material.</p>
+      <p>The agent reads over the HTTP API, so it needs no database credentials
+      and works against this instance from anywhere it can reach it. A key
+      carries the read scope only and sees exactly the benches you do.</p>
+      <p>Keys are shown once. kiln stores a hash, not the key, so a lost one is
+      replaced rather than recovered.</p>`,
+  },
   members: {
     title: "Members",
     body: `<p>Who can reach this bench and what they may do. Viewers can read,
@@ -1730,6 +1741,199 @@ async function showMembers() {
 
 // showSteering edits the purpose and schema documents: the main lever for
 // changing a wiki's character, injected into every prompt from the next run.
+// showMCP is the setup page for reading this bench from an agent. Everything an
+// agent needs is here rather than in a README the reader would have to go and
+// find: the command, the URL of this very instance, the bench slug, and the key
+// -- which used to require a shell on the host running `kiln admin token
+// create`, a step nobody with only a browser could take.
+async function showMCP() {
+  const view = beginView("Agent access", "mcp");
+  try {
+    // Whether keys exist at all is a property of the deployment. With auth
+    // disabled there is no identity to attach one to, the token routes are not
+    // mounted, and asking for them would surface a bare 404 -- so ask who the
+    // caller is first and say the useful thing instead.
+    let keys = null, keysErr = "", anonymous = false;
+    try {
+      const me = await api("/me");
+      anonymous = Boolean(me?.anonymous);
+    } catch (err) {
+      if (err?.handled) return;
+      // No /me at all is the same situation from the reader's point of view:
+      // this deployment has no accounts, so it has no keys.
+      anonymous = true;
+    }
+    if (!anonymous) {
+      try {
+        keys = await api("/tokens");
+      } catch (err) {
+        if (err?.handled) return;
+        keysErr = err.message;
+      }
+    }
+
+    const ws = state.workspace || "your-bench";
+    const origin = location.origin;
+    const config = JSON.stringify({
+      mcpServers: {
+        kiln: {
+          command: "kiln",
+          args: ["mcp", "--url", origin, "--workspace", ws],
+          ...(anonymous ? {} : { env: { KILN_TOKEN: "<your key>" } }),
+        },
+      },
+    }, null, 2);
+
+    if (!view.done(`${viewHead("Agent access", "mcp")}
+      <p class="hint">Point Claude, or any MCP-capable agent, at this bench so it
+        answers from the compiled wiki instead of re-reading your sources.</p>
+
+      <div class="group-label">1 · Configuration</div>
+      <p class="hint">Add this to your agent's MCP configuration. The command runs
+        the same <span class="mono">kiln</span> binary that serves this page.</p>
+      <div class="copybox">
+        <pre class="mono" id="mcp-config">${esc(config)}</pre>
+        <button class="btn quiet" data-copy="mcp-config">Copy</button>
+      </div>
+      <p class="hint">Reading is over the HTTP API, so the agent needs no database
+        credentials and works against this instance from anywhere it can reach
+        <span class="mono">${esc(origin)}</span>. Drop
+        <span class="mono">--workspace</span> and every tool takes a bench argument
+        instead.</p>
+
+      <div class="group-label">2 · Keys</div>
+      ${keys
+        ? `<p class="hint">A key carries the read scope and nothing else, and sees
+             exactly the benches you do. It is shown once — kiln stores only a
+             hash — so copy it when it appears.</p>
+           <div class="meta">
+             <input id="mcp-key-name" type="text" placeholder="What is it for? e.g. laptop Claude"
+                    aria-label="Key name" maxlength="60">
+             <button class="btn" id="mcp-key-new">Generate a key</button>
+           </div>
+           <div id="mcp-key-note" class="hint" role="status"></div>
+           <div id="mcp-key-fresh"></div>
+           <div id="mcp-keys">${keyRows(keys)}</div>`
+        : `<div class="empty">${anonymous
+             ? `This instance runs with authentication disabled, so agents connect
+                without a key — leave <span class="mono">KILN_TOKEN</span> out of
+                the configuration above.`
+             : esc(keysErr || "This instance does not issue keys.")}</div>`}
+
+      <div class="group-label">3 · What the agent gets</div>
+      <p class="hint">Seven tools. <span class="mono">search_wiki</span> and
+        <span class="mono">read_page</span> carry most traffic, with
+        <span class="mono">wiki_overview</span> for orientation,
+        <span class="mono">list_benches</span> and <span class="mono">list_pages</span>
+        for enumeration, <span class="mono">page_backlinks</span> for context, and
+        <span class="mono">wiki_gaps</span> — which is what lets an agent tell
+        <em>"the wiki says nothing about X"</em> from
+        <em>"the wiki has not covered X yet"</em>.</p>`)) return;
+
+    wireCopyButtons();
+    if (!keys) return;
+
+    const note = (msg, isErr) => {
+      const n = $("mcp-key-note");
+      if (n) { n.textContent = msg || ""; n.classList.toggle("error", Boolean(isErr)); }
+    };
+
+    once($("mcp-key-new"), async () => {
+      note("");
+      try {
+        const made = await api("/tokens", {
+          method: "POST", body: { name: $("mcp-key-name").value },
+        });
+        $("mcp-key-name").value = "";
+        // Shown once, in full, with the warning attached to the thing itself
+        // rather than to a paragraph above it that has already been read.
+        $("mcp-key-fresh").innerHTML = `
+          <div class="review key-fresh">
+            <strong>${esc(made.name)} — copy it now</strong>
+            <div class="hint">This is the only time it is shown. kiln keeps a hash,
+              so it cannot be shown again; generate another if it is lost.</div>
+            <div class="copybox">
+              <pre class="mono" id="mcp-key-plain">${esc(made.token)}</pre>
+              <button class="btn quiet" data-copy="mcp-key-plain">Copy</button>
+            </div>
+          </div>`;
+        wireCopyButtons();
+        await refreshKeys();
+      } catch (err) {
+        if (!err.handled) note(err.message, true);
+      }
+    });
+
+    async function refreshKeys() {
+      const rows = await api("/tokens");
+      $("mcp-keys").innerHTML = keyRows(rows);
+      wireRevoke();
+    }
+
+    function wireRevoke() {
+      for (const b of document.querySelectorAll("[data-revoke]")) {
+        once(b, async () => {
+          if (!armButton(b, "revoke")) return;
+          try {
+            await api(`/tokens/${encodeURIComponent(b.dataset.revoke)}`, { method: "DELETE" });
+            toast("Key revoked");
+            await refreshKeys();
+          } catch (err) {
+            if (!err.handled) note(err.message, true);
+          }
+        });
+      }
+    }
+    wireRevoke();
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
+}
+
+// keyRows lists live keys. Never the key itself -- only a hash is stored, so
+// there is nothing here to leak even if this markup were.
+//
+// Expiry is an absolute date, not relTime: that renders distance into the past
+// and answers "today" for everything still ahead, which for a key a year from
+// expiring is the one reading that would alarm someone for no reason.
+function keyRows(keys) {
+  if (!keys.length) {
+    return `<div class="empty">No keys yet. Generate one to connect an agent.</div>`;
+  }
+  return `<div class="review">${keys.map((k) => `
+    <div class="row">
+      <span>${esc(k.name)} <span class="count">${(k.scopes || []).join(", ")}</span></span>
+      <span>
+        <span class="count">${k.lastUsed ? `last used ${esc(relTime(k.lastUsed))}` : "never used"}</span>
+        ${k.expires ? `<span class="count">expires ${esc(k.expires.slice(0, 10))}</span>` : ""}
+        <button class="btn quiet" data-revoke="${esc(k.id)}">revoke</button>
+      </span>
+    </div>`).join("")}</div>`;
+}
+
+// wireCopyButtons binds every [data-copy] to the id it names. Falls back to
+// selecting the text when the clipboard is unavailable -- an insecure origin,
+// or a browser that refuses -- so the button is never a dead end.
+function wireCopyButtons() {
+  for (const b of document.querySelectorAll("[data-copy]")) {
+    b.addEventListener("click", async () => {
+      const src = $(b.dataset.copy);
+      if (!src) return;
+      try {
+        await navigator.clipboard.writeText(src.textContent);
+        toast("Copied");
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(src);
+        const sel = getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        toast("Select and copy — this browser blocked the clipboard");
+      }
+    });
+  }
+}
+
 async function showSteering() {
   const view = beginView("Steering", "steering");
   try {
@@ -1906,6 +2110,7 @@ function route() {
   // routable so bookmarks and habit survive.
   if (hash === "ingest" || hash === "ingestion" || hash === "sources" || hash === "runs") return showSources();
   if (hash === "members") return showMembers();
+  if (hash === "mcp") return showMCP();
   if (hash === "steering") return showSteering();
   // The default landing, and the explicit one, both route through the same
   // check -- an empty hash is the common case on first load.
@@ -1934,6 +2139,7 @@ const VIEW_COMMANDS = [
   { title: "Overview", hash: "#/overview" }, { title: "Index", hash: "#/index" },
   { title: "Graph", hash: "#/graph" }, { title: "Gaps", hash: "#/gaps" },
   { title: "Ingest", hash: "#/ingest" }, { title: "Log", hash: "#/log" },
+  { title: "Agent access (MCP)", hash: "#/mcp" },
   { title: "Reviews", hash: "#/reviews" },
   { title: "Steering", hash: "#/steering" }, { title: "Members", hash: "#/members" },
 ];

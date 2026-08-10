@@ -480,6 +480,30 @@
   }
   .help-btn:hover { color: var(--ember); border-color: var(--ember); }
 
+  /* A block meant to be taken away: config to paste, a key to copy. The copy
+     button sits with the text rather than above it, so what the button acts on
+     is never in question. */
+  .copybox {
+    display: flex; align-items: flex-start; gap: 8px;
+    margin: 8px 0 12px;
+  }
+  .copybox pre {
+    flex: 1 1 auto; min-width: 0; margin: 0;
+    padding: 10px 12px; border-radius: 8px;
+    background: var(--surface); border: 1px solid var(--border);
+    font-size: 12.5px; line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .copybox .btn { flex: none; }
+  /* A key on screen for the only time it will ever be shown. */
+  .key-fresh { border-color: var(--ember); }
+  .key-fresh strong { color: var(--ember); }
+  #mcp-key-name {
+    flex: 1 1 220px; max-width: 320px;
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 9px; font-size: 14px; font-family: var(--sans);
+  }
+
   /* A bench being fired. This replaced the sentence "A build is running now",
      which spent a line telling the reader something the page could show them.
      The ember burns in the kiln's mouth while units are being written. */

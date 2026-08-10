@@ -271,6 +271,15 @@ func (s *Server) mountRoutes(r chi.Router) {
 			if s.Users != nil {
 				r.Get("/me", s.handleMe)
 			}
+			// Agent keys, for the MCP server to carry. Mounted only where
+			// there is a database to hold them and an identity to own them:
+			// with auth disabled every caller is already trusted and a key
+			// would guard nothing, which the handlers say rather than mint.
+			if s.SessionPool != nil && s.Auth != nil {
+				r.Get("/tokens", s.handleTokensList)
+				r.With(writeLimiter(s.writeLimit)).Post("/tokens", s.handleTokenCreate)
+				r.With(writeLimiter(s.writeLimit)).Delete("/tokens/{id}", s.handleTokenRevoke)
+			}
 			r.Get("/workspaces", s.handleWorkspaces)
 			if s.Workspaces != nil {
 				r.With(writeLimiter(s.writeLimit)).
