@@ -240,16 +240,13 @@ const VIEW_HELP = {
       the next build — nothing is destroyed until you say so.</p>
       <p>A question about the material can be handed back to a worker, which
       re-reads the sources and attaches what it finds. You still make the
-      call.</p>`,
-  },
-  gaps: {
-    title: "Gaps",
-    body: `<p>Pages that existing content links to but that have never been
-      written. They are the wiki's own account of what it knows it is
-      missing.</p>
-      <p>This is what lets an agent tell <em>"the wiki says nothing about X"</em>
-      from <em>"the wiki has not covered X yet"</em> — a distinction that is
-      invisible without it.</p>`,
+      call.</p>
+      <p>The <em>Gaps</em> queue is the same idea one step earlier: pages that
+      existing content links to but that have never been written — the wiki's
+      own account of what it knows it is missing. Asking for one files it here
+      as a question, so the next build plans the page. It is also what lets an
+      agent tell <em>"the wiki says nothing about X"</em> from <em>"the wiki has
+      not covered X yet"</em>.</p>`,
   },
   graph: {
     title: "Graph",
@@ -751,7 +748,7 @@ function syncNavForEmptyBench() {
   // anchor itself would delete.
   const overview = document.querySelector('.nav a[data-view="overview"] span');
   if (overview) overview.textContent = empty ? "Get started" : "Overview";
-  for (const view of ["index", "graph", "gaps", "log"]) {
+  for (const view of ["index", "graph", "log"]) {
     const a = document.querySelector(`.nav a[data-view="${view}"]`);
     if (a) a.classList.toggle("nav-waiting", Boolean(empty));
   }
@@ -1173,18 +1170,6 @@ function updateReviewsBadge(count) {
   b.setAttribute("aria-label", `${count} open review${count === 1 ? "" : "s"}`);
 }
 
-// The rail's Gaps entry carries what it would cost you to look: a bench with
-// no gaps says nothing rather than "0".
-async function refreshGapsCount() {
-  const el = $("gaps-count");
-  if (!el) return;
-  try {
-    const gaps = await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`);
-    el.hidden = !gaps.length;
-    el.textContent = String(gaps.length);
-  } catch { el.hidden = true; /* decoration; the next tick retries */ }
-}
-
 async function refreshReviewsBadge() {
   try {
     // Rides the revision-keyed etagCache: idle ticks are 304s.
@@ -1208,7 +1193,6 @@ async function pollTick() {
   if (ws !== state.workspace) return; // raced a workspace switch
 
   refreshReviewsBadge();
-  refreshGapsCount();
   // A build can start from a webhook, the CLI, or another tab. The 5s run poll
   // only runs while this tab already knows one is live, so the slow tick is
   // what notices a build that began while nobody was looking.
@@ -1706,63 +1690,6 @@ async function showLog() {
   }
 }
 
-async function showGaps() {
-  const view = beginView("Gaps", "gaps");
-  try {
-    const gaps = await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`);
-    if (!gaps.length) {
-      view.done(`${viewHead("Gaps", "gaps")}<div class="empty">
-        ${state.pages.length
-          ? "No gaps — every link resolves to an existing page."
-          : `Nothing to check yet — gaps are links the wiki wants and does not have. <a href="#/overview">Start here</a>.`}</div>`);
-      return;
-    }
-    // Demand is scaled against the most-wanted gap, so the bars compare with
-    // each other rather than with an invented ceiling.
-    const peak = Math.max(...gaps.map((g) => Number(g.wantedBy) || 0), 1);
-    if (!view.done(`${viewHead("Gaps", "gaps")}
-      <p class="view-deck">Pages existing content links to but that have never been
-        written — the wiki's own account of what it is missing.</p>
-      <div id="gap-note" class="hint" role="status"></div>
-      <div class="card rows">
-        ${gaps.map((g) => `<div class="gap-row">
-          <span class="slug">${esc(g.slug)}</span>
-          <div class="bar"><span class="fill-soft" data-w="${Math.round((Number(g.wantedBy) || 0) / peak * 100)}"></span></div>
-          <span class="count">wanted by ${esc(g.wantedBy)} page${g.wantedBy === 1 ? "" : "s"}</span>
-          <button class="btn quiet gap-ask" data-gap="${esc(g.slug)}">Ask for it</button>
-        </div>`).join("")}
-      </div>`)) return;
-    sizeBars($("main"));
-
-    // Asking files a gap review, so the next plan covers the page. The server
-    // deduplicates open items on kind and title -- asking twice asks once --
-    // and the button says so rather than pretending each click did something.
-    // Not once(): that helper hands the button back on the way out, and this
-    // one must stay spent -- the answer to "ask again?" is that you already did.
-    for (const b of document.querySelectorAll("[data-gap]")) {
-      b.addEventListener("click", async () => {
-        if (b.disabled) return;
-        b.disabled = true;
-        try {
-          await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps/${encodeURIComponent(b.dataset.gap)}/request`,
-            { method: "POST", body: {} });
-          b.textContent = "Asked";
-          b.classList.add("asked");
-          toast("Asked — filed as a question in Reviews");
-          refreshReviewsBadge();
-        } catch (err) {
-          b.disabled = false;
-          if (err.handled) return;
-          const n = $("gap-note");
-          if (n) { n.textContent = err.message; n.classList.add("error"); }
-        }
-      });
-    }
-  } catch (err) {
-    if (!err.handled) view.done(banner(err));
-  }
-}
-
 // ---- review icons -----------------------------------------------------------
 // A review list repeats the same handful of words down the page: what is being
 // asked about. As a glyph in a tinted square that column is scannable at a
@@ -1851,24 +1778,40 @@ const kindClass = (kind) =>
 // now a filter pill rather than a separate route. Every hash it has ever had
 // stays routable.
 async function showReviews(history) {
-  if (history) reviewFilter = "answered";
+  // `true` is the resolved queue and "gaps" is the gaps queue; anything else
+  // leaves whichever pill was last chosen alone, so re-rendering after an
+  // action does not throw the reader back to Open.
+  if (history === "gaps") reviewFilter = "gaps";
+  else if (history) reviewFilter = "answered";
   const view = beginView("Reviews", "reviews");
   try {
     // "answered" covers both statuses a resolution writes, 'resolved' and
     // 'approved'; asking for either alone would hide half the history.
     const wanted = reviewFilter === "answered" ? "answered" : "open";
-    const [open, shown] = await Promise.all([
+    const [open, shown, gaps] = await Promise.all([
       api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=open`),
       wanted === "open"
         ? null
         : api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=answered`),
+      // Rides the same revision-keyed cache as everything else here, so the
+      // count on the pill costs a 304 rather than a scan.
+      api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`).catch(() => []),
     ]);
     if (!view.current()) return;
+
+    // Demand is scaled against the most-wanted gap, so the bars compare with
+    // each other rather than with an invented ceiling.
+    const peak = Math.max(...gaps.map((g) => Number(g.wantedBy) || 0), 1);
+    const gapRows = gaps.map((g) => ({
+      id: `gap:${g.slug}`, kind: "gap", gap: true, slug: g.slug, title: g.slug,
+      wantedBy: Number(g.wantedBy) || 0, peak,
+    }));
 
     const pool = wanted === "open" ? open : shown;
     // "Researching" is a flag on an open review, not a status of its own: a
     // question someone handed to a worker is still waiting for a human.
-    reviewRows = reviewFilter === "open" ? pool.filter((r) => !r.researching)
+    reviewRows = reviewFilter === "gaps" ? gapRows
+      : reviewFilter === "open" ? pool.filter((r) => !r.researching)
       : reviewFilter === "researching" ? pool.filter((r) => r.researching)
       : pool;
     if (selectedReviewIndex >= reviewRows.length) selectedReviewIndex = 0;
@@ -1876,6 +1819,7 @@ async function showReviews(history) {
     const counts = {
       open: open.filter((r) => !r.researching).length,
       researching: open.filter((r) => r.researching).length,
+      gaps: gaps.length,
     };
     const pill = (key, label) =>
       `<button class="pill" data-filter="${key}" aria-pressed="${reviewFilter === key}">${label}</button>`;
@@ -1892,6 +1836,11 @@ async function showReviews(history) {
           <div class="pills" role="group" aria-label="Filter reviews">
             ${pill("open", `Open ${counts.open}`)}
             ${pill("researching", `Researching ${counts.researching}`)}
+            ${counts.gaps || reviewFilter === "gaps"
+              // A bench with no gaps says nothing rather than "Gaps 0" -- but
+              // the queue stays reachable by hash, and arriving there to find
+              // no pill pressed is a page that looks broken.
+              ? pill("gaps", `Gaps ${counts.gaps}`) : ""}
             ${pill("answered", "Resolved")}
           </div>
         </div>
@@ -1903,16 +1852,23 @@ async function showReviews(history) {
               <span class="inbox-row-top">
                 <span class="kind-sq">${REVIEW_KIND_ICONS[r.kind] || iconUncertain}</span>
                 <span class="kind-name">${esc(r.kind)}</span>
-                <span class="inbox-row-when">${esc(relTime(r.created))}</span>
+                <span class="inbox-row-when">${r.gap
+                  ? `wanted by ${esc(r.wantedBy)}`
+                  : esc(relTime(r.created))}</span>
               </span>
               <span class="inbox-row-title">${esc(r.title)}</span>
-              <span class="inbox-row-unit">${esc(r.unit ? unitSource(r.unit).name : (r.pageSlug || ""))}</span>
+              <span class="inbox-row-unit">${r.gap ? "not written yet"
+                : esc(r.unit ? unitSource(r.unit).name : (r.pageSlug || ""))}</span>
             </button>`).join("")
             : `<div class="empty">${reviewFilter === "answered"
                 ? "Nothing resolved yet. Answered reviews are kept here as a record of what was decided."
                 : reviewFilter === "researching"
                   ? "Nothing is being researched right now."
-                  : `No open reviews. Builds file one here when they need a decision,
+                  : reviewFilter === "gaps"
+                    ? (state.pages.length
+                        ? "No gaps — every link resolves to an existing page."
+                        : "Nothing to check yet — gaps are links the wiki wants and does not have.")
+                    : `No open reviews. Builds file one here when they need a decision,
                      such as confirming a deletion after a source disappears.`}</div>`}
         </div>
       </div>
@@ -1928,8 +1884,33 @@ async function showReviews(history) {
 // reviewDetailHTML is the right pane: the question, what it rests on, and the
 // buttons that answer it. Rendered from the row already in memory, so moving
 // the selection costs no request.
+// A gap is a question the wiki is already asking -- a page its own content
+// links to and does not have -- so it belongs in the queue of things waiting on
+// a person, not in a tab of its own next to Overview and Graph. It differs from
+// the rest of the inbox in one way: nothing has filed it yet. Asking is what
+// files it, after which it appears under Open as an ordinary gap review with
+// the vocabulary that kind already has.
+function gapDetailHTML(r) {
+  return `
+    <button class="btn quiet inbox-back" id="inbox-back">← All reviews</button>
+    <div class="meta">
+      <span class="kind-pill k-gap">gap</span>
+      <span class="meta-when">wanted by ${esc(r.wantedBy)} page${r.wantedBy === 1 ? "" : "s"}</span>
+    </div>
+    <h2>${esc(r.slug)}</h2>
+    <div class="detail">Existing pages link to this and it has never been written.
+      Asking for it files a question here, so the next build plans the page.</div>
+    <div class="bar"><span class="fill-soft" data-w="${Math.round(r.wantedBy / r.peak * 100)}"></span></div>
+    <div class="action-bar">
+      <button class="btn" data-gap="${esc(r.slug)}">Ask for it</button>
+      <span class="action-hint">↑↓ to move</span>
+    </div>
+    <div id="review-note" class="hint" role="status"></div>`;
+}
+
 function reviewDetailHTML(r) {
   if (!r) return `<div class="empty">Select a review to see it here.</div>`;
+  if (r.gap) return gapDetailHTML(r);
   const acts = actionsFor(r.kind);
   const keys = (r.actions && r.actions.length ? r.actions : ["dismiss"]);
   return `
@@ -1982,6 +1963,7 @@ function wireInbox(view) {
       if (on) el.scrollIntoView({ block: "nearest" });
     }
     $("inbox-detail").innerHTML = reviewDetailHTML(reviewRows[selectedReviewIndex]);
+    sizeBars($("inbox-detail")); // a gap's demand bar; no-op for every other kind
     wireDetail();
     if (focusDetail) document.body.classList.add("inbox-detail-open");
   };
@@ -2026,6 +2008,27 @@ function wireInbox(view) {
     for (const b of document.querySelectorAll("#inbox-detail [data-review]")) {
       once(b, () => resolve(b));
     }
+    // Not once(): that helper hands the button back on the way out, and this
+    // one must stay spent -- the server deduplicates open items on kind and
+    // title, so asking twice asks once, and the button says so rather than
+    // pretending the second click did something.
+    for (const b of document.querySelectorAll("#inbox-detail [data-gap]")) {
+      b.addEventListener("click", async () => {
+        if (b.disabled) return;
+        b.disabled = true;
+        try {
+          await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps/${encodeURIComponent(b.dataset.gap)}/request`,
+            { method: "POST", body: {} });
+          b.textContent = "Asked";
+          b.classList.add("asked");
+          toast("Asked — filed as a question under Open");
+          refreshReviewsBadge();
+        } catch (err) {
+          b.disabled = false;
+          if (!err.handled) note(err.message);
+        }
+      });
+    }
     for (const b of document.querySelectorAll("#inbox-detail [data-research]")) {
       once(b, async () => {
         try {
@@ -2042,6 +2045,7 @@ function wireInbox(view) {
     }
   }
   wireDetail();
+  sizeBars($("inbox-detail"));
 
   // Document-level, so the shortcuts work anywhere on this screen rather than
   // only while a row has focus. Torn down with the view.
@@ -3597,7 +3601,6 @@ async function loadWorkspace(slug) {
   state.slugs = new Set(state.pages.map((p) => p.slug));
   route();
   armRunPoll();
-  refreshGapsCount();
 
   // Arm the live poll for this workspace. Clearing first makes workspace
   // switches safe; the first tick captures the baseline revision.
@@ -3616,11 +3619,13 @@ function route() {
   if (hash === "overview") return overviewOrGetStarted();
   if (hash === "index") return showIndex();
   if (hash === "log") return showLog();
-  if (hash === "gaps") return showGaps();
   if (hash === "graph") return showGraph();
   if (hash === "reviews") return showReviews(false);
   // reviews/all is the old hash for the same idea; keep it routable.
   if (hash === "reviews/history" || hash === "reviews/all") return showReviews(true);
+  // Gaps was its own view in the rail. It is a queue in the inbox now, and
+  // both hashes land on it -- bookmarks and habit outlive the reorganization.
+  if (hash === "gaps" || hash === "reviews/gaps") return showReviews("gaps");
   // Sources and runs merged into one view; every hash it has ever had stays
   // routable so bookmarks and habit survive.
   if (hash === "ingest" || hash === "ingestion" || hash === "sources" || hash === "runs") return showSources();
