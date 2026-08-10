@@ -1394,6 +1394,51 @@ function wireCorrections(slug) {
 // it stays one: the stat strip and the freshness bars are computed here from the
 // page summaries the rail has already loaded, and the artifact's prose is
 // rendered below them.
+// The generated overview carries two derived lists -- what the bench was
+// compiled from, and how many pages of each type came out. As markdown they
+// are bullets, which is right for the agents that read the artifact over MCP
+// and wrong for this page, where every other count is already a card and these
+// two sat underneath as a plain list in prose.
+//
+// So they are lifted out and rendered as cards, and the prose keeps what only
+// prose can carry: the lede, the agent's findings, and the entry points. The
+// artifact itself is untouched -- the split happens here, on the way to the
+// screen, rather than by asking the generator to emit markup.
+//
+// Headings are matched exactly as BuildOverview writes them. A section that is
+// missing (a bench with no sources yet writes no "reads" list at all) simply
+// yields nothing, and anything unrecognized stays in the prose where it was.
+const OVERVIEW_CARD_SECTIONS = { "What this bench reads": "reads", "Contents": "contents" };
+
+function splitOverview(md) {
+  const out = { reads: [], contents: [], rest: [] };
+  let bucket = null;
+  for (const line of String(md || "").split("\n")) {
+    const heading = /^##\s+(.*?)\s*$/.exec(line);
+    if (heading) {
+      bucket = OVERVIEW_CARD_SECTIONS[heading[1]] || null;
+      if (bucket) continue;
+    }
+    if (!bucket) { out.rest.push(line); continue; }
+    // "25 pages:" is the Contents section's own preamble, not an item.
+    const item = /^-\s+(\d[\d,]*)\s+(.+?)\s*$/.exec(line);
+    if (item) out[bucket].push({ n: item[1], noun: item[2] });
+    else if (line.trim() && !/:$/.test(line.trim())) { bucket = null; out.rest.push(line); }
+  }
+  out.rest = out.rest.join("\n");
+  return out;
+}
+
+// statGrid caps the column count at four: past that the cards are narrower than
+// the numbers they hold, and the grid classes only go that far anyway. The
+// floor of two is for the bench with a single source, whose one card otherwise
+// stretched the full width of the column with a "1" adrift in the middle of it.
+const statGrid = (items) => `<div class="stats n${Math.min(Math.max(items.length, 2), 4)}">
+  ${items.map((it) => `<div class="stat">
+    <div class="stat-label">${esc(it.noun)}</div>
+    <div class="stat-value">${esc(it.n)}</div>
+  </div>`).join("")}</div>`;
+
 async function showOverview() {
   const view = beginView("Overview", "overview");
   const ws = encodeURIComponent(state.workspace);
@@ -1433,6 +1478,8 @@ async function showOverview() {
       <div class="stat-note">${esc(note)}</div>
     </div>`;
 
+    const derived = splitOverview(artifact.body);
+
     if (!view.done(`
       <h1>${esc(bench?.name || state.workspace)}</h1>
       <p class="overview-deck">A compiled wiki, kept current as its sources change.</p>
@@ -1443,6 +1490,14 @@ async function showOverview() {
         ${stat("Open questions", open === null ? "—" : String(open.length),
           open === null ? "reviews unavailable" : "waiting for a decision in Reviews")}
       </div>
+
+      ${derived.reads.length ? `
+        <div class="sec-head"><div class="group-label">What this bench reads</div></div>
+        ${statGrid(derived.reads)}` : ""}
+
+      ${derived.contents.length ? `
+        <div class="sec-head"><div class="group-label">Contents</div></div>
+        ${statGrid(derived.contents)}` : ""}
 
       ${known && clusters.length ? `
         <div class="sec-head"><div class="group-label">Freshness by cluster</div></div>
@@ -1471,11 +1526,11 @@ async function showOverview() {
           </a>`).join("")}
         </div>` : ""}
 
-      ${artifact.body?.trim()
+      ${derived.rest.trim()
         // The artifact opens with its own "# Overview", which would be a second
         // <h1> under the bench name above. Shifted down one, it becomes the
         // heading of the generated prose section, which is what it now is.
-        ? `<div class="prose">${renderMarkdown(artifact.body, 1)}</div>` : ""}`)) return;
+        ? `<div class="prose">${renderMarkdown(derived.rest, 1)}</div>` : ""}`)) return;
     sizeBars($("main"));
   } catch (err) {
     if (!err.handled) view.done(banner(err));
