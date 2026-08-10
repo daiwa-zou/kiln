@@ -14,6 +14,12 @@ type SourceRecord struct {
 	// for CLI builds. Written exactly as-is on import — including empty — so
 	// a connector swap or a CLI rebuild never leaves stale attribution.
 	ConnectorID string
+	// NeedsRegen marks a source whose pages survived a cascade but still
+	// describe a source that has since been deleted. Set by the deletion that
+	// spared the page and cleared by the run that rewrites it, so the intent
+	// survives between the two — unlike RegeneratePages, which only exists for
+	// the duration of the run that plans the cascade.
+	NeedsRegen bool
 }
 
 // Cascade is the outcome of removing a set of sources.

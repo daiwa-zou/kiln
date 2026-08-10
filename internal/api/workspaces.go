@@ -126,12 +126,12 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 
 // handleWorkspaceDelete removes a bench and everything in it.
 //
-// This is the most destructive thing the API does, and unlike an approved
-// deletion review -- which only authorizes the next build to drop some pages --
-// nothing here is staged and nothing is recoverable. So it asks the caller to
-// name what they are deleting: the slug in the request must match the slug in
-// the path. A DELETE that fires by accident, from a mis-scripted loop or a
-// retried request, cannot supply that.
+// This is the most destructive thing the API does. Deleting a source is also
+// immediate now, but its pages are soft-deleted and recoverable for the
+// retention window; nothing here is staged and nothing is recoverable. So it
+// asks the caller to name what they are deleting: the slug in the request must
+// match the slug in the path. A DELETE that fires by accident, from a
+// mis-scripted loop or a retried request, cannot supply that.
 //
 // guardAdmin is the gate the rest of the tenancy-shaping routes use: an
 // instance admin, or an owner of the bench's org, holding a token with the

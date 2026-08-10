@@ -16,7 +16,10 @@ import (
 	"testing"
 
 	"github.com/daiwa-zou/kiln/internal/auth"
+	"github.com/daiwa-zou/kiln/internal/diff"
+	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
+	"github.com/daiwa-zou/kiln/internal/wiki"
 )
 
 // memBlobs is an in-memory blob.Store so upload tests need no filesystem or
@@ -294,6 +297,73 @@ func TestFileDeleteIsWorkspaceScoped(t *testing.T) {
 	id, _ := body["id"].(string)
 	if code := send(t, srv, http.MethodDelete, "/api/v1/workspaces/other/files/"+id, "", nil, nil); code != http.StatusNotFound {
 		t.Fatalf("cross-workspace delete = %d, want 404", code)
+	}
+}
+
+// TestFileDeleteRemovesItsWikiPages walks the surface a user actually touches:
+// upload a document, let a build write pages from it, delete it, and read the
+// wiki back. Nothing that described the document may still be there.
+func TestFileDeleteRemovesItsWikiPages(t *testing.T) {
+	srv, js, wsID := testServer(t)
+	ctx := context.Background()
+
+	code, body := upload(t, srv, "demo", "", "", "quarterly.md", []byte("# Quarterly\n"))
+	if code != http.StatusCreated {
+		t.Fatalf("upload = %d", code)
+	}
+	id, _ := body["id"].(string)
+
+	// Stand in for the build: the pages and the source record a run would have
+	// written for this document, plus one page a second source also claims.
+	docKey := diff.DocKey(diff.UploadOrigin("quarterly.md"))
+	if err := js.Import(ctx, jobs.ImportRequest{
+		WorkspaceID: wsID,
+		UpsertPages: []wiki.Page{
+			{
+				Path: "sources/quarterly.md", Slug: "quarterly",
+				Meta: wiki.Frontmatter{Type: "source", Title: "Quarterly", Created: "2026-08-10", Updated: "2026-08-10"},
+				Body: "# Quarterly\n",
+			},
+			{
+				Path: "concepts/revenue.md", Slug: "revenue",
+				Meta: wiki.Frontmatter{Type: "concept", Title: "Revenue", Created: "2026-08-10", Updated: "2026-08-10"},
+				Body: "# Revenue\n",
+			},
+		},
+		UpsertSources: []diff.SourceRecord{
+			{Key: docKey, InputHash: "h1", FilesWritten: []string{"sources/quarterly.md", "concepts/revenue.md"}},
+			{Key: diff.ModuleKey("ledger"), InputHash: "h2", FilesWritten: []string{"concepts/revenue.md"}},
+		},
+	}); err != nil {
+		t.Fatalf("seed import: %v", err)
+	}
+
+	var deleted map[string]any
+	if code := send(t, srv, http.MethodDelete, "/api/v1/workspaces/demo/files/"+id, "", nil, &deleted); code != http.StatusOK {
+		t.Fatalf("delete = %d, want 200", code)
+	}
+	// The response says what the deletion cost. "deleted" alone would hide a
+	// page removal behind a word that sounds like it only removed the upload.
+	if deleted["pagesRemoved"] != float64(1) {
+		t.Errorf("pagesRemoved = %v, want 1", deleted["pagesRemoved"])
+	}
+	if deleted["pagesRegenerating"] != float64(1) {
+		t.Errorf("pagesRegenerating = %v, want 1", deleted["pagesRegenerating"])
+	}
+
+	pages, err := js.LoadPages(ctx, wsID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := map[string]bool{}
+	for _, p := range pages {
+		live[p.Path] = true
+	}
+	if live["sources/quarterly.md"] {
+		t.Error("the document's page is still in the wiki after the document was deleted")
+	}
+	if !live["concepts/revenue.md"] {
+		t.Error("a page another source also claims was removed")
 	}
 }
 

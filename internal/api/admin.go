@@ -14,6 +14,7 @@ import (
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/crypto"
+	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
 
@@ -26,7 +27,7 @@ type AdminStore interface {
 	ListConnectors(ctx context.Context, workspaceID string) ([]store.ConnectorRow, error)
 	CreateConnector(ctx context.Context, c store.ConnectorRow) (string, error)
 	UpdateConnector(ctx context.Context, workspaceID, id string, p store.ConnectorPatch) error
-	DeleteConnector(ctx context.Context, workspaceID, id string) error
+	DeleteConnector(ctx context.Context, workspaceID, id string) (diff.Cascade, error)
 
 	CreateCredential(ctx context.Context, orgID, kind string, ciphertext, nonce []byte) (string, error)
 	ListCredentialMeta(ctx context.Context, orgID string) ([]store.CredentialMeta, error)
@@ -263,17 +264,31 @@ func (s *Server) handleConnectorPatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"id": chi.URLParam(r, "id"), "status": "updated"})
 }
 
+// handleConnectorDelete removes a connector, the sources it synced, and the
+// wiki content only those sources produced. Removing the repository a bench
+// reads and keeping the pages describing it is not a safer outcome, only a
+// quieter one: the wiki would go on asserting things with nothing left to
+// check them against.
 func (s *Server) handleConnectorDelete(w http.ResponseWriter, r *http.Request) {
 	ws, ok := s.guardAdmin(w, r)
 	if !ok {
 		return
 	}
-	err := s.Admin.DeleteConnector(r.Context(), ws.ID, chi.URLParam(r, "id"))
+	cascade, err := s.Admin.DeleteConnector(r.Context(), ws.ID, chi.URLParam(r, "id"))
 	if err != nil {
 		s.failOrNotFound(w, err, "connector not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"id": chi.URLParam(r, "id"), "status": "deleted"})
+	if s.Blobs != nil {
+		for _, key := range cascade.DeleteBlobs {
+			s.deleteBlobQuietly(r.Context(), key)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": chi.URLParam(r, "id"), "status": "deleted",
+		"pagesRemoved":      len(cascade.DeletePages),
+		"pagesRegenerating": len(cascade.RegeneratePages),
+	})
 }
 
 // credentialUsable verifies a referenced credential belongs to the

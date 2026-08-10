@@ -31,11 +31,24 @@ func (s *WikiStore) Pool() *pgxpool.Pool { return s.pool }
 
 var _ jobs.Store = (*WikiStore)(nil)
 
+// queryer is the read half that *pgxpool.Pool and pgx.Tx have in common, so a
+// loader can serve both a plain read and a step inside a transaction. Cascade
+// deletion needs the second: it plans from the same rows it is about to drop,
+// and a read outside the transaction could plan against a state the drop no
+// longer matches.
+type queryer interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
 // LoadSources returns the live source records for a workspace. These are the
 // baseline for both incremental skip and cascade deletion.
 func (s *WikiStore) LoadSources(ctx context.Context, workspaceID string) ([]diff.SourceRecord, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT key, input_hash, files_written, blob_keys
+	return loadSources(ctx, s.pool, workspaceID)
+}
+
+func loadSources(ctx context.Context, q queryer, workspaceID string) ([]diff.SourceRecord, error) {
+	rows, err := q.Query(ctx, `
+		SELECT key, input_hash, files_written, blob_keys, needs_regen
 		FROM sources
 		WHERE workspace_id = $1 AND deleted_at IS NULL
 		ORDER BY key`, workspaceID)
@@ -51,7 +64,7 @@ func (s *WikiStore) LoadSources(ctx context.Context, workspaceID string) ([]diff
 			key         string
 			files, blob []byte
 		)
-		if err := rows.Scan(&key, &rec.InputHash, &files, &blob); err != nil {
+		if err := rows.Scan(&key, &rec.InputHash, &files, &blob, &rec.NeedsRegen); err != nil {
 			return nil, fmt.Errorf("store: scan source: %w", err)
 		}
 		rec.Key = diff.Key(key)
@@ -438,6 +451,11 @@ func upsertSource(ctx context.Context, tx pgx.Tx, workspaceID string, src diff.S
 	// Attribution is written exactly as this run produced it — including
 	// NULL for CLI builds — so a connector swap or a hand rebuild never
 	// leaves a source pointing at a connector that did not sync it.
+	//
+	// needs_regen clears here and only here: this row is being written because
+	// the unit just regenerated, which is precisely the work the flag was
+	// asking for. A unit that failed never reaches this statement, so its flag
+	// survives and the next run tries again.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO sources (workspace_id, connector_id, key, kind, input_hash, files_written, blob_keys)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -446,6 +464,7 @@ func upsertSource(ctx context.Context, tx pgx.Tx, workspaceID string, src diff.S
 			input_hash = EXCLUDED.input_hash,
 			files_written = EXCLUDED.files_written,
 			blob_keys = EXCLUDED.blob_keys,
+			needs_regen = FALSE,
 			deleted_at = NULL,
 			updated_at = now()`,
 		workspaceID, nullable(src.ConnectorID), string(src.Key), src.Key.Prefix(),

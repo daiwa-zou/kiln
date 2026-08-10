@@ -316,6 +316,43 @@ func regenKeysFor(cascade diff.Cascade, sources []diff.SourceRecord, already []d
 	return out
 }
 
+// flaggedRegenKeys returns the sources a past cascade deletion marked stale:
+// their pages survived because another source also claimed them, but the prose
+// still describes the source that was deleted.
+//
+// This is regenKeysFor's counterpart for deletions that did not happen during
+// a run. A cascade planned inside the pipeline can queue the surviving owners
+// immediately; one planned by an explicit delete has no run to queue them
+// into, so the intent is persisted on the source and collected here instead.
+//
+// Same placement as regenKeysFor, and for the same reason: the input hash of a
+// source whose sibling was deleted has not changed, so anything upstream of
+// the hash gate would drop these keys.
+func flaggedRegenKeys(sources []diff.SourceRecord, m *mapper.WorkspaceMap, already []diff.Key) []diff.Key {
+	units := unitsByKey(m)
+	have := make(map[diff.Key]bool, len(already))
+	for _, k := range already {
+		have[k] = true
+	}
+
+	var out []diff.Key
+	for _, s := range sources {
+		if !s.NeedsRegen || have[s.Key] {
+			continue
+		}
+		// A flagged source whose unit is not in this map cannot be
+		// regenerated -- the material is not in front of us this run. Skipping
+		// keeps the flag set for a run that does map it, which is the same
+		// source that deletion detection would be raising a review about.
+		if _, live := units[string(s.Key)]; !live {
+			continue
+		}
+		out = append(out, s.Key)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // sanitize makes a cache key safe as a directory name. A short content hash is
 // appended because the character replacement is lossy: module:a/b and
 // module:a_b would otherwise share a scratch directory and a session ID.

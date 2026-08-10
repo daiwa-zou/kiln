@@ -512,3 +512,75 @@ func TestBuildRegeneratesCascadeSurvivors(t *testing.T) {
 		t.Errorf("Status = %q", res.Summary.Status)
 	}
 }
+
+func TestBuildRegeneratesSurvivorsOfAnEarlierDeletion(t *testing.T) {
+	// The same debt as TestBuildRegeneratesCascadeSurvivors, owed by a deletion
+	// that already happened. An explicit source delete cascades at the moment
+	// of the request, so there is no ApprovedDeletions to plan from -- only the
+	// flag it left on the source that still claims the shared page.
+	store := newMemStore()
+	store.sources[diff.ModuleKey("beta")] = diff.SourceRecord{
+		Key: diff.ModuleKey("beta"), InputHash: "h2",
+		FilesWritten: []string{"concepts/shared.md", "entities/beta.md"},
+		NeedsRegen:   true,
+	}
+
+	runner := &structuredRunner{byUnit: map[string][]agent.GeneratedPage{
+		"module:beta": {{
+			Path: "concepts/shared.md", Type: "concept", Title: "Shared",
+			Body: "# Shared\n\n" + strings.Repeat("A concept that now derives from one source. ", 8),
+		}},
+	}}
+	p := testPipeline(store, runner)
+
+	// Nothing changed and nothing is being deleted this run: the unit's hash
+	// still matches, so the flag is the only thing that can schedule the work.
+	m := testMap(mapper.Unit{Key: "module:beta", Slug: "beta", Hash: "h2"})
+	req := testRequest(t, m, diff.ChangeSet{})
+	req.ScratchDir = ""
+
+	if _, err := p.Build(context.Background(), req); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if runner.calls == 0 {
+		t.Fatal("flagged source was not regenerated; the shared page still describes a deleted source")
+	}
+	imp := store.lastImport()
+	if imp == nil {
+		t.Fatal("nothing imported")
+	}
+	if len(imp.UpsertPages) == 0 || imp.UpsertPages[0].Path != "concepts/shared.md" {
+		t.Errorf("regenerated pages = %+v, want concepts/shared.md", imp.UpsertPages)
+	}
+}
+
+func TestFlaggedSourceMissingFromTheMapIsNotScheduled(t *testing.T) {
+	// A flagged source the current map does not contain cannot be regenerated:
+	// its material is not in front of this run. Scheduling it anyway would ask
+	// the agent to rewrite a page from a unit that does not exist, and the
+	// build must instead leave the flag for a run that does map it.
+	store := newMemStore()
+	store.sources[diff.ModuleKey("beta")] = diff.SourceRecord{
+		Key: diff.ModuleKey("beta"), InputHash: "h2",
+		FilesWritten: []string{"concepts/shared.md"},
+		NeedsRegen:   true,
+	}
+
+	runner := &structuredRunner{byUnit: map[string][]agent.GeneratedPage{}}
+	p := testPipeline(store, runner)
+
+	req := testRequest(t, testMap(), diff.ChangeSet{})
+	req.ScratchDir = ""
+
+	res, err := p.Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if runner.calls != 0 {
+		t.Errorf("ran %d agent calls for a unit that is not in the map", runner.calls)
+	}
+	if res.Summary.Status != StatusNoChanges {
+		t.Errorf("Status = %q, want %q", res.Summary.Status, StatusNoChanges)
+	}
+}

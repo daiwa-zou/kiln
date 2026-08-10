@@ -149,6 +149,22 @@ function armButton(b, label) {
   return false;
 }
 
+// removalSummary phrases what a delete actually did. Deleting a source takes
+// the pages only it produced with it, so the toast has to name that -- a bare
+// "removed" reads like the upload row went and nothing else, which is the one
+// impression this action must not leave. Pages regenerating are mentioned
+// second because they are the reassuring half: shared pages survive, they are
+// only rewritten to stop describing what just left.
+function removalSummary(what, res) {
+  const removed = Number(res && res.pagesRemoved) || 0;
+  const regen = Number(res && res.pagesRegenerating) || 0;
+  const parts = [];
+  if (removed) parts.push(`${removed} ${removed === 1 ? "page" : "pages"} removed`);
+  if (regen) parts.push(`${regen} shared ${regen === 1 ? "page" : "pages"} will be rewritten on the next build`);
+  if (!parts.length) return `${what} — it had produced no pages`;
+  return `${what} — ${parts.join("; ")}`;
+}
+
 // Icon glyphs for row controls, drawn in currentColor so the quiet-button
 // palette applies. Buttons carry aria-labels; the icons are decoration.
 const iconPause = `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2h3v12H4zM9 2h3v12H9z"/></svg>`;
@@ -1111,9 +1127,9 @@ async function showSources() {
       once(b, async () => {
         if (!armButton(b, "delete")) return;
         try {
-          await api(`/workspaces/${ws}/connectors/${encodeURIComponent(b.dataset.connDelete)}`,
+          const out = await api(`/workspaces/${ws}/connectors/${encodeURIComponent(b.dataset.connDelete)}`,
             { method: "DELETE" });
-          toast("Source removed — its pages stay until a deletion is approved in Reviews");
+          toast(removalSummary("Source removed", out));
           showSources();
         } catch (err) {
           if (!err.handled) connNote(err.message, true);
@@ -1157,9 +1173,9 @@ async function showSources() {
       once(b, async () => {
         if (!armButton(b, "delete")) return;
         try {
-          await api(`/workspaces/${ws}/files/${encodeURIComponent(b.dataset.fileDelete)}`,
+          const out = await api(`/workspaces/${ws}/files/${encodeURIComponent(b.dataset.fileDelete)}`,
             { method: "DELETE" });
-          toast("Document removed — derived pages await deletion review after the next build");
+          toast(removalSummary("Document removed", out));
           showSources();
         } catch (err) {
           if (!err.handled) {
