@@ -440,38 +440,49 @@
   .dot.t-comparison { background: var(--type-comparison); }
   .dot.t-action { background: var(--ink-faint); }
 
+  /* The account sheet leads with who you are, the way a system menu does: the
+     identity is a caption, not a control, so it is not styled as one and sits
+     above everything it qualifies. Below it, rows are rows -- one shape for the
+     links and the button, icon then label -- separated into groups by a
+     hairline rather than by the words "Bench" and "Account", which were
+     labelling two entries each. */
   .signout {
-    display: block; width: 100%; text-align: left;
-    font-size: 13px; color: var(--ink-dim);
-    background: none; border: none; padding: 6px 9px; cursor: pointer;
-    min-height: 24px; border-radius: 6px; font-family: var(--sans);
+    width: 100%; text-align: left; font-size: 13.5px; color: var(--ink);
+    background: none; border: none; cursor: pointer; font-family: var(--sans);
   }
   .signout:hover { color: var(--oxide); background: var(--surface); }
+  .signout:hover .sheet-icon { opacity: 1; }
+  .sheet-group {
+    display: flex; flex-direction: column; gap: 1px;
+    padding-top: 4px; margin-top: 4px; border-top: 1px solid var(--border-soft);
+  }
+  .sheet-group[hidden] { display: none; }
+  .sheet-icon { width: 15px; height: 15px; flex: none; fill: currentColor; opacity: 0.6; }
 
   .footer-menu { position: relative; flex: none; }
   /* Opens downward from the top bar, out of flow. */
   .footer-sheet {
     position: absolute; top: calc(100% + 8px); right: 0;
-    min-width: 210px; z-index: 40;
+    min-width: 248px; z-index: 40;
     display: flex; flex-direction: column; gap: 2px;
     padding: 5px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 10px;
     box-shadow: 0 12px 32px rgba(60, 40, 20, 0.16);
   }
-  .footer-sheet-label {
-    padding: 5px 9px 4px; font-size: 10.5px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-faint);
-  }
-  .footer-sheet a {
-    display: flex; align-items: center; min-height: 24px;
-    padding: 6px 9px; border-radius: 6px; font-size: 13px; color: var(--ink-dim);
+  /* One row shape, shared by the links and the sign-out button: a 32px target
+     with the icon in a fixed gutter, so the labels start on the same x. */
+  .footer-sheet a, .footer-sheet .signout {
+    display: flex; align-items: center; gap: 10px; min-height: 32px;
+    padding: 6px 10px; border-radius: 7px; font-size: 13.5px; color: var(--ink);
     white-space: nowrap;
   }
   .footer-sheet a:hover { background: var(--surface); color: var(--ink); text-decoration: none; }
+  .footer-sheet a:hover .sheet-icon { opacity: 1; }
   .footer-sheet a[aria-current="page"] { background: var(--ink); color: var(--bg); }
-  /* Who you are, above the way out. Not a control, so it is not styled as one. */
+  .footer-sheet a[aria-current="page"] .sheet-icon { opacity: 1; }
+  /* Who you are, at the top, qualifying everything under it. */
   .account-who {
-    padding: 2px 9px 6px; font-size: 12.5px; color: var(--ink);
+    padding: 7px 10px 8px; font-size: 12.5px; color: var(--ink-faint);
     white-space: normal; line-height: 1.4;
   }
   .sheet-version {

@@ -4101,7 +4101,10 @@ async function boot() {
 
     if (localStorage.getItem(TOKEN_KEY) || csrfToken()) {
       const so = $("signout");
-      so.hidden = false;
+      // The group carries the separator above it, so an instance with nothing
+      // to sign out of must hide the wrapper too -- a bare rule under the last
+      // link is a divider between a list and nothing.
+      $("signout-group").hidden = false;
       so.addEventListener("click", async () => {
         localStorage.removeItem(TOKEN_KEY);
         // A GitHub session is server-side: revoke it, not just the cookie.
