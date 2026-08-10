@@ -298,6 +298,15 @@ function fuzzy(q, text) {
     prev = hi;
     hi += 1;
   }
+  // A subsequence spread thinly across a long title is not a match anyone
+  // meant: "policy" found S-e-r-v-i-c-e-O-n-e-(-h-y-p-o-t-h-e-t-i-c-a-l...
+  // one letter at a time and ranked it above the pages that actually say
+  // "policy". Requiring the letters to land near each other keeps the useful
+  // loose matches -- initials like "cai" for "Course AI Policy", a typo, a
+  // dropped word -- and drops the ones that only look like matches to a
+  // machine reading left to right.
+  const span = idx[idx.length - 1] - idx[0] + 1;
+  if (span > Math.max(needle.length * 3, needle.length + 6)) return null;
   score -= Math.floor(idx[idx.length - 1] / 8); // earlier matches rank higher
   return { score, idx };
 }
@@ -645,7 +654,18 @@ function renderTree(active) {
         hits.map((x) => treeLink(x.p, active, x.m.idx)), false);
     }
     $("filter-status").textContent = `${matches} page${matches === 1 ? "" : "s"} match`;
-    $("tree").innerHTML = html || `<div class="hint">No pages match.</div>`;
+    // The box narrows the tree by title, and nothing here has ever read what a
+    // page says. Someone typing a word that lives in the prose -- which is most
+    // words -- gets an empty tree from the only search-shaped control on screen
+    // and concludes search is broken, when the full-text index behind it would
+    // have answered. So the offer to actually search is part of the result, not
+    // a thing to know: it is always the last row while filtering, and the only
+    // row when nothing matched.
+    const offer = `<a class="tree-fulltext" href="#/search/${encodeURIComponent(treeFilter)}">
+      Search every page for <strong>${esc(treeFilter)}</strong><kbd>⏎</kbd></a>`;
+    $("tree").innerHTML = html
+      ? html + offer
+      : `<div class="hint tree-empty">No page titles match <strong>${esc(treeFilter)}</strong>.</div>${offer}`;
     return;
   }
   $("filter-status").textContent = "";
@@ -2063,6 +2083,15 @@ async function showGraph() {
       <h1 class="sr-only">Graph</h1>
       <div id="graph-wrap">
         <div class="graph-toolbar">
+          <div class="graph-find">
+            <input id="graph-find" type="search" autocomplete="off" spellcheck="false"
+              placeholder="Find in graph…" aria-label="Filter the graph by name or type"
+              aria-describedby="graph-find-status">
+            <button id="graph-find-neighbours" class="chip" aria-pressed="true"
+              title="Keep what the matches link to, so the relationship is visible"
+              >+ links</button>
+            <span class="graph-find-status" id="graph-find-status" role="status"></span>
+          </div>
           <div class="graph-legend" role="group" aria-label="Filter by page type">
             ${Object.entries(typeCounts).map(([t, c]) =>
               `<button class="chip" data-type="${esc(t)}" aria-pressed="true">${typeDot(t, "")}${esc(t)} ${c}</button>`).join("")}
@@ -2519,8 +2548,73 @@ async function showGraph() {
       for (const el of [...nodeEls, ...edgeEls]) el.classList.remove("graph-dim", "graph-hot");
     });
 
-    // --- legend: toggle types on and off ----------------------------------
+    // --- filters: page type, and finding by name --------------------------
+    // Both filters resolve in one pass, because they answer to the same
+    // pixels: a type switched off and a node the search did not reach are the
+    // same "not on screen right now", and two handlers each setting the class
+    // from its own half of the state meant whichever ran last won.
     const hidden = new Set();
+    let findText = "";
+    let withNeighbours = true;
+
+    // A node matches on what a reader can see of it: its title, its slug, and
+    // its type -- so "concept" narrows to concepts the same way the legend
+    // does, and a half-remembered name finds its page. Substring rather than
+    // the fuzzy matcher the rail uses: on a canvas the reader is looking for a
+    // word they can see, and a subsequence match lights up nodes that share
+    // only scattered letters.
+    const matchesFind = (i) => {
+      if (!findText) return false;
+      const n = nodes[i];
+      return (n.title || "").toLowerCase().includes(findText)
+        || n.slug.toLowerCase().includes(findText)
+        || (n.type || "").toLowerCase().includes(findText);
+    };
+
+    const applyFilters = () => {
+      const typeOK = (i) => !hidden.has(nodes[i].type);
+      const isMatch = nodes.map((_, i) => typeOK(i) && matchesFind(i));
+      const matchCount = isMatch.filter(Boolean).length;
+
+      // Neighbours of a match are kept as context, not as results. That is the
+      // whole point of searching a graph rather than a list: the answer to
+      // "what does this concept touch" is the ring around it, and hiding
+      // everything but the matches themselves leaves a scatter of dots with no
+      // relationships left to read.
+      const keep = nodes.map((_, i) => isMatch[i]);
+      if (findText && withNeighbours) {
+        isMatch.forEach((m, i) => {
+          if (m) for (const j of neighbors[i]) if (typeOK(j)) keep[j] = true;
+        });
+      }
+
+      nodeEls.forEach((el, i) => {
+        el.classList.toggle("graph-hidden", !typeOK(i) || (Boolean(findText) && !keep[i]));
+        el.classList.toggle("graph-match", Boolean(findText) && isMatch[i]);
+        // Context is visible but quiet, so the matches read as the answer.
+        el.classList.toggle("graph-context", Boolean(findText) && keep[i] && !isMatch[i]);
+      });
+      for (const el of edgeEls) {
+        const a = el._a, b = el._b;
+        const live = typeOK(a) && typeOK(b) && (!findText || (keep[a] && keep[b]));
+        el.classList.toggle("graph-hidden", !live);
+        // An edge with a match at one end is the relationship being asked
+        // about; one between two pieces of context is just scenery.
+        // Its own class, not graph-hot: hover owns that one and clears it on
+        // pointerout, which would wipe the find highlight on the way past.
+        el.classList.toggle("graph-find-edge", live && Boolean(findText) && (isMatch[a] || isMatch[b]));
+      }
+
+      const status = $("graph-find-status");
+      if (status) {
+        status.textContent = !findText ? ""
+          : matchCount === 0 ? "no matches"
+          : `${matchCount} of ${nodes.length}`;
+        status.classList.toggle("graph-find-none", Boolean(findText) && matchCount === 0);
+      }
+      return matchCount;
+    };
+
     for (const b of document.querySelectorAll(".graph-legend [data-type]")) {
       // CSSOM, not a style attribute: the CSP (style-src 'self') refuses
       // inline style attributes.
@@ -2530,14 +2624,47 @@ async function showGraph() {
         hidden.has(t) ? hidden.delete(t) : hidden.add(t);
         b.setAttribute("aria-pressed", String(!hidden.has(t)));
         b.classList.toggle("graph-off", hidden.has(t));
-        nodeEls.forEach((el, i) =>
-          el.classList.toggle("graph-hidden", hidden.has(nodes[i].type)));
-        for (const el of edgeEls) {
-          el.classList.toggle("graph-hidden",
-            hidden.has(nodes[el._a].type) || hidden.has(nodes[el._b].type));
-        }
+        applyFilters();
       });
     }
+
+    const findBox = $("graph-find");
+    const neighbourBtn = $("graph-find-neighbours");
+    let findTimer = null;
+    const runFind = () => {
+      findText = findBox.value.trim().toLowerCase();
+      applyFilters();
+    };
+    findBox.addEventListener("input", () => {
+      // Debounced like the rail's box: the work is O(nodes + edges) class
+      // toggles, cheap but not free, and a keystroke should not have to wait
+      // for the frame before it.
+      clearTimeout(findTimer);
+      findTimer = setTimeout(runFind, 120);
+    });
+    findBox.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        // Stopped here so it never reaches the document handler, which would
+        // leave full screen instead of clearing the box.
+        e.stopPropagation();
+        if (findBox.value) { findBox.value = ""; clearTimeout(findTimer); runFind(); }
+      } else if (e.key === "Enter") {
+        // Enter goes to the answer: the first match becomes the selection, so
+        // the rail names it and its neighbours are listed without hunting for
+        // the dot on the canvas.
+        e.preventDefault();
+        clearTimeout(findTimer);
+        runFind();
+        const first = nodes.findIndex((_, i) => !hidden.has(nodes[i].type) && matchesFind(i));
+        if (first >= 0) select(first);
+      }
+    });
+    neighbourBtn.addEventListener("click", () => {
+      withNeighbours = !withNeighbours;
+      neighbourBtn.setAttribute("aria-pressed", String(withNeighbours));
+      neighbourBtn.classList.toggle("graph-off", !withNeighbours);
+      applyFilters();
+    });
   } catch (err) {
     if (!err.handled) view.done(banner(err));
   }
@@ -2892,7 +3019,36 @@ function searchHTML(query, hits) {
       <a href="#/page/${encodeURIComponent(h.slug)}">${esc(h.title || h.slug)}</a>
       <span class="count"> · ${esc(h.type)}</span>
       ${h.snippet ? `<div class="snippet">${snippetHTML(h.snippet)}</div>` : ""}
-    </div>`).join("") || `<div class="empty">Nothing matched.</div>`}</div>`;
+    </div>`).join("") || searchEmptyHTML(query)}</div>`;
+}
+
+// Words the index throws away. Postgres drops English stop words when it parses
+// a query, so a search for one of them is not a search that found nothing -- it
+// is a search with nothing left in it, and "0 results" invites the reader to
+// conclude the index is broken. Only the ones somebody would plausibly type on
+// their own are listed; the full list is longer and saying so is not the point.
+const SEARCH_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have",
+  "he", "in", "is", "it", "its", "of", "on", "or", "she", "that", "the", "then",
+  "there", "they", "this", "to", "was", "were", "will", "with", "what", "when",
+  "who", "why", "how", "do", "does", "did", "don't", "not", "no", "but", "if",
+]);
+
+function searchEmptyHTML(query) {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const dropped = words.filter((w) => SEARCH_STOP_WORDS.has(w));
+  if (words.length && dropped.length === words.length) {
+    return `<div class="empty">Nothing to search for. Search ignores very common
+      words${words.length === 1 ? "" : ", and every word here is one of them"} —
+      ${dropped.map((w) => `<strong>${esc(w)}</strong>`).join(", ")} — because a
+      word in nearly every page tells the index nothing. Try a word specific to
+      what you are looking for.</div>`;
+  }
+  return `<div class="empty">No page contains <strong>${esc(query)}</strong>.
+    ${words.length > 1
+      ? "Every word has to appear for a page to rank first, so try fewer of them."
+      : "Try a shorter word, or a different spelling — search matches whole words and their stems, not fragments."}
+    </div>`;
 }
 
 // searchSeq orders the responses a live search produces. The nav token cannot
