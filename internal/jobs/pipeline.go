@@ -86,6 +86,11 @@ type BuildRequest struct {
 
 	// Map is the freshly built partitioning of the sources.
 	Map *mapper.WorkspaceMap
+	// DocumentNames is what ingest worked out each uploaded document is
+	// called, having read it, keyed by the path its row is stored under. It
+	// rides to the import so the file list is renamed in the same transaction
+	// that commits the pages the names describe.
+	DocumentNames map[string]string
 	// Router attributes changed paths to units.
 	Router diff.Router
 	// Changes is the difference from the last successful run.
@@ -180,6 +185,19 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		return nil, fmt.Errorf("jobs: load approved deletions: %w", err)
 	}
 	req.ApprovedDeletions = mergeKeys(req.ApprovedDeletions, approved)
+
+	// What the documents turned out to be called. Applied before anything else
+	// this run might do, and outside the import, because it is what the sync
+	// learned by reading them: a build that goes on to change no pages -- the
+	// common case on an established bench -- still learned it, and a build that
+	// fails at import does not make the file any less what it says it is.
+	if !req.DryRun && len(req.DocumentNames) > 0 {
+		if err := p.Store.RenameDocuments(ctx, req.WorkspaceID, req.DocumentNames); err != nil {
+			// Not fatal. A name is a label; failing a build that produced real
+			// pages because a label would not write is the wrong trade.
+			log.Warn("could not rename ingested documents", "err", err)
+		}
+	}
 
 	// A source on record but absent from the map has disappeared. That is a
 	// question, not a command -- file a review item and leave everything in

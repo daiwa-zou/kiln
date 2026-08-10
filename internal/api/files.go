@@ -19,6 +19,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/extract"
+	"github.com/daiwa-zou/kiln/internal/naming"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
 
@@ -66,7 +67,7 @@ func fileJSON(f store.FileRow) map[string]any {
 	// same thing now as it would have then.
 	name := f.DisplayName
 	if name == "" {
-		name = descriptiveName(f.Path)
+		name = naming.FromFilename(f.Path)
 	}
 	return map[string]any{
 		"id": f.ID, "path": f.Path, "name": name,
@@ -214,7 +215,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	// original filename: an upload that named its own path meant that name, and
 	// the sanitized form is what every other surface calls this document.
 	rowID, replacedBlob, err := s.Files.CreateFile(r.Context(), store.FileRow{
-		WorkspaceID: ws.ID, Path: relPath, DisplayName: descriptiveName(relPath),
+		WorkspaceID: ws.ID, Path: relPath, DisplayName: naming.FromFilename(relPath),
 		BlobKey:     key,
 		SizeBytes:   counter.n,
 		ContentType: part.Header.Get("Content-Type"),
@@ -231,7 +232,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id": rowID, "path": relPath, "name": descriptiveName(relPath),
+		"id": rowID, "path": relPath, "name": naming.FromFilename(relPath),
 		"size":     counter.n,
 		"sha256":   hex.EncodeToString(hasher.Sum(nil)),
 		"replaced": replacedBlob != "",

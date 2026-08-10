@@ -27,6 +27,8 @@ type memStore struct {
 
 	imports []ImportRequest
 	runs    []RunSummary
+	// renamed is every document name the pipeline applied, latest wins.
+	renamed map[string]string
 
 	// approvedDeletions and deletionReviews mirror the review-queue half of the
 	// human loop: the pipeline consumes the former and files the latter.
@@ -83,6 +85,18 @@ func (m *memStore) LoadSteering(context.Context, string) (Steering, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.steering, nil
+}
+
+// renamed records what each build decided its documents are called, so a test
+// can assert the pipeline applied names without a database.
+func (m *memStore) RenameDocuments(_ context.Context, _ string, names map[string]string) error {
+	if m.renamed == nil {
+		m.renamed = map[string]string{}
+	}
+	for path, name := range names {
+		m.renamed[path] = name
+	}
+	return nil
 }
 
 func (m *memStore) Import(_ context.Context, in ImportRequest) error {

@@ -40,6 +40,10 @@ func (s *pipelineStore) LoadSources(context.Context, string) ([]diff.SourceRecor
 	return nil, nil
 }
 func (s *pipelineStore) Import(context.Context, jobs.ImportRequest) error { return nil }
+
+func (s *pipelineStore) RenameDocuments(context.Context, string, map[string]string) error {
+	return nil
+}
 func (s *pipelineStore) SeedRunItems(context.Context, string, []diff.Key, float64) error {
 	return nil
 }

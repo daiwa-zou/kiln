@@ -100,6 +100,11 @@ type material struct {
 	Router diff.Router
 	Repo   *repomap.RepoMap
 
+	// DocNames maps an uploaded document's stored path to the name ingest
+	// derived for it, having read the text. Only uploads appear here: a
+	// repository file or a fetched page has no row to rename.
+	DocNames map[string]string
+
 	staging []string
 }
 
@@ -175,7 +180,7 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 	// documents produce one wiki whose pages can link across the boundary
 	// rather than two wikis that cannot see each other.
 	if src.DocsDir != "" {
-		docMap, docRouter, staging, err := syncDocs(ctx, out, src.DocsDir)
+		docMap, docRouter, docNames, staging, err := syncDocs(ctx, out, src.DocsDir)
 		if staging != "" {
 			m.staging = append(m.staging, staging)
 		}
@@ -191,11 +196,12 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 		// Section units have no path of their own; register them under their
 		// parent so routing a document also routes its chapters.
 		m.Router.DocSections = sectionsByParent(docMap)
+		m.DocNames = docNames
 	}
 
 	// Web pages merge the same way: a third source kind, one wiki.
 	if len(src.WebURLs) > 0 {
-		webMap, webRouter, staging, err := syncWeb(ctx, out, src.WebURLs)
+		webMap, webRouter, _, staging, err := syncWeb(ctx, out, src.WebURLs)
 		if staging != "" {
 			m.staging = append(m.staging, staging)
 		}
@@ -283,6 +289,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		BlobKeys:         req.Source.BlobKeys,
 		SkippedKeys:      req.Source.SkippedKeys,
 		Map:              wm,
+		DocumentNames:    mat.DocNames,
 		Router:           router,
 		Changes:          changes,
 		Force:            req.Force,
@@ -325,31 +332,31 @@ type docSource struct {
 // The returned staging directory holds the extracted text the unit inputs point
 // at. It must outlive the build -- prompts are assembled from it -- so the
 // caller owns removing it rather than a defer here.
-func syncDocSource(ctx context.Context, out io.Writer, src docSource) (_ *mapper.WorkspaceMap, _ map[string]diff.Key, staging string, err error) {
+func syncDocSource(ctx context.Context, out io.Writer, src docSource) (_ *mapper.WorkspaceMap, _ map[string]diff.Key, _ map[string]string, staging string, err error) {
 	conn, err := connector.Get(src.kind)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 	fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), src.subject)
 
 	staging, err = os.MkdirTemp("", src.prefix)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 
 	set, err := conn.Sync(ctx, src.config, staging)
 	if err != nil {
-		return nil, nil, staging, err
+		return nil, nil, nil, staging, err
 	}
 	docs, skipped, ok := src.payload(set)
 	if !ok {
-		return nil, nil, staging, fmt.Errorf("%s connector returned no documents payload", src.kind)
+		return nil, nil, nil, staging, fmt.Errorf("%s connector returned no documents payload", src.kind)
 	}
 
 	dm := &docmap.Mapper{}
 	wm, err := dm.MapDocs(ctx, staging, docs)
 	if err != nil {
-		return nil, nil, staging, err
+		return nil, nil, nil, staging, err
 	}
 
 	fmt.Fprintf(out, "  %d %s, %d units\n", len(docs), src.noun, len(wm.Units))
@@ -365,17 +372,24 @@ func syncDocSource(ctx context.Context, out io.Writer, src docSource) (_ *mapper
 	// source for either connector must emit paths through the same origin
 	// function to be routable.
 	routes := map[string]diff.Key{}
+	names := map[string]string{}
 	for _, d := range docs {
 		routes[src.origin(d.Origin)] = diff.Key(d.Key)
+		// Keyed on Origin, the path the file is stored under, because that is
+		// what the row is keyed on. Path here is the staged copy, which exists
+		// only for the length of this run.
+		if d.Origin != "" && d.Title != "" {
+			names[d.Origin] = d.Title
+		}
 	}
-	return wm, routes, staging, nil
+	return wm, routes, names, staging, nil
 }
 
 // syncDocs ingests a documents directory through the upload connector.
-func syncDocs(ctx context.Context, out io.Writer, dir string) (*mapper.WorkspaceMap, map[string]diff.Key, string, error) {
+func syncDocs(ctx context.Context, out io.Writer, dir string) (*mapper.WorkspaceMap, map[string]diff.Key, map[string]string, string, error) {
 	absDocs, err := filepath.Abs(dir)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 	return syncDocSource(ctx, out, docSource{
 		kind:    "upload",
@@ -399,7 +413,7 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (*mapper.Workspace
 }
 
 // syncWeb ingests fetched pages through the web connector.
-func syncWeb(ctx context.Context, out io.Writer, urls []string) (*mapper.WorkspaceMap, map[string]diff.Key, string, error) {
+func syncWeb(ctx context.Context, out io.Writer, urls []string) (*mapper.WorkspaceMap, map[string]diff.Key, map[string]string, string, error) {
 	return syncDocSource(ctx, out, docSource{
 		kind:    "web",
 		subject: fmt.Sprintf("%d url(s)", len(urls)),

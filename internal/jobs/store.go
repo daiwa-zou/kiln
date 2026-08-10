@@ -37,6 +37,16 @@ type Store interface {
 	// Import commits one run's output atomically.
 	Import(ctx context.Context, in ImportRequest) error
 
+	// RenameDocuments records what ingest worked out each uploaded document is
+	// called, keyed by the path its row is stored under.
+	//
+	// Deliberately not part of Import. A name is a fact about the document,
+	// read out of its own text at sync; it does not depend on the agent then
+	// writing pages, and the run that most needs it is the one that changes no
+	// pages at all -- an established bench whose documents are all named after
+	// their filenames and whose content has not moved since.
+	RenameDocuments(ctx context.Context, workspaceID string, names map[string]string) error
+
 	// RecordRun persists the run summary, including any review flags the agent
 	// raised -- questions it wants a human to judge rather than guess at.
 	RecordRun(ctx context.Context, run RunSummary) error
