@@ -963,10 +963,14 @@ async function showSources() {
         <span class="src-icon kind-upload">${iconDoc}</span>
         <div class="src-main">
           <div class="src-name">
-            <strong>${esc(f.path.split("/").pop())}</strong>
+            <strong>${esc(f.name || f.path.split("/").pop())}</strong>
             <span class="chip">${esc(humanBytes(f.size))}</span>
             ${f.enabled === false ? `<span class="chip">paused</span>` : ""}
           </div>
+          <!-- The filename it arrived as, kept where the path already was:
+               the label above is derived, and the one question it cannot
+               answer is "which upload is this" when someone is looking for the
+               copy they replaced. -->
           <div class="src-where" title="${esc(f.path)}">${esc(f.path)}</div>
         </div>
         <span class="src-when">${timeTag(f.updated)}</span>

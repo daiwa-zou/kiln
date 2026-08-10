@@ -60,8 +60,17 @@ const (
 
 // fileJSON shapes one file row for responses.
 func fileJSON(f store.FileRow) map[string]any {
+	// Rows uploaded before display names existed carry an empty one. Deriving
+	// it here rather than backfilling keeps the migration a pure schema change:
+	// the derivation reads the filename and nothing else, so it answers the
+	// same thing now as it would have then.
+	name := f.DisplayName
+	if name == "" {
+		name = descriptiveName(f.Path)
+	}
 	return map[string]any{
-		"id": f.ID, "path": f.Path, "size": f.SizeBytes, "sha256": f.SHA256,
+		"id": f.ID, "path": f.Path, "name": name,
+		"size": f.SizeBytes, "sha256": f.SHA256,
 		"contentType": f.ContentType,
 		"enabled":     f.Enabled,
 		"uploaded":    f.CreatedAt.UTC().Format(time.RFC3339),
@@ -201,8 +210,12 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Derived from the path the row is keyed on, not from the browser's
+	// original filename: an upload that named its own path meant that name, and
+	// the sanitized form is what every other surface calls this document.
 	rowID, replacedBlob, err := s.Files.CreateFile(r.Context(), store.FileRow{
-		WorkspaceID: ws.ID, Path: relPath, BlobKey: key,
+		WorkspaceID: ws.ID, Path: relPath, DisplayName: descriptiveName(relPath),
+		BlobKey:     key,
 		SizeBytes:   counter.n,
 		ContentType: part.Header.Get("Content-Type"),
 		SHA256:      hex.EncodeToString(hasher.Sum(nil)),
@@ -218,7 +231,8 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id": rowID, "path": relPath, "size": counter.n,
+		"id": rowID, "path": relPath, "name": descriptiveName(relPath),
+		"size":     counter.n,
 		"sha256":   hex.EncodeToString(hasher.Sum(nil)),
 		"replaced": replacedBlob != "",
 		"build":    s.maybeEnqueueUploadBuild(r.Context(), ws),
