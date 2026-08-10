@@ -11,6 +11,13 @@ on:
     tags: ['v*']
   pull_request:
 
+# Without this a rapid second push left the first image build running to
+# completion -- the longest job in the pipeline, finishing to say something
+# about a commit nobody is looking at any more.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -25,7 +32,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Emulation is only needed to build the architecture this runner is not.
+      # The review build is amd64 only, so on a pull request this installs a
+      # binfmt handler nothing goes on to use.
       - uses: docker/setup-qemu-action@v4
+        if: github.event_name != 'pull_request'
       - uses: docker/setup-buildx-action@v4
 
       # Pull requests build to verify the Dockerfile, but never push: a fork's
@@ -54,15 +65,44 @@ jobs:
             org.opencontainers.image.title=kiln
             org.opencontainers.image.licenses=Apache-2.0
 
+      # A pull request asks one question of this file: does it still build and
+      # does the thing it builds still run. Answering it for arm64 as well cost
+      # twenty of the pipeline's twenty-five minutes, because every instruction
+      # of the second architecture -- the Go link, and a pandoc install that is
+      # most of the runtime layer -- ran under QEMU emulation. The arm64 answer
+      # on a PR is also the amd64 answer for a static Go binary on the same
+      # Debian base; the case where it is not is a base-image or apt change,
+      # which the push build below catches before anything is published.
+      #
+      # Loaded rather than merely built, so the smoke test below has an image
+      # to run. That step used to invoke a second full build of its own.
+      - name: Build for review
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: kiln:smoke
+          build-args: |
+            VERSION=${{ format('pr-{0}', github.sha) }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Attestations describe a published artifact. Nothing is published
+          # here, so they are pure cost.
+          provenance: false
+          sbom: false
+
       - name: Build and push
         id: build
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
         with:
           context: .
           # amd64 for the common cloud node, arm64 for Graviton/Ampere fleets
           # and Apple silicon workstations.
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -90,12 +130,20 @@ jobs:
             cosign sign --yes "${tag%%:*}@${DIGEST}"
           done
 
+      # buildx cannot load a manifest list, so the published multi-arch build
+      # leaves nothing runnable behind and the amd64 image has to be resolved
+      # separately. It is a cache hit on the layers just built, not a rebuild.
+      - name: Load the amd64 image
+        if: github.event_name != 'pull_request'
+        run: |
+          docker buildx build --load --platform linux/amd64 -t kiln:smoke \
+            --cache-from type=gha .
+
       # The image is the deployment artifact for every cloud target, so a
       # smoke test that it actually runs belongs here rather than in a later
-      # surprise. Single-arch load, because buildx cannot load a manifest list.
+      # surprise.
       - name: Smoke test
         run: |
-          docker buildx build --load --platform linux/amd64 -t kiln:smoke .
           docker run --rm kiln:smoke version
           docker run --rm --entrypoint git kiln:smoke --version
           docker run --rm --entrypoint pdftotext kiln:smoke -v 2>&1 | head -1
