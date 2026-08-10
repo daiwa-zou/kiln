@@ -17,6 +17,12 @@ type OverviewInput struct {
 	// structure around it stays derived.
 	Narrative []string
 	Date      string
+	// BuiltAt is when the build ran, to the minute. Date still stamps the
+	// frontmatter, where a calendar day is deliberate; the lede reports this
+	// instead, because "last built today" is not an answer to anyone deciding
+	// whether to wait for a rebuild or read what is here. Empty falls back to
+	// Date, so a caller that has not been taught the difference still renders.
+	BuiltAt string
 	// Sources tallies the material the wiki was compiled from. Without it the
 	// overview could only describe the pages that came out, which says nothing
 	// about what went in and does not change when a source is added that has
@@ -155,10 +161,14 @@ func writeOverviewLede(b *strings.Builder, pages []Page, in OverviewInput) {
 	}
 	b.WriteString(".")
 
-	if n := countedPages(pages); n > 0 && in.Date != "" {
-		fmt.Fprintf(b, " %s, last built %s.", plural(n, "page"), in.Date)
-	} else if in.Date != "" {
-		fmt.Fprintf(b, " Last built %s.", in.Date)
+	stamp := in.BuiltAt
+	if stamp == "" {
+		stamp = in.Date
+	}
+	if n := countedPages(pages); n > 0 && stamp != "" {
+		fmt.Fprintf(b, " %s, last built %s.", plural(n, "page"), stamp)
+	} else if stamp != "" {
+		fmt.Fprintf(b, " Last built %s.", stamp)
 	}
 	b.WriteString("\n\n")
 }

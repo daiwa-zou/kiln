@@ -109,6 +109,28 @@ function relTime(iso) {
   const dateOnly = typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso.trim());
   const d = dateOnly ? new Date(`${iso.trim()}T00:00:00`) : new Date(iso);
   if (isNaN(d)) return String(iso ?? "");
+  // A timestamp carries a clock, and "today" throws it away: a build five
+  // minutes ago and one from this morning read identically, which is exactly
+  // the distinction someone watching a build wants. Under a day, answer in the
+  // unit being asked about. Floor rather than round on the way out of each
+  // unit, so the last second of an hour is "59 minutes ago" and never the "60
+  // minutes ago" that should have been the next branch.
+  //
+  // Date-only values keep the calendar reckoning below: they have no clock to
+  // report, and inventing midnight for them would age a page written this
+  // morning by however long the reader has been awake.
+  if (!dateOnly) {
+    const secs = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (secs >= 0 && secs < 45) return "just now";
+    if (secs >= 0 && secs < 3600) {
+      const m = Math.max(1, Math.floor(secs / 60));
+      return `${m} minute${m === 1 ? "" : "s"} ago`;
+    }
+    if (secs >= 0 && secs < 86400) {
+      const h = Math.floor(secs / 3600);
+      return `${h} hour${h === 1 ? "" : "s"} ago`;
+    }
+  }
   const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   // Rounding absorbs the 23- and 25-hour days daylight saving puts between
   // two midnights; the quotient is otherwise a whole number already.

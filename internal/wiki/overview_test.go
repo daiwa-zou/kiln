@@ -24,6 +24,33 @@ func TestOverviewDescribesItsSources(t *testing.T) {
 	}
 }
 
+func TestOverviewLedeReportsBuildTimeToTheMinute(t *testing.T) {
+	// A bench rebuilt three times in a morning said "last built" the same way
+	// all three times, which is the one question the line exists to answer.
+	got := BuildOverview(samplePages(), OverviewInput{
+		Workspace: "watchtower",
+		Date:      "2026-07-25",
+		BuiltAt:   "2026-07-25 09:42 UTC",
+	})
+	if !strings.Contains(got, "last built 2026-07-25 09:42 UTC.") {
+		t.Errorf("lede does not carry the clock:\n%s", got)
+	}
+	// The frontmatter keeps the calendar day: a page regenerated twice in one
+	// day should still not look like it changed.
+	if !strings.Contains(got, "updated: 2026-07-25\n") {
+		t.Errorf("frontmatter should stay a calendar day:\n%s", got)
+	}
+}
+
+func TestOverviewLedeFallsBackToTheDate(t *testing.T) {
+	// A caller that has not been taught about BuiltAt still renders a sentence
+	// rather than "last built ." with the stamp missing.
+	got := BuildOverview(samplePages(), OverviewInput{Workspace: "w", Date: "2026-07-25"})
+	if !strings.Contains(got, "last built 2026-07-25.") {
+		t.Errorf("no fallback to the date:\n%s", got)
+	}
+}
+
 func TestOverviewCountsReadAsEnglish(t *testing.T) {
 	// One of a thing is not "1 entities". The counts are the most-read line in
 	// the file and the plural was wrong for every singleton type.

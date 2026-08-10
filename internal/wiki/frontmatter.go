@@ -13,6 +13,19 @@ import (
 // a page regenerated twice in one day should not look like it changed.
 const DateFormat = "2006-01-02"
 
+// StampFormat is for the one thing a day is too coarse for: when a build ran.
+// Page dates answer "has this changed since I last read it", where a day is
+// the right grain and a clock is noise. "Last built" answers "is this current",
+// asked by someone who may have kicked off the build a minute ago -- and a
+// bench rebuilt three times this morning reported the same answer all three
+// times.
+//
+// Minute resolution because seconds are precision nobody acts on, and the zone
+// is spelled out because the pipeline's clock is UTC: a reader west of it who
+// built at teatime is otherwise told it happened tomorrow, with nothing on the
+// line to explain why.
+const StampFormat = "2006-01-02 15:04 MST"
+
 // Frontmatter is the YAML header every page carries.
 type Frontmatter struct {
 	Type    PageType `yaml:"type"`
