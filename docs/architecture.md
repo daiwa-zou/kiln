@@ -554,9 +554,16 @@ undercount forever.
 
 ## Deletion
 
-Nothing is ever deleted because a source vanished. A suspended token and a
+Everything routes through one planner, `PlanCascade`, and the two ways in
+differ only in whether a human is asked first.
+
+Nothing is ever deleted because a source *vanished*. A suspended token and a
 genuine deletion look identical at the sync layer, so a disappearance is a
-*question*, not a command.
+*question*. But a source someone **explicitly deletes** — an uploaded document,
+or the connector that syncs a set of them — carries no such ambiguity, and the
+cascade runs at the moment of the request. Asking again, about a deletion that
+was itself the answer, is how a review queue trains people to approve without
+reading.
 
 ```mermaid
 flowchart TD
@@ -567,6 +574,8 @@ flowchart TD
     Review --> Human{"Human answers"}
     Human -->|"keep"| Nothing["Nothing happens"]
     Human -->|"approve"| Cascade["PlanCascade"]
+
+    Explicit["<b>DELETE</b> a document<br/>or a connector"] --> Cascade
 
     Cascade --> RC{"Is each page claimed<br/>by a surviving source?"}
     RC -->|"yes"| Regen["<b>Regenerate</b> — its prose still<br/>describes departed material"]
@@ -583,8 +592,23 @@ from all three. And a kept page is marked for **regeneration**, not merely
 amended, because its body still describes material that no longer exists, and
 leaving that is how a wiki accumulates confident claims about deleted code.
 
-Deleted pages are soft-deleted and swept after `storage.soft_delete_retention`
-(default 30 days).
+The two entry points differ in one further place: *when* the regeneration
+happens. A review-approved deletion is planned inside a run, so the surviving
+owners of shared pages ride along in that same run (`regenKeysFor`). An
+explicit delete has no run to ride, so it sets `sources.needs_regen` and the
+next build collects it (`flaggedRegenKeys`) — the flag clears when that
+source's import lands.
+
+An explicit delete runs in one transaction with whatever else it removes: the
+file row, or the connector row and the source rows the schema cascades with it.
+A document that is gone while its pages remain is precisely the state this
+prevents, and splitting the two would open that window on any failure between
+them. Blobs are deleted only after that transaction commits.
+
+Deleted pages are soft-deleted either way and swept after
+`storage.soft_delete_retention` (default 30 days). That retention window is
+what makes deleting without a second question defensible: the destruction is
+immediate but not yet permanent.
 
 ---
 
@@ -603,7 +627,7 @@ flowchart LR
 
     S -->|"injected into<br/><i>every</i> prompt"| Gen["Generation"]
     C -->|"re-injected into every<br/>future rebuild of that page"| Gen
-    R -->|"approvals gate<br/>all deletion"| Del["Deletion cascade"]
+    R -->|"approvals gate<br/>deletion by disappearance"| Del["Deletion cascade"]
 
     Gen -->|"agent files contradictions,<br/>uncertainties, gaps"| R
     Del -->|"vanished source<br/>files a request"| R
@@ -615,8 +639,9 @@ flowchart LR
 **Steering** (`purpose`, `schema`) is the main lever for changing a wiki's
 character without touching code. **Corrections** are how what you teach the wiki
 survives regeneration. The **review queue** is where the wiki asks its humans
-about things it would otherwise have to guess at — and it is the only path to
-deletion.
+about things it would otherwise have to guess at — including every deletion it
+would otherwise have to infer. Deleting a source outright does not go through
+it: that is not a thing the wiki has to guess at.
 
 ### Research runs
 

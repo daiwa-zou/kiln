@@ -82,21 +82,21 @@ func TestFilesCRUD(t *testing.T) {
 	if err := s.SetFileEnabled(ctx, other, id, false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-tenant pause: %v, want ErrNotFound", err)
 	}
-	if _, err := s.DeleteFile(ctx, other, id); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s.DeleteFile(ctx, other, id); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-tenant delete: %v, want ErrNotFound", err)
 	}
 	if list, _ := s.ListFiles(ctx, other); len(list) != 0 {
 		t.Fatalf("cross-tenant list leaked %+v", list)
 	}
 
-	blobKey, err := s.DeleteFile(ctx, ws, id)
+	blobKey, _, err := s.DeleteFile(ctx, ws, id)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if blobKey != "ws/"+ws+"/uploads/f3" {
 		t.Fatalf("delete returned blob %q, want the re-uploaded f3", blobKey)
 	}
-	if _, err := s.DeleteFile(ctx, ws, id); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s.DeleteFile(ctx, ws, id); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second delete: %v, want ErrNotFound", err)
 	}
 	if files, _ := s.ListFiles(ctx, ws); len(files) != 0 {

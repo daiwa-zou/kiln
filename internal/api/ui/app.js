@@ -3043,8 +3043,8 @@ async function showBench() {
       <div class="sec-head"><div class="group-label">Delete this bench</div></div>
       <p class="hint">Removes <strong>${esc(bench?.name || state.workspace)}</strong> and
         everything in it — every page, run, review, connector and uploaded document.
-        Unlike an approved deletion review, which only tells the next build to drop
-        some pages, this is immediate and there is no undo.</p>
+        Deleting a single source removes the pages it produced but keeps them
+        recoverable for a while; this removes the bench itself, and there is no undo.</p>
       <div class="row">
         <input id="bench-delete-slug" placeholder="type ${esc(state.workspace)} to confirm"
                aria-label="Repeat the bench slug to confirm deletion"

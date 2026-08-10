@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/daiwa-zou/kiln/internal/diff"
 )
 
 // ConnectorRow is one configured source, as the worker consumes it. The config
@@ -135,19 +137,45 @@ func (s *WikiStore) UpdateConnector(ctx context.Context, workspaceID, id string,
 	return nil
 }
 
-// DeleteConnector removes a connector. Its sources cascade away in the
-// schema; the pages they produced stay until the deletion review flow
-// removes them, because destruction is always a human decision.
-func (s *WikiStore) DeleteConnector(ctx context.Context, workspaceID, id string) error {
-	tag, err := s.pool.Exec(ctx,
+// DeleteConnector removes a connector and the wiki content only its sources
+// produced. Deleting a connector deletes every source it synced, so the pages
+// go with them -- a bench that removes the repository it was reading should not
+// be left with a wiki confidently describing it.
+//
+// The cascade is planned before the row is deleted, because the schema's ON
+// DELETE CASCADE takes the source rows with the connector and files_written on
+// those rows is the only record of which pages they wrote. Order matters
+// inside the transaction, not just for correctness of the plan: cascade
+// deletion drops the same rows deliberately, and doing it first means the
+// connector's DELETE finds nothing left to cascade.
+func (s *WikiStore) DeleteConnector(ctx context.Context, workspaceID, id string) (diff.Cascade, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return diff.Cascade{}, fmt.Errorf("store: begin delete connector: %w", err)
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	keys, err := sourceKeysForConnector(ctx, tx, workspaceID, id)
+	if err != nil {
+		return diff.Cascade{}, err
+	}
+	c, err := cascadeDeleteSources(ctx, tx, workspaceID, keys)
+	if err != nil {
+		return diff.Cascade{}, err
+	}
+
+	tag, err := tx.Exec(ctx,
 		`DELETE FROM connectors WHERE workspace_id = $1 AND id = $2`, workspaceID, id)
 	if err != nil {
-		return fmt.Errorf("store: delete connector: %w", err)
+		return diff.Cascade{}, fmt.Errorf("store: delete connector: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return diff.Cascade{}, ErrNotFound
 	}
-	return nil
+	if err := tx.Commit(ctx); err != nil {
+		return diff.Cascade{}, fmt.Errorf("store: commit delete connector: %w", err)
+	}
+	return c, nil
 }
 
 // MarkConnectorSync records the outcome of a connector's most recent sync.

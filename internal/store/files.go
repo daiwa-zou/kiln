@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/daiwa-zou/kiln/internal/diff"
 )
 
 // FileRow is one uploaded workspace document. Path is the sanitized relative
@@ -121,18 +123,43 @@ func (s *WikiStore) SetFileEnabled(ctx context.Context, workspaceID, id string, 
 	return nil
 }
 
-// DeleteFile removes a file row, scoped to the workspace so an id from
-// another tenant is indistinguishable from a missing one. It returns the blob
-// key for the caller to delete after the row is gone.
-func (s *WikiStore) DeleteFile(ctx context.Context, workspaceID, id string) (blobKey string, err error) {
-	err = s.pool.QueryRow(ctx, `
+// DeleteFile removes a file row and the wiki content only that document
+// produced, scoped to the workspace so an id from another tenant is
+// indistinguishable from a missing one.
+//
+// One transaction on purpose. A document whose row is gone while its pages
+// remain is the state this exists to prevent, and splitting the two would open
+// exactly that window on any failure between them. The blob key and the
+// cascade's released blobs both come back for the caller to delete after the
+// commit: deleting bytes the transaction might still roll back is the one
+// ordering that cannot be undone.
+func (s *WikiStore) DeleteFile(ctx context.Context, workspaceID, id string) (blobKey string, c diff.Cascade, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", diff.Cascade{}, fmt.Errorf("store: begin delete file: %w", err)
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	var path string
+	err = tx.QueryRow(ctx, `
 		DELETE FROM workspace_files WHERE workspace_id = $1 AND id = $2
-		RETURNING blob_key`, workspaceID, id).Scan(&blobKey)
+		RETURNING path, blob_key`, workspaceID, id).Scan(&path, &blobKey)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrNotFound
+		return "", diff.Cascade{}, ErrNotFound
 	}
 	if err != nil {
-		return "", fmt.Errorf("store: delete file: %w", err)
+		return "", diff.Cascade{}, fmt.Errorf("store: delete file: %w", err)
 	}
-	return blobKey, nil
+
+	// The unit key an uploaded document maps to. Built through UploadOrigin
+	// like every other producer, so a repo README and an uploaded one stay
+	// distinct sources here as well.
+	c, err = cascadeDeleteSources(ctx, tx, workspaceID, []diff.Key{diff.DocKey(diff.UploadOrigin(path))})
+	if err != nil {
+		return "", diff.Cascade{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", diff.Cascade{}, fmt.Errorf("store: commit delete file: %w", err)
+	}
+	return blobKey, c, nil
 }

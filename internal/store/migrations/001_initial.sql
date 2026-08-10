@@ -5,9 +5,11 @@
 --   * `sources` is the incremental cache. `input_hash` gates whether a unit is
 --     regenerated at all, and `files_written` is what makes cascade deletion
 --     possible: a page is removed only when no other live source claims it.
---   * Pages are soft-deleted. Deletion is never automatic in kiln -- a
---     disappearing source raises a review item -- and `deleted_at` gives a
---     retention window in which a mistaken removal is recoverable.
+--   * Pages are soft-deleted, and `deleted_at` gives a retention window in
+--     which a mistaken removal is recoverable. A source *disappearing from a
+--     sync* is ambiguous and raises a review item rather than deleting
+--     anything; a source someone explicitly deletes cascades immediately
+--     (see internal/store/cascade.go for why the two differ).
 --   * The index, overview, and log are derived from page frontmatter on every
 --     run and are never agent-written, so they are not stored as pages.
 

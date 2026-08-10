@@ -236,6 +236,10 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	// regenerated, not merely kept: leaving them is how a wiki accumulates
 	// confident claims about deleted code.
 	dirty = append(dirty, regenKeysFor(cascade, sources, dirty)...)
+	// The same debt, owed by a deletion that already happened: an explicit
+	// source delete cascades at the moment of the request and leaves the
+	// surviving owners of shared pages flagged for whichever run comes next.
+	dirty = append(dirty, flaggedRegenKeys(sources, req.Map, dirty)...)
 
 	if len(dirty) == 0 && cascade.Empty() {
 		log.Info("nothing to do; no agent calls")

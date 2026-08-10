@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/daiwa-zou/kiln/internal/blob"
+	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/extract"
 	"github.com/daiwa-zou/kiln/internal/naming"
 	"github.com/daiwa-zou/kiln/internal/store"
@@ -31,16 +32,18 @@ import (
 // pipeline.
 //
 // Upload and delete are member-level writes, not admin actions: contributing a
-// document is content work, like pushing to a connected repo, and nothing
-// destructive can result -- pages derived from a deleted file still leave
-// through the deletion-review queue.
+// document is content work, like pushing to a connected repo. Deleting one does
+// destroy content -- the pages only that document produced go with it -- but
+// the destruction is bounded by what the deleter contributed, soft, and inside
+// the retention window recoverable, which is a different thing from the
+// admin-level power to reconfigure what a bench reads.
 
 // FileStore is the workspace-file surface; *store.WikiStore implements it.
 type FileStore interface {
 	ListFiles(ctx context.Context, workspaceID string) ([]store.FileRow, error)
 	CreateFile(ctx context.Context, f store.FileRow) (id, replacedBlobKey string, err error)
 	SetFileEnabled(ctx context.Context, workspaceID, id string, enabled bool) error
-	DeleteFile(ctx context.Context, workspaceID, id string) (blobKey string, err error)
+	DeleteFile(ctx context.Context, workspaceID, id string) (blobKey string, c diff.Cascade, err error)
 }
 
 const (
@@ -240,20 +243,49 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleFileDelete removes a document and the wiki content only it produced.
+// The counts come back so the UI can say what the deletion actually cost --
+// "deleted" alone would hide the pages going with it, and a page count is the
+// difference between removing a stray upload and removing a chapter of the
+// wiki.
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	ws, _, ok := s.guardWrite(w, r, maxResolveBytes)
 	if !ok {
 		return
 	}
-	blobKey, err := s.Files.DeleteFile(r.Context(), ws.ID, chi.URLParam(r, "id"))
+	blobKey, cascade, err := s.Files.DeleteFile(r.Context(), ws.ID, chi.URLParam(r, "id"))
 	if err != nil {
 		s.failOrNotFound(w, err, "file not found")
 		return
 	}
 	if s.Blobs != nil {
-		s.deleteBlobQuietly(r.Context(), blobKey)
+		// The document's own blob and whatever the cascade released. Deduped
+		// because they overlap by design -- an uploaded document's source
+		// record references the very blob the row points at -- and a second
+		// delete would log a failure for bytes that are already gone.
+		for _, key := range dedupe(append([]string{blobKey}, cascade.DeleteBlobs...)) {
+			s.deleteBlobQuietly(r.Context(), key)
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"id": chi.URLParam(r, "id"), "status": "deleted"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": chi.URLParam(r, "id"), "status": "deleted",
+		"pagesRemoved":      len(cascade.DeletePages),
+		"pagesRegenerating": len(cascade.RegeneratePages),
+	})
+}
+
+// dedupe returns the distinct non-empty entries, preserving first-seen order.
+func dedupe(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // maybeEnqueueUploadBuild starts a debounced build when the bench opted in by
