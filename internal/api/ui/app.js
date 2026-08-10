@@ -109,6 +109,28 @@ function relTime(iso) {
   const dateOnly = typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso.trim());
   const d = dateOnly ? new Date(`${iso.trim()}T00:00:00`) : new Date(iso);
   if (isNaN(d)) return String(iso ?? "");
+  // A timestamp carries a clock, and "today" throws it away: a build five
+  // minutes ago and one from this morning read identically, which is exactly
+  // the distinction someone watching a build wants. Under a day, answer in the
+  // unit being asked about. Floor rather than round on the way out of each
+  // unit, so the last second of an hour is "59 minutes ago" and never the "60
+  // minutes ago" that should have been the next branch.
+  //
+  // Date-only values keep the calendar reckoning below: they have no clock to
+  // report, and inventing midnight for them would age a page written this
+  // morning by however long the reader has been awake.
+  if (!dateOnly) {
+    const secs = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (secs >= 0 && secs < 45) return "just now";
+    if (secs >= 0 && secs < 3600) {
+      const m = Math.max(1, Math.floor(secs / 60));
+      return `${m} minute${m === 1 ? "" : "s"} ago`;
+    }
+    if (secs >= 0 && secs < 86400) {
+      const h = Math.floor(secs / 3600);
+      return `${h} hour${h === 1 ? "" : "s"} ago`;
+    }
+  }
   const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   // Rounding absorbs the 23- and 25-hour days daylight saving puts between
   // two midnights; the quotient is otherwise a whole number already.
@@ -218,16 +240,13 @@ const VIEW_HELP = {
       the next build — nothing is destroyed until you say so.</p>
       <p>A question about the material can be handed back to a worker, which
       re-reads the sources and attaches what it finds. You still make the
-      call.</p>`,
-  },
-  gaps: {
-    title: "Gaps",
-    body: `<p>Pages that existing content links to but that have never been
-      written. They are the wiki's own account of what it knows it is
-      missing.</p>
-      <p>This is what lets an agent tell <em>"the wiki says nothing about X"</em>
-      from <em>"the wiki has not covered X yet"</em> — a distinction that is
-      invisible without it.</p>`,
+      call.</p>
+      <p>The <em>Gaps</em> queue is the same idea one step earlier: pages that
+      existing content links to but that have never been written — the wiki's
+      own account of what it knows it is missing. Asking for one files it here
+      as a question, so the next build plans the page. It is also what lets an
+      agent tell <em>"the wiki says nothing about X"</em> from <em>"the wiki has
+      not covered X yet"</em>.</p>`,
   },
   graph: {
     title: "Graph",
@@ -251,8 +270,23 @@ const VIEW_HELP = {
       <p>The agent reads over the HTTP API, so it needs no database credentials
       and works against this instance from anywhere it can reach it. A key
       carries the read scope only and sees exactly the benches you do.</p>
+      <p>There are two ways in: this server's own <span class="mono">/mcp</span>
+      endpoint, and the <span class="mono">kiln mcp</span> subprocess. Which one
+      an agent can use is not a preference — a connector added in the Claude
+      apps is dialled by Anthropic's servers, so it needs a public https address,
+      while an agent on your machine reaches whatever you can.</p>
       <p>Keys are shown once. kiln stores a hash, not the key, so a lost one is
       replaced rather than recovered.</p>`,
+  },
+  bench: {
+    title: "Bench configuration",
+    body: `<p>What this bench is, and what can be done to it as a whole.</p>
+      <p>The slug is what URLs and agents call it, and it is what deleting asks
+      you to type back — a name you have to read off the page is a name you
+      cannot supply by reflex.</p>
+      <p>Deleting is immediate and total: every page, run, review, connector and
+      uploaded document goes with it. It is not the same as approving a deletion
+      review, which only tells the next build to drop some pages.</p>`,
   },
   members: {
     title: "Members",
@@ -724,7 +758,7 @@ function syncNavForEmptyBench() {
   // anchor itself would delete.
   const overview = document.querySelector('.nav a[data-view="overview"] span');
   if (overview) overview.textContent = empty ? "Get started" : "Overview";
-  for (const view of ["index", "graph", "gaps", "log"]) {
+  for (const view of ["index", "graph", "log"]) {
     const a = document.querySelector(`.nav a[data-view="${view}"]`);
     if (a) a.classList.toggle("nav-waiting", Boolean(empty));
   }
@@ -1146,18 +1180,6 @@ function updateReviewsBadge(count) {
   b.setAttribute("aria-label", `${count} open review${count === 1 ? "" : "s"}`);
 }
 
-// The rail's Gaps entry carries what it would cost you to look: a bench with
-// no gaps says nothing rather than "0".
-async function refreshGapsCount() {
-  const el = $("gaps-count");
-  if (!el) return;
-  try {
-    const gaps = await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`);
-    el.hidden = !gaps.length;
-    el.textContent = String(gaps.length);
-  } catch { el.hidden = true; /* decoration; the next tick retries */ }
-}
-
 async function refreshReviewsBadge() {
   try {
     // Rides the revision-keyed etagCache: idle ticks are 304s.
@@ -1181,7 +1203,6 @@ async function pollTick() {
   if (ws !== state.workspace) return; // raced a workspace switch
 
   refreshReviewsBadge();
-  refreshGapsCount();
   // A build can start from a webhook, the CLI, or another tab. The 5s run poll
   // only runs while this tab already knows one is live, so the slow tick is
   // what notices a build that began while nobody was looking.
@@ -1367,6 +1388,51 @@ function wireCorrections(slug) {
 // it stays one: the stat strip and the freshness bars are computed here from the
 // page summaries the rail has already loaded, and the artifact's prose is
 // rendered below them.
+// The generated overview carries two derived lists -- what the bench was
+// compiled from, and how many pages of each type came out. As markdown they
+// are bullets, which is right for the agents that read the artifact over MCP
+// and wrong for this page, where every other count is already a card and these
+// two sat underneath as a plain list in prose.
+//
+// So they are lifted out and rendered as cards, and the prose keeps what only
+// prose can carry: the lede, the agent's findings, and the entry points. The
+// artifact itself is untouched -- the split happens here, on the way to the
+// screen, rather than by asking the generator to emit markup.
+//
+// Headings are matched exactly as BuildOverview writes them. A section that is
+// missing (a bench with no sources yet writes no "reads" list at all) simply
+// yields nothing, and anything unrecognized stays in the prose where it was.
+const OVERVIEW_CARD_SECTIONS = { "What this bench reads": "reads", "Contents": "contents" };
+
+function splitOverview(md) {
+  const out = { reads: [], contents: [], rest: [] };
+  let bucket = null;
+  for (const line of String(md || "").split("\n")) {
+    const heading = /^##\s+(.*?)\s*$/.exec(line);
+    if (heading) {
+      bucket = OVERVIEW_CARD_SECTIONS[heading[1]] || null;
+      if (bucket) continue;
+    }
+    if (!bucket) { out.rest.push(line); continue; }
+    // "25 pages:" is the Contents section's own preamble, not an item.
+    const item = /^-\s+(\d[\d,]*)\s+(.+?)\s*$/.exec(line);
+    if (item) out[bucket].push({ n: item[1], noun: item[2] });
+    else if (line.trim() && !/:$/.test(line.trim())) { bucket = null; out.rest.push(line); }
+  }
+  out.rest = out.rest.join("\n");
+  return out;
+}
+
+// statGrid caps the column count at four: past that the cards are narrower than
+// the numbers they hold, and the grid classes only go that far anyway. The
+// floor of two is for the bench with a single source, whose one card otherwise
+// stretched the full width of the column with a "1" adrift in the middle of it.
+const statGrid = (items) => `<div class="stats n${Math.min(Math.max(items.length, 2), 4)}">
+  ${items.map((it) => `<div class="stat">
+    <div class="stat-label">${esc(it.noun)}</div>
+    <div class="stat-value">${esc(it.n)}</div>
+  </div>`).join("")}</div>`;
+
 async function showOverview() {
   const view = beginView("Overview", "overview");
   const ws = encodeURIComponent(state.workspace);
@@ -1406,6 +1472,8 @@ async function showOverview() {
       <div class="stat-note">${esc(note)}</div>
     </div>`;
 
+    const derived = splitOverview(artifact.body);
+
     if (!view.done(`
       <h1>${esc(bench?.name || state.workspace)}</h1>
       <p class="overview-deck">A compiled wiki, kept current as its sources change.</p>
@@ -1416,6 +1484,14 @@ async function showOverview() {
         ${stat("Open questions", open === null ? "—" : String(open.length),
           open === null ? "reviews unavailable" : "waiting for a decision in Reviews")}
       </div>
+
+      ${derived.reads.length ? `
+        <div class="sec-head"><div class="group-label">What this bench reads</div></div>
+        ${statGrid(derived.reads)}` : ""}
+
+      ${derived.contents.length ? `
+        <div class="sec-head"><div class="group-label">Contents</div></div>
+        ${statGrid(derived.contents)}` : ""}
 
       ${known && clusters.length ? `
         <div class="sec-head"><div class="group-label">Freshness by cluster</div></div>
@@ -1444,11 +1520,11 @@ async function showOverview() {
           </a>`).join("")}
         </div>` : ""}
 
-      ${artifact.body?.trim()
+      ${derived.rest.trim()
         // The artifact opens with its own "# Overview", which would be a second
         // <h1> under the bench name above. Shifted down one, it becomes the
         // heading of the generated prose section, which is what it now is.
-        ? `<div class="prose">${renderMarkdown(artifact.body, 1)}</div>` : ""}`)) return;
+        ? `<div class="prose">${renderMarkdown(derived.rest, 1)}</div>` : ""}`)) return;
     sizeBars($("main"));
   } catch (err) {
     if (!err.handled) view.done(banner(err));
@@ -1624,63 +1700,6 @@ async function showLog() {
   }
 }
 
-async function showGaps() {
-  const view = beginView("Gaps", "gaps");
-  try {
-    const gaps = await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`);
-    if (!gaps.length) {
-      view.done(`${viewHead("Gaps", "gaps")}<div class="empty">
-        ${state.pages.length
-          ? "No gaps — every link resolves to an existing page."
-          : `Nothing to check yet — gaps are links the wiki wants and does not have. <a href="#/overview">Start here</a>.`}</div>`);
-      return;
-    }
-    // Demand is scaled against the most-wanted gap, so the bars compare with
-    // each other rather than with an invented ceiling.
-    const peak = Math.max(...gaps.map((g) => Number(g.wantedBy) || 0), 1);
-    if (!view.done(`${viewHead("Gaps", "gaps")}
-      <p class="view-deck">Pages existing content links to but that have never been
-        written — the wiki's own account of what it is missing.</p>
-      <div id="gap-note" class="hint" role="status"></div>
-      <div class="card rows">
-        ${gaps.map((g) => `<div class="gap-row">
-          <span class="slug">${esc(g.slug)}</span>
-          <div class="bar"><span class="fill-soft" data-w="${Math.round((Number(g.wantedBy) || 0) / peak * 100)}"></span></div>
-          <span class="count">wanted by ${esc(g.wantedBy)} page${g.wantedBy === 1 ? "" : "s"}</span>
-          <button class="btn quiet gap-ask" data-gap="${esc(g.slug)}">Ask for it</button>
-        </div>`).join("")}
-      </div>`)) return;
-    sizeBars($("main"));
-
-    // Asking files a gap review, so the next plan covers the page. The server
-    // deduplicates open items on kind and title -- asking twice asks once --
-    // and the button says so rather than pretending each click did something.
-    // Not once(): that helper hands the button back on the way out, and this
-    // one must stay spent -- the answer to "ask again?" is that you already did.
-    for (const b of document.querySelectorAll("[data-gap]")) {
-      b.addEventListener("click", async () => {
-        if (b.disabled) return;
-        b.disabled = true;
-        try {
-          await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps/${encodeURIComponent(b.dataset.gap)}/request`,
-            { method: "POST", body: {} });
-          b.textContent = "Asked";
-          b.classList.add("asked");
-          toast("Asked — filed as a question in Reviews");
-          refreshReviewsBadge();
-        } catch (err) {
-          b.disabled = false;
-          if (err.handled) return;
-          const n = $("gap-note");
-          if (n) { n.textContent = err.message; n.classList.add("error"); }
-        }
-      });
-    }
-  } catch (err) {
-    if (!err.handled) view.done(banner(err));
-  }
-}
-
 // ---- review icons -----------------------------------------------------------
 // A review list repeats the same handful of words down the page: what is being
 // asked about. As a glyph in a tinted square that column is scannable at a
@@ -1769,24 +1788,40 @@ const kindClass = (kind) =>
 // now a filter pill rather than a separate route. Every hash it has ever had
 // stays routable.
 async function showReviews(history) {
-  if (history) reviewFilter = "answered";
+  // `true` is the resolved queue and "gaps" is the gaps queue; anything else
+  // leaves whichever pill was last chosen alone, so re-rendering after an
+  // action does not throw the reader back to Open.
+  if (history === "gaps") reviewFilter = "gaps";
+  else if (history) reviewFilter = "answered";
   const view = beginView("Reviews", "reviews");
   try {
     // "answered" covers both statuses a resolution writes, 'resolved' and
     // 'approved'; asking for either alone would hide half the history.
     const wanted = reviewFilter === "answered" ? "answered" : "open";
-    const [open, shown] = await Promise.all([
+    const [open, shown, gaps] = await Promise.all([
       api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=open`),
       wanted === "open"
         ? null
         : api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=answered`),
+      // Rides the same revision-keyed cache as everything else here, so the
+      // count on the pill costs a 304 rather than a scan.
+      api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps`).catch(() => []),
     ]);
     if (!view.current()) return;
+
+    // Demand is scaled against the most-wanted gap, so the bars compare with
+    // each other rather than with an invented ceiling.
+    const peak = Math.max(...gaps.map((g) => Number(g.wantedBy) || 0), 1);
+    const gapRows = gaps.map((g) => ({
+      id: `gap:${g.slug}`, kind: "gap", gap: true, slug: g.slug, title: g.slug,
+      wantedBy: Number(g.wantedBy) || 0, peak,
+    }));
 
     const pool = wanted === "open" ? open : shown;
     // "Researching" is a flag on an open review, not a status of its own: a
     // question someone handed to a worker is still waiting for a human.
-    reviewRows = reviewFilter === "open" ? pool.filter((r) => !r.researching)
+    reviewRows = reviewFilter === "gaps" ? gapRows
+      : reviewFilter === "open" ? pool.filter((r) => !r.researching)
       : reviewFilter === "researching" ? pool.filter((r) => r.researching)
       : pool;
     if (selectedReviewIndex >= reviewRows.length) selectedReviewIndex = 0;
@@ -1794,6 +1829,7 @@ async function showReviews(history) {
     const counts = {
       open: open.filter((r) => !r.researching).length,
       researching: open.filter((r) => r.researching).length,
+      gaps: gaps.length,
     };
     const pill = (key, label) =>
       `<button class="pill" data-filter="${key}" aria-pressed="${reviewFilter === key}">${label}</button>`;
@@ -1810,6 +1846,11 @@ async function showReviews(history) {
           <div class="pills" role="group" aria-label="Filter reviews">
             ${pill("open", `Open ${counts.open}`)}
             ${pill("researching", `Researching ${counts.researching}`)}
+            ${counts.gaps || reviewFilter === "gaps"
+              // A bench with no gaps says nothing rather than "Gaps 0" -- but
+              // the queue stays reachable by hash, and arriving there to find
+              // no pill pressed is a page that looks broken.
+              ? pill("gaps", `Gaps ${counts.gaps}`) : ""}
             ${pill("answered", "Resolved")}
           </div>
         </div>
@@ -1821,16 +1862,23 @@ async function showReviews(history) {
               <span class="inbox-row-top">
                 <span class="kind-sq">${REVIEW_KIND_ICONS[r.kind] || iconUncertain}</span>
                 <span class="kind-name">${esc(r.kind)}</span>
-                <span class="inbox-row-when">${esc(relTime(r.created))}</span>
+                <span class="inbox-row-when">${r.gap
+                  ? `wanted by ${esc(r.wantedBy)}`
+                  : esc(relTime(r.created))}</span>
               </span>
               <span class="inbox-row-title">${esc(r.title)}</span>
-              <span class="inbox-row-unit">${esc(r.unit ? unitSource(r.unit).name : (r.pageSlug || ""))}</span>
+              <span class="inbox-row-unit">${r.gap ? "not written yet"
+                : esc(r.unit ? unitSource(r.unit).name : (r.pageSlug || ""))}</span>
             </button>`).join("")
             : `<div class="empty">${reviewFilter === "answered"
                 ? "Nothing resolved yet. Answered reviews are kept here as a record of what was decided."
                 : reviewFilter === "researching"
                   ? "Nothing is being researched right now."
-                  : `No open reviews. Builds file one here when they need a decision,
+                  : reviewFilter === "gaps"
+                    ? (state.pages.length
+                        ? "No gaps — every link resolves to an existing page."
+                        : "Nothing to check yet — gaps are links the wiki wants and does not have.")
+                    : `No open reviews. Builds file one here when they need a decision,
                      such as confirming a deletion after a source disappears.`}</div>`}
         </div>
       </div>
@@ -1846,8 +1894,33 @@ async function showReviews(history) {
 // reviewDetailHTML is the right pane: the question, what it rests on, and the
 // buttons that answer it. Rendered from the row already in memory, so moving
 // the selection costs no request.
+// A gap is a question the wiki is already asking -- a page its own content
+// links to and does not have -- so it belongs in the queue of things waiting on
+// a person, not in a tab of its own next to Overview and Graph. It differs from
+// the rest of the inbox in one way: nothing has filed it yet. Asking is what
+// files it, after which it appears under Open as an ordinary gap review with
+// the vocabulary that kind already has.
+function gapDetailHTML(r) {
+  return `
+    <button class="btn quiet inbox-back" id="inbox-back">← All reviews</button>
+    <div class="meta">
+      <span class="kind-pill k-gap">gap</span>
+      <span class="meta-when">wanted by ${esc(r.wantedBy)} page${r.wantedBy === 1 ? "" : "s"}</span>
+    </div>
+    <h2>${esc(r.slug)}</h2>
+    <div class="detail">Existing pages link to this and it has never been written.
+      Asking for it files a question here, so the next build plans the page.</div>
+    <div class="bar"><span class="fill-soft" data-w="${Math.round(r.wantedBy / r.peak * 100)}"></span></div>
+    <div class="action-bar">
+      <button class="btn" data-gap="${esc(r.slug)}">Ask for it</button>
+      <span class="action-hint">↑↓ to move</span>
+    </div>
+    <div id="review-note" class="hint" role="status"></div>`;
+}
+
 function reviewDetailHTML(r) {
   if (!r) return `<div class="empty">Select a review to see it here.</div>`;
+  if (r.gap) return gapDetailHTML(r);
   const acts = actionsFor(r.kind);
   const keys = (r.actions && r.actions.length ? r.actions : ["dismiss"]);
   return `
@@ -1900,6 +1973,7 @@ function wireInbox(view) {
       if (on) el.scrollIntoView({ block: "nearest" });
     }
     $("inbox-detail").innerHTML = reviewDetailHTML(reviewRows[selectedReviewIndex]);
+    sizeBars($("inbox-detail")); // a gap's demand bar; no-op for every other kind
     wireDetail();
     if (focusDetail) document.body.classList.add("inbox-detail-open");
   };
@@ -1944,6 +2018,27 @@ function wireInbox(view) {
     for (const b of document.querySelectorAll("#inbox-detail [data-review]")) {
       once(b, () => resolve(b));
     }
+    // Not once(): that helper hands the button back on the way out, and this
+    // one must stay spent -- the server deduplicates open items on kind and
+    // title, so asking twice asks once, and the button says so rather than
+    // pretending the second click did something.
+    for (const b of document.querySelectorAll("#inbox-detail [data-gap]")) {
+      b.addEventListener("click", async () => {
+        if (b.disabled) return;
+        b.disabled = true;
+        try {
+          await api(`/workspaces/${encodeURIComponent(state.workspace)}/gaps/${encodeURIComponent(b.dataset.gap)}/request`,
+            { method: "POST", body: {} });
+          b.textContent = "Asked";
+          b.classList.add("asked");
+          toast("Asked — filed as a question under Open");
+          refreshReviewsBadge();
+        } catch (err) {
+          b.disabled = false;
+          if (!err.handled) note(err.message);
+        }
+      });
+    }
     for (const b of document.querySelectorAll("#inbox-detail [data-research]")) {
       once(b, async () => {
         try {
@@ -1960,6 +2055,7 @@ function wireInbox(view) {
     }
   }
   wireDetail();
+  sizeBars($("inbox-detail"));
 
   // Document-level, so the shortcuts work anywhere on this screen rather than
   // only while a row has focus. Torn down with the view.
@@ -2911,6 +3007,89 @@ async function showGraph() {
   }
 }
 
+// showBench is what the bench itself is, and what can be done to it as a
+// whole. Deletion started out at the foot of Members, which was the wrong
+// room: Members is about who may reach this bench, and the one control there
+// that destroyed it had nothing to do with the list above it. A page about the
+// bench is where someone goes looking for it, and the account sheet is where
+// the other two bench-level pages already live.
+//
+// It opens with the facts that identify the bench, because the slug is what
+// deletion asks to have typed back, and reading it off the page you are
+// deleting from beats hunting for it in the picker.
+async function showBench() {
+  const view = beginView("Bench configuration", "bench");
+  const bench = state.benches.find((b) => b.slug === state.workspace);
+  const pages = state.pages.length;
+  try {
+    if (!view.done(`${viewHead("Bench configuration", "bench")}
+      <div class="stats n3">
+        <div class="stat">
+          <div class="stat-label">Name</div>
+          <div class="stat-value stat-text">${esc(bench?.name || state.workspace)}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Slug</div>
+          <div class="stat-value stat-text mono">${esc(state.workspace)}</div>
+          <div class="stat-note">what URLs and agents call it</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Pages</div>
+          <div class="stat-value">${pages}</div>
+          <div class="stat-note">${pages ? "written by past builds" : "nothing built yet"}</div>
+        </div>
+      </div>
+
+      <div class="sec-head"><div class="group-label">Delete this bench</div></div>
+      <p class="hint">Removes <strong>${esc(bench?.name || state.workspace)}</strong> and
+        everything in it — every page, run, review, connector and uploaded document.
+        Unlike an approved deletion review, which only tells the next build to drop
+        some pages, this is immediate and there is no undo.</p>
+      <div class="row">
+        <input id="bench-delete-slug" placeholder="type ${esc(state.workspace)} to confirm"
+               aria-label="Repeat the bench slug to confirm deletion"
+               autocomplete="off" spellcheck="false">
+        <button class="btn danger" id="bench-delete" disabled>Delete bench</button>
+      </div>
+      <div id="bench-delete-note" class="hint" role="status"></div>`)) return;
+
+    // Deleting a bench is gated three times over, which is proportionate to it
+    // being the one control in the UI that destroys work outright: the server
+    // requires an org owner, the button stays disabled until the slug is typed
+    // exactly, and the click itself arms before it commits. Typing the name is
+    // the gate that actually matters -- it is the only one a person cannot
+    // pass by reflex.
+    const delBtn = $("bench-delete");
+    const delSlug = $("bench-delete-slug");
+    const delNote = (msg, isError) => {
+      const n = $("bench-delete-note");
+      if (n) { n.textContent = msg || ""; n.classList.toggle("error", Boolean(isError)); }
+    };
+    delSlug.addEventListener("input", () => {
+      delBtn.disabled = delSlug.value.trim() !== state.workspace;
+    });
+    delBtn.addEventListener("click", async () => {
+      if (delBtn.disabled) return;
+      if (!armButton(delBtn, "delete")) return;
+      delBtn.disabled = true;
+      try {
+        await api(`/workspaces/${encodeURIComponent(state.workspace)}`,
+          { method: "DELETE", body: { slug: delSlug.value.trim() } });
+        // The remembered bench no longer exists, so clear it before reloading:
+        // boot would otherwise resolve a slug that 404s and land the reader on
+        // an error instead of on whatever bench they still have.
+        try { localStorage.removeItem(WORKSPACE_KEY); } catch { /* private mode */ }
+        location.reload();
+      } catch (err) {
+        delBtn.disabled = false;
+        if (!err.handled) delNote(err.message, true);
+      }
+    });
+  } catch (err) {
+    if (!err.handled) view.done(banner(err));
+  }
+}
+
 // showMembers manages the org behind this bench: who belongs, with what
 // role. Owners and instance admins only; everyone else sees the explanation
 // rather than a broken form.
@@ -2947,12 +3126,14 @@ async function showMembers() {
           </select>
           <button class="btn" id="member-add">Add</button>
         </span>
-      </div>`)) return;
+      </div>
+`)) return;
 
     const note = (msg, isError) => {
       const n = $("member-note");
       if (n) { n.textContent = msg; n.classList.toggle("error", Boolean(isError)); }
     };
+
     for (const sel of document.querySelectorAll("select[data-member]")) {
       sel.addEventListener("change", async () => {
         try {
@@ -2995,11 +3176,22 @@ async function showMembers() {
 
 // showSteering edits the purpose and schema documents: the main lever for
 // changing a wiki's character, injected into every prompt from the next run.
+// Which agent's instructions are showing. View state, not persisted: most
+// people connect one agent once, and the first panel is the common case.
+let mcpAgent = "claude-code";
+
 // showMCP is the setup page for reading this bench from an agent. Everything an
 // agent needs is here rather than in a README the reader would have to go and
-// find: the command, the URL of this very instance, the bench slug, and the key
-// -- which used to require a shell on the host running `kiln admin token
-// create`, a step nobody with only a browser could take.
+// find: the endpoint of this very instance, the exact command or config for the
+// agent doing the connecting, and the key -- which used to require a shell on
+// the host running `kiln admin token create`, a step nobody with only a browser
+// could take.
+//
+// The page used to offer one answer, the `kiln mcp` subprocess, which is now
+// the answer for exactly one of the four agents below. Serving MCP over HTTP
+// made the endpoint the primary way in, and the reader's first question became
+// which of the two their agent wants -- so the page asks that first and then
+// says one thing.
 async function showMCP() {
   const view = beginView("Agent access", "mcp");
   try {
@@ -3028,34 +3220,126 @@ async function showMCP() {
 
     const ws = state.workspace || "your-bench";
     const origin = location.origin;
-    const config = JSON.stringify({
+    const endpoint = `${origin}/mcp`;
+    // The key is a placeholder in every snippet on this page. Substituting a
+    // real one would put it in the DOM of a page that stays open, and the
+    // whole point of showing a key once is that it does not linger.
+    const keyish = anonymous ? "" : "kiln_...";
+
+    // Two ways in, and which one an agent can use is not a preference: a
+    // connector added in the Claude apps is dialled by Anthropic's servers, so
+    // a loopback or private address is unreachable no matter how it is spelled.
+    // The panel for each agent says which side of that line it is on rather
+    // than offering both and letting the reader find out by failing.
+    const remoteReachable = /^https:$/.test(location.protocol);
+
+    const agents = [
+      { key: "claude-code", label: "Claude Code" },
+      { key: "claude-desktop", label: "Claude Desktop" },
+      { key: "claude-web", label: "Claude.ai" },
+      { key: "other", label: "Other client" },
+    ];
+
+    const desktopConfig = JSON.stringify({
       mcpServers: {
         kiln: {
           command: "kiln",
-          args: ["mcp", "--url", origin, "--workspace", ws],
-          ...(anonymous ? {} : { env: { KILN_TOKEN: "<your key>" } }),
+          args: ["mcp", "--url", origin],
+          ...(anonymous ? {} : { env: { KILN_TOKEN: keyish } }),
         },
       },
     }, null, 2);
+
+    const codeCmd = anonymous
+      ? `claude mcp add --transport http kiln ${endpoint}`
+      : `claude mcp add --transport http kiln ${endpoint} \\\n  --header "Authorization: Bearer ${keyish}"`;
+
+    // Each panel is the whole answer for one agent: what to run or paste, where
+    // it goes, and the one caveat that actually bites. Written out rather than
+    // generated from a table because the caveats do not rhyme with each other.
+    const panels = {
+      "claude-code": `
+        <p class="hint">Runs on your machine and dials the endpoint itself, so any
+          address you can reach works — including this one over plain http.</p>
+        <div class="copybox">
+          <pre class="mono" id="mcp-snip-claude-code">${esc(codeCmd)}</pre>
+          <button class="btn quiet" data-copy="mcp-snip-claude-code">Copy</button>
+        </div>
+        <p class="hint">Check it with <span class="mono">claude mcp list</span> — the
+          entry should read <span class="mono">✔ Connected</span>.</p>`,
+      "claude-desktop": `
+        <p class="hint">The desktop app's connector list is fetched by Anthropic's
+          servers, so it cannot reach a private address. Run kiln as a local
+          subprocess instead — no reachable URL, no TLS.</p>
+        <p class="hint">Paste into <span class="mono">claude_desktop_config.json</span>
+          (<span class="mono">~/Library/Application Support/Claude/</span> on macOS,
+          <span class="mono">%APPDATA%\\Claude\\</span> on Windows), then restart the app.</p>
+        <div class="copybox">
+          <pre class="mono" id="mcp-snip-claude-desktop">${esc(desktopConfig)}</pre>
+          <button class="btn quiet" data-copy="mcp-snip-claude-desktop">Copy</button>
+        </div>
+        <p class="hint"><span class="mono">kiln</span> must be on your
+          <span class="mono">PATH</span>, or give an absolute path. Add
+          <span class="mono">"--workspace", "${esc(ws)}"</span> to the args only to
+          confine the agent to this bench — without it, it reaches every bench the
+          key allows.</p>`,
+      "claude-web": `
+        <p class="hint"><em>Settings → Connectors → Add custom connector</em>, with this
+          endpoint.</p>
+        <div class="copybox">
+          <pre class="mono" id="mcp-snip-claude-web">${esc(endpoint)}</pre>
+          <button class="btn quiet" data-copy="mcp-snip-claude-web">Copy</button>
+        </div>
+        ${remoteReachable ? "" : `<div class="banner">This page is served over
+          <span class="mono">${esc(location.protocol.replace(":", ""))}</span>, and a
+          custom connector is fetched by Anthropic's servers over the public internet.
+          It will not reach this address. Serve kiln over https on a public name —
+          set <span class="mono">public_url</span> behind a terminating proxy — and
+          use that origin here.</div>`}
+        ${anonymous
+          ? `<p class="hint">This instance runs with authentication disabled, so the
+             connector needs no credential once it is reachable.</p>`
+          : `<p class="hint">Put the key in the dialog's <strong>Request headers</strong>
+             section: name <span class="mono">Authorization</span>, value
+             <span class="mono">Bearer ${esc(keyish)}</span> — including the word
+             <span class="mono">Bearer</span>. That field is in beta; kiln does not
+             implement the OAuth flows the other connector auth types need.</p>`}`,
+      other: `
+        <p class="hint">Anything that speaks Streamable HTTP takes the endpoint
+          ${anonymous ? "as it is" : "plus a bearer header"}.</p>
+        <div class="copybox">
+          <pre class="mono" id="mcp-snip-other">${esc(anonymous
+            ? endpoint
+            : `${endpoint}\nAuthorization: Bearer ${keyish}`)}</pre>
+          <button class="btn quiet" data-copy="mcp-snip-other">Copy</button>
+        </div>
+        <p class="hint">A client that wants a command rather than a URL — or that runs
+          somewhere this address does not resolve — takes the subprocess form under
+          Claude Desktop instead. Both run the same tools against the same API.</p>`,
+    };
 
     if (!view.done(`${viewHead("Agent access", "mcp")}
       <p class="hint">Point Claude, or any MCP-capable agent, at this bench so it
         answers from the compiled wiki instead of re-reading your sources.</p>
 
-      <div class="group-label">1 · Configuration</div>
-      <p class="hint">Add this to your agent's MCP configuration. The command runs
-        the same <span class="mono">kiln</span> binary that serves this page.</p>
+      <div class="group-label">1 · Endpoint</div>
+      <p class="hint">This instance serves MCP over Streamable HTTP. There is nothing
+        to enable and nothing to run — the server holding this page is the server an
+        agent talks to.</p>
       <div class="copybox">
-        <pre class="mono" id="mcp-config">${esc(config)}</pre>
-        <button class="btn quiet" data-copy="mcp-config">Copy</button>
+        <pre class="mono" id="mcp-endpoint">${esc(endpoint)}</pre>
+        <button class="btn quiet" data-copy="mcp-endpoint">Copy</button>
       </div>
-      <p class="hint">Reading is over the HTTP API, so the agent needs no database
-        credentials and works against this instance from anywhere it can reach
-        <span class="mono">${esc(origin)}</span>. Drop
-        <span class="mono">--workspace</span> and every tool takes a bench argument
-        instead.</p>
 
-      <div class="group-label">2 · Keys</div>
+      <div class="group-label">2 · Your agent</div>
+      <div class="pills" role="group" aria-label="Choose an agent">
+        ${agents.map((a) => `<button class="pill" data-agent="${a.key}"
+          aria-pressed="${mcpAgent === a.key}">${esc(a.label)}</button>`).join("")}
+      </div>
+      ${agents.map((a) => `<div data-agent-panel="${a.key}"
+        ${mcpAgent === a.key ? "" : "hidden"}>${panels[a.key]}</div>`).join("")}
+
+      <div class="group-label">3 · Keys</div>
       ${keys
         ? `<p class="hint">A key carries the read scope and nothing else, and sees
              exactly the benches you do. It is shown once — kiln stores only a
@@ -3074,7 +3358,7 @@ async function showMCP() {
                 the configuration above.`
              : esc(keysErr || "This instance does not issue keys.")}</div>`}
 
-      <div class="group-label">3 · What the agent gets</div>
+      <div class="group-label">4 · What the agent gets</div>
       <p class="hint">Seven tools. <span class="mono">search_wiki</span> and
         <span class="mono">read_page</span> carry most traffic, with
         <span class="mono">wiki_overview</span> for orientation,
@@ -3085,6 +3369,22 @@ async function showMCP() {
         <em>"the wiki has not covered X yet"</em>.</p>`)) return;
 
     wireCopyButtons();
+
+    // Switching agents swaps panels rather than re-rendering the view: a key
+    // generated a moment ago is sitting in the markup below, shown once, and a
+    // re-render would take it away while the reader was still copying it.
+    for (const b of document.querySelectorAll("[data-agent]")) {
+      b.addEventListener("click", () => {
+        mcpAgent = b.dataset.agent;
+        for (const p of document.querySelectorAll("[data-agent-panel]")) {
+          p.hidden = p.dataset.agentPanel !== mcpAgent;
+        }
+        for (const other of document.querySelectorAll("[data-agent]")) {
+          other.setAttribute("aria-pressed", String(other.dataset.agent === mcpAgent));
+        }
+      });
+    }
+
     if (!keys) return;
 
     const note = (msg, isErr) => {
@@ -3396,7 +3696,6 @@ async function loadWorkspace(slug) {
   state.slugs = new Set(state.pages.map((p) => p.slug));
   route();
   armRunPoll();
-  refreshGapsCount();
 
   // Arm the live poll for this workspace. Clearing first makes workspace
   // switches safe; the first tick captures the baseline revision.
@@ -3415,15 +3714,19 @@ function route() {
   if (hash === "overview") return overviewOrGetStarted();
   if (hash === "index") return showIndex();
   if (hash === "log") return showLog();
-  if (hash === "gaps") return showGaps();
   if (hash === "graph") return showGraph();
   if (hash === "reviews") return showReviews(false);
   // reviews/all is the old hash for the same idea; keep it routable.
   if (hash === "reviews/history" || hash === "reviews/all") return showReviews(true);
+  // Gaps was its own view in the rail. It is a queue in the inbox now, and
+  // both hashes land on it -- bookmarks and habit outlive the reorganization.
+  if (hash === "gaps" || hash === "reviews/gaps") return showReviews("gaps");
   // Sources and runs merged into one view; every hash it has ever had stays
   // routable so bookmarks and habit survive.
   if (hash === "ingest" || hash === "ingestion" || hash === "sources" || hash === "runs") return showSources();
   if (hash === "members") return showMembers();
+  // "settings" is what people guess before they have seen the menu.
+  if (hash === "bench" || hash === "settings") return showBench();
   if (hash === "mcp") return showMCP();
   if (hash === "steering") return showSteering();
   // The default landing, and the explicit one, both route through the same
@@ -3456,6 +3759,7 @@ const PALETTE_DESTINATIONS = [
   { title: "Log", hash: "#/log" }, { title: "Reviews", hash: "#/reviews" },
   { title: "Ingest", hash: "#/ingest" }, { title: "Steering", hash: "#/steering" },
   { title: "Members", hash: "#/members" }, { title: "Agent access (MCP)", hash: "#/mcp" },
+  { title: "Bench configuration", hash: "#/bench" },
 ];
 
 // ingestNow queues a build from wherever you are. The one palette entry that
@@ -3895,7 +4199,10 @@ async function boot() {
 
     if (localStorage.getItem(TOKEN_KEY) || csrfToken()) {
       const so = $("signout");
-      so.hidden = false;
+      // The group carries the separator above it, so an instance with nothing
+      // to sign out of must hide the wrapper too -- a bare rule under the last
+      // link is a divider between a list and nothing.
+      $("signout-group").hidden = false;
       so.addEventListener("click", async () => {
         localStorage.removeItem(TOKEN_KEY);
         // A GitHub session is server-side: revoke it, not just the cookie.

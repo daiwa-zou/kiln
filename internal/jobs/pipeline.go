@@ -311,6 +311,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		Workspace: req.workspaceLabel(),
 		Ref:       req.Ref,
 		Date:      now.Format(wiki.DateFormat),
+		BuiltAt:   now.Format(wiki.StampFormat),
 		Narrative: findings,
 		Sources:   sourceTallies(req.Map),
 	})

@@ -17,6 +17,67 @@ var ErrOrgForbidden = errors.New("store: org belongs to someone else")
 // ErrWorkspaceExists means the slug is taken inside the org.
 var ErrWorkspaceExists = errors.New("store: workspace already exists")
 
+// DeleteWorkspace removes a bench and everything scoped to it, returning the
+// blob keys its uploaded documents referenced so the caller can free the
+// objects behind them.
+//
+// The row is the only thing this deletes explicitly. Every workspace-scoped
+// table -- pages, artifacts, runs, reviews, connectors, files -- declares
+// ON DELETE CASCADE, so the database removes them in one statement and cannot
+// leave a half-deleted bench behind if this process dies mid-way.
+//
+// Blobs are the exception, because they do not live in the database. Their
+// keys are read inside the transaction, before the cascade takes the rows that
+// name them; deleting the objects themselves is the caller's job and is
+// deliberately not part of this transaction. An object store delete that fails
+// must not roll back a bench the user asked to be rid of -- the worst case is
+// an orphaned blob nothing points at, which is a cleanup job, not a bug the
+// user experiences.
+//
+// The org is left alone even when this was its last workspace. Orgs carry
+// membership, and dissolving one because its last bench went away would revoke
+// people's access to a tenant they still own.
+func (s *WikiStore) DeleteWorkspace(ctx context.Context, workspaceID string) ([]string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin delete workspace: %w", err)
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	rows, err := tx.Query(ctx,
+		`SELECT blob_key FROM workspace_files WHERE workspace_id = $1 AND blob_key <> ''`,
+		workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("store: collect blob keys: %w", err)
+	}
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: scan blob key: %w", err)
+		}
+		keys = append(keys, k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: collect blob keys: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM workspaces WHERE id = $1`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("store: delete workspace: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrNotFound
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("store: commit delete workspace: %w", err)
+	}
+	return keys, nil
+}
+
 // CreateWorkspace makes an org (if needed), a workspace, and its wiki, and
 // binds the creator to the org as an owner.
 //

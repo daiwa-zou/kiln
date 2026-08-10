@@ -16,6 +16,10 @@ type FileRow struct {
 	ID          string
 	WorkspaceID string
 	Path        string
+	// DisplayName is a readable label derived from the filename at upload
+	// time. Never part of identity: Path is what the row is unique on, and two
+	// uploads may derive the same label.
+	DisplayName string
 	BlobKey     string
 	SizeBytes   int64
 	ContentType string
@@ -32,7 +36,7 @@ type FileRow struct {
 // both the UI and the worker's materialization want.
 func (s *WikiStore) ListFiles(ctx context.Context, workspaceID string) ([]FileRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, workspace_id, path, blob_key, size_bytes,
+		SELECT id, workspace_id, path, display_name, blob_key, size_bytes,
 		       coalesce(content_type, ''), sha256, coalesce(uploaded_by::text, ''),
 		       enabled, created_at, updated_at
 		FROM workspace_files WHERE workspace_id = $1 ORDER BY path`, workspaceID)
@@ -44,7 +48,7 @@ func (s *WikiStore) ListFiles(ctx context.Context, workspaceID string) ([]FileRo
 	out := []FileRow{}
 	for rows.Next() {
 		var f FileRow
-		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.Path, &f.BlobKey, &f.SizeBytes,
+		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.Path, &f.DisplayName, &f.BlobKey, &f.SizeBytes,
 			&f.ContentType, &f.SHA256, &f.UploadedBy, &f.Enabled, &f.CreatedAt, &f.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan file: %w", err)
 		}
@@ -78,9 +82,10 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO workspace_files
-			(workspace_id, path, blob_key, size_bytes, content_type, sha256, uploaded_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+			(workspace_id, path, display_name, blob_key, size_bytes, content_type, sha256, uploaded_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (workspace_id, path) DO UPDATE SET
+			display_name = excluded.display_name,
 			blob_key     = excluded.blob_key,
 			size_bytes   = excluded.size_bytes,
 			content_type = excluded.content_type,
@@ -91,7 +96,7 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 			enabled      = TRUE,
 			updated_at   = now()
 		RETURNING id`,
-		f.WorkspaceID, f.Path, f.BlobKey, f.SizeBytes,
+		f.WorkspaceID, f.Path, f.DisplayName, f.BlobKey, f.SizeBytes,
 		nullable(f.ContentType), f.SHA256, nullable(f.UploadedBy)).Scan(&id); err != nil {
 		return "", "", fmt.Errorf("store: create file: %w", err)
 	}
