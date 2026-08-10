@@ -2216,28 +2216,52 @@ async function showGraph() {
 
     position();
 
-    // The layout settles across animation frames rather than blocking the
-    // main thread; interactions can re-arm it so the graph keeps breathing
-    // after a drag.
-    let budget = 260;
+    // The layout settles across animation frames rather than blocking the main
+    // thread, and interactions re-arm it so the graph keeps moving after a drag.
+    //
+    // alpha is the simulation's temperature: it scales every force and decays
+    // toward rest on its own. It replaces a countdown of remaining iterations
+    // that also *was* the force scale, which coupled two things that want
+    // opposite behaviour -- a short re-arm after a drag left alpha at the floor,
+    // so the layout crawled for four frames and stopped. A node let go mid-flight
+    // simply stayed where it was dropped, which is the freeze this fixes: the
+    // temperature now comes back up on release and decays from there.
+    // Decay is set so a run from full heat to rest is ~260 iterations, which is
+    // the iteration count the layout was tuned against; the release and drag
+    // temperatures then fall out of it as fractions of that run. From a release
+    // at 0.55 the graph re-settles over about a second -- long enough to read as
+    // motion, short enough that nobody waits for it.
+    const ALPHA_MIN = 0.02, ALPHA_DECAY = 0.985;
+    const ALPHA_START = 1, ALPHA_RELEASE = 0.55, ALPHA_DRAG = 0.3, ALPHA_RESCALE = 0.7;
+    let alpha = 0;
     let settling = false;
     let autoFitted = false;
+    // The first layout runs hot -- ten iterations a frame -- because nobody is
+    // watching yet and a graph that arrives already arranged beats one that
+    // visibly untangles itself. Afterwards three is the budget: enough to
+    // converge in about half a second, few enough that an O(n^2) repulsion pass
+    // over a 300-node graph does not eat the frame the drag is being drawn in.
+    let stepsPerFrame = 10;
     const settle = () => {
       if (!view.current()) { settling = false; return; }
-      if (budget <= 0) {
+      for (let i = 0; i < stepsPerFrame && alpha > ALPHA_MIN; i++) {
+        tick(alpha);
+        alpha *= ALPHA_DECAY;
+      }
+      position();
+      if (alpha <= ALPHA_MIN) {
         settling = false;
+        stepsPerFrame = 3;
         if (!autoFitted) { autoFitted = true; fitView(); }
         return;
       }
-      for (let i = 0; i < 10 && budget > 0; i++, budget--) tick(Math.max(0.15, budget / 300));
-      position();
       requestAnimationFrame(settle);
     };
-    const reheat = (amount) => {
-      budget = Math.max(budget, amount);
+    const reheat = (target) => {
+      alpha = Math.max(alpha, target);
       if (!settling) { settling = true; requestAnimationFrame(settle); }
     };
-    reheat(260);
+    reheat(ALPHA_START);
 
     // --- pan & zoom -------------------------------------------------------
     const vb = { x: 0, y: 0, w: W, h: H };
@@ -2308,7 +2332,7 @@ async function showGraph() {
       applyVB();
       // Uniform rescaling magnifies the old layout's irregularities: let
       // the simulation relax into even spacing at the new scale.
-      reheat(140);
+      reheat(ALPHA_RESCALE);
     };
     const toSVG = (e) => {
       const rect = svg.getBoundingClientRect();
@@ -2400,22 +2424,37 @@ async function showGraph() {
       const g = e.target.closest("g.graph-node");
       const p = toSVG(e);
       drag = g
-        ? { i: Number(g.dataset.i), moved: 0 }
+        ? { i: Number(g.dataset.i), moved: 0, vx: 0, vy: 0 }
         : { pan: { x: vb.x, y: vb.y }, from: { cx: e.clientX, cy: e.clientY }, moved: 0 };
       if (g) pts[drag.i].pinned = true;
-      svg.setPointerCapture(e.pointerId);
       drag.last = p;
+      // Capture keeps the gesture alive when the pointer outruns the node, and
+      // is best effort: it throws when the id names no active pointer, and a
+      // drag that cannot be captured should still track normally rather than
+      // abandon the state it just built.
+      try { svg.setPointerCapture(e.pointerId); } catch { /* tracks without it */ }
     });
     svg.addEventListener("pointermove", (e) => {
       if (!drag) return;
       const p = toSVG(e);
       if (drag.i !== undefined) {
-        drag.moved += Math.hypot(p.x - drag.last.x, p.y - drag.last.y);
+        const dx = p.x - drag.last.x, dy = p.y - drag.last.y;
+        drag.moved += Math.hypot(dx, dy);
+        // Pointer velocity, smoothed over the last few moves so a throw is
+        // judged on the gesture rather than on whichever single event happened
+        // to land last -- a pointer that stops dead before lifting should not
+        // fling, and one still travelling should.
+        drag.vx = drag.vx * 0.6 + dx * 0.4;
+        drag.vy = drag.vy * 0.6 + dy * 0.4;
         pts[drag.i].x = p.x;
         pts[drag.i].y = p.y;
         drag.last = p;
         position();
-        reheat(40); // neighbors follow the dragged node
+        // Enough to keep neighbours following the node while it moves, but
+        // below the temperature a release re-arms: letting go should visibly
+        // hand the node back to the layout, not continue what was already
+        // happening.
+        reheat(ALPHA_DRAG);
       } else {
         const rect = svg.getBoundingClientRect();
         vb.x = drag.pan.x - ((e.clientX - drag.from.cx) / rect.width) * vb.w;
@@ -2427,7 +2466,18 @@ async function showGraph() {
     const endDrag = () => {
       if (!drag) return;
       if (drag.i !== undefined) {
-        pts[drag.i].pinned = false;
+        const p = pts[drag.i];
+        p.pinned = false;
+        // Hand the gesture's momentum to the node so it carries on for a
+        // moment instead of stopping the instant the finger lifts. Capped at
+        // the same per-tick travel the integrator allows, so a violent flick
+        // cannot launch a node across the canvas.
+        p.vx = Math.max(-8, Math.min(8, drag.vx));
+        p.vy = Math.max(-8, Math.min(8, drag.vy));
+        // The release is what needs the heat: until now nothing re-armed the
+        // simulation here, so a node let go simply stayed where it was dropped
+        // and the graph around it never re-settled.
+        reheat(ALPHA_RELEASE);
         // A press that never travels is a click, so navigation survives the
         // drag handlers -- but it selects rather than leaves the graph.
         if (drag.moved < 3) select(drag.i);
