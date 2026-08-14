@@ -15,6 +15,10 @@
   :root {
     --bg: #faf7f2;        --panel: #fffdfa;     --surface: #f4efe7;
     --sunk: #efe8dd;      --border: #e4dbcd;    --border-soft: #eee7db;
+    /* The mat behind a document figure. Near-white in both themes on purpose:
+       charts arrive drawn for paper, so the mat is what a transparent PNG
+       falls back onto rather than a dark panel it would vanish into. */
+    --figure-mat: #faf6ef;
     /* --ink-faint is two steps darker than the handoff's #8b7f71. That value
        measured 3.66:1 on --bg and 3.85:1 on --panel, under the 4.5:1 AA floor
        for body text, and it now carries every section label and every piece of
@@ -61,6 +65,9 @@
     :root {
       --bg: #1a1715;      --panel: #221d19;     --surface: #241f1b;
       --sunk: #2e2823;    --border: #3a322b;    --border-soft: #312a24;
+      /* Dimmed rather than dark: enough to stop a white chart glaring on a
+         dark page, light enough that black axis labels still read. */
+      --figure-mat: #d8d2c8;
       --ink: #ece5db;     --ink-dim: #b0a294;   --ink-faint: #948779;
       --ember: #e0872f;   --ember-soft: #4a3320; --ember-tint: #2a1d12;
       --on-ember: #1a1715;
@@ -618,6 +625,28 @@
   .prose th { background: var(--surface); font-weight: 600; }
   .prose img { max-width: 100%; border-radius: 8px; }
   .prose hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
+
+  /* A figure recovered from a source document. The surface behind it matters:
+     charts and diagrams are overwhelmingly exported on white, so in dark mode
+     a transparent PNG would render as dark-on-dark and a white JPEG would sit
+     on the page as a glaring slab. A light mat under every figure makes both
+     read the same way, and the border ties it to the surrounding panels. */
+  .prose .page-figure {
+    margin: 1.6em 0;
+    padding: 12px;
+    background: var(--figure-mat);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+  }
+  .prose .page-figure img {
+    display: block; margin: 0 auto; max-width: 100%; height: auto;
+    border-radius: 6px;
+  }
+  .prose .page-figure figcaption {
+    margin-top: 10px; padding-top: 9px;
+    border-top: 1px solid var(--border);
+    color: var(--ink-dim); font-size: 13px; line-height: 1.5; text-align: left;
+  }
   .wikilink { border-bottom: 1px solid var(--ember-soft); }
   .wikilink.dead {
     color: var(--ink-faint); border-bottom: 1px dashed var(--ink-faint); cursor: help;

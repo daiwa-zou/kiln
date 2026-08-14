@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 
@@ -161,8 +162,23 @@ func TestApprovedDeletionExecutesTheCascade(t *testing.T) {
 	}
 }
 
-// fakeBlobDeleter records the keys the pipeline's GC hook deleted.
-type fakeBlobDeleter struct{ deleted []string }
+// fakeBlobDeleter records what the pipeline stored and freed.
+type fakeBlobDeleter struct {
+	deleted []string
+	put     map[string][]byte
+}
+
+func (f *fakeBlobDeleter) Put(_ context.Context, key string, r io.Reader, _ int64) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	if f.put == nil {
+		f.put = map[string][]byte{}
+	}
+	f.put[key] = data
+	return nil
+}
 
 func (f *fakeBlobDeleter) Delete(_ context.Context, key string) error {
 	f.deleted = append(f.deleted, key)

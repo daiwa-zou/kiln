@@ -205,10 +205,16 @@ func testRequest(t *testing.T, m *mapper.WorkspaceMap, changes diff.ChangeSet) B
 type structuredRunner struct {
 	byUnit map[string][]agent.GeneratedPage
 	calls  int
+	// generatePrompt is the last generate-step prompt this runner was sent,
+	// for tests that assert on what the model was actually told.
+	generatePrompt string
 }
 
 func (s *structuredRunner) Run(_ context.Context, req agent.Request) (*agent.Result, error) {
 	s.calls++
+	if req.Step == agent.StepGenerate {
+		s.generatePrompt = req.Prompt
+	}
 	res := &agent.Result{
 		Subtype: "success", TerminalReason: "completed",
 		SessionID: req.SessionID, NumTurns: 1, TotalCostUSD: 0.01,

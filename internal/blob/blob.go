@@ -50,6 +50,16 @@ func FileKey(workspaceID, fileID string) string {
 	return "ws/" + workspaceID + "/uploads/" + fileID
 }
 
+// FigureKey builds the key for a picture recovered from a document.
+//
+// Keyed on the image's own content digest rather than a fresh id, which makes
+// the write idempotent: the same chart in a document ingested twice, or the
+// same logo across two documents in one bench, is stored once. digest is a
+// server-computed hex hash, so no user input reaches a key here either.
+func FigureKey(workspaceID, digest string) string {
+	return "ws/" + workspaceID + "/figures/" + digest
+}
+
 // validKey rejects keys that could escape a prefix or a filesystem root:
 // empty keys, absolute paths, dot and dot-dot segments, and empty segments.
 func validKey(key string) error {

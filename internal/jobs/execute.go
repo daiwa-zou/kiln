@@ -15,6 +15,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/connector/upload"
 	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/diff"
+	"github.com/daiwa-zou/kiln/internal/extract"
 	"github.com/daiwa-zou/kiln/internal/mapper"
 	"github.com/daiwa-zou/kiln/internal/mapper/docmap"
 	"github.com/daiwa-zou/kiln/internal/mapper/repomap"
@@ -105,6 +106,10 @@ type material struct {
 	// repository file or a fetched page has no row to rename.
 	DocNames map[string]string
 
+	// Figures are the pictures recovered from each document, keyed by unit
+	// key. Empty for a repository-only build: source code has no figures.
+	Figures map[string][]extract.Figure
+
 	staging []string
 }
 
@@ -180,45 +185,58 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 	// documents produce one wiki whose pages can link across the boundary
 	// rather than two wikis that cannot see each other.
 	if src.DocsDir != "" {
-		docMap, docRouter, docNames, staging, err := syncDocs(ctx, out, src.DocsDir)
-		if staging != "" {
-			m.staging = append(m.staging, staging)
+		doc, err := syncDocs(ctx, out, src.DocsDir)
+		if doc.Staging != "" {
+			m.staging = append(m.staging, doc.Staging)
 		}
 		if err != nil {
 			return fail(err)
 		}
-		merged, err := mapper.Merge(src.Path, m.Map, docMap)
+		merged, err := mapper.Merge(src.Path, m.Map, doc.Map)
 		if err != nil {
 			return fail(err)
 		}
 		m.Map = merged
-		maps.Copy(m.Router.DocPaths, docRouter)
+		maps.Copy(m.Router.DocPaths, doc.Routes)
 		// Section units have no path of their own; register them under their
 		// parent so routing a document also routes its chapters.
-		m.Router.DocSections = sectionsByParent(docMap)
-		m.DocNames = docNames
+		m.Router.DocSections = sectionsByParent(doc.Map)
+		m.DocNames = doc.Names
+		m.Figures = doc.Figures
 	}
 
 	// Web pages merge the same way: a third source kind, one wiki.
 	if len(src.WebURLs) > 0 {
-		webMap, webRouter, _, staging, err := syncWeb(ctx, out, src.WebURLs)
-		if staging != "" {
-			m.staging = append(m.staging, staging)
+		web, err := syncWeb(ctx, out, src.WebURLs)
+		if web.Staging != "" {
+			m.staging = append(m.staging, web.Staging)
 		}
 		if err != nil {
 			return fail(err)
 		}
-		merged, err := mapper.Merge(src.Path, m.Map, webMap)
+		merged, err := mapper.Merge(src.Path, m.Map, web.Map)
 		if err != nil {
 			return fail(err)
 		}
 		m.Map = merged
-		maps.Copy(m.Router.DocPaths, webRouter)
-		for parent, sections := range sectionsByParent(webMap) {
+		maps.Copy(m.Router.DocPaths, web.Routes)
+		for parent, sections := range sectionsByParent(web.Map) {
 			if m.Router.DocSections == nil {
 				m.Router.DocSections = map[diff.Key][]diff.Key{}
 			}
 			m.Router.DocSections[parent] = sections
+		}
+		// Carried generically, but empty in practice: a fetched page's images
+		// are remote URLs rather than embedded bytes, and retrieving them
+		// would have to go back through the connector's address guard as a
+		// second class of request. Until that exists the web connector
+		// recovers no figures, and this copy keeps the seam ready rather than
+		// pretending the case is handled.
+		if len(web.Figures) > 0 {
+			if m.Figures == nil {
+				m.Figures = map[string][]extract.Figure{}
+			}
+			maps.Copy(m.Figures, web.Figures)
 		}
 	}
 
@@ -290,6 +308,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		SkippedKeys:      req.Source.SkippedKeys,
 		Map:              wm,
 		DocumentNames:    mat.DocNames,
+		Figures:          mat.Figures,
 		Router:           router,
 		Changes:          changes,
 		Force:            req.Force,
@@ -326,37 +345,55 @@ type docSource struct {
 	payload func(*connector.SourceSet) ([]docmap.Doc, [][2]string, bool)
 }
 
+// docSync is what one document ingest produced. A struct rather than a fifth
+// and sixth return value: the procedure already handed back four things, and
+// figures made the positional form unreadable at the call site.
+type docSync struct {
+	Map    *mapper.WorkspaceMap
+	Routes map[string]diff.Key
+	// Names is what ingest worked out each document is called, keyed by the
+	// path its row is stored under.
+	Names map[string]string
+	// Figures are the pictures recovered from each document, keyed by unit
+	// key. Empty when the connector recovered none.
+	Figures map[string][]extract.Figure
+	// Staging holds the extracted text the unit inputs point at. It outlives
+	// the sync -- prompts are assembled from it -- so the caller owns removing
+	// it.
+	Staging string
+}
+
 // syncDocSource ingests documents through one connector and maps them with
 // docmap, returning the map and the routes to add to change routing.
 //
 // The returned staging directory holds the extracted text the unit inputs point
 // at. It must outlive the build -- prompts are assembled from it -- so the
 // caller owns removing it rather than a defer here.
-func syncDocSource(ctx context.Context, out io.Writer, src docSource) (_ *mapper.WorkspaceMap, _ map[string]diff.Key, _ map[string]string, staging string, err error) {
+func syncDocSource(ctx context.Context, out io.Writer, src docSource) (res docSync, err error) {
 	conn, err := connector.Get(src.kind)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return res, err
 	}
 	fmt.Fprintf(out, "syncing via %s connector: %s\n", conn.Kind(), src.subject)
 
-	staging, err = os.MkdirTemp("", src.prefix)
+	res.Staging, err = os.MkdirTemp("", src.prefix)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return res, err
 	}
 
-	set, err := conn.Sync(ctx, src.config, staging)
+	set, err := conn.Sync(ctx, src.config, res.Staging)
 	if err != nil {
-		return nil, nil, nil, staging, err
+		return res, err
 	}
 	docs, skipped, ok := src.payload(set)
 	if !ok {
-		return nil, nil, nil, staging, fmt.Errorf("%s connector returned no documents payload", src.kind)
+		return res, fmt.Errorf("%s connector returned no documents payload", src.kind)
 	}
 
 	dm := &docmap.Mapper{}
-	wm, err := dm.MapDocs(ctx, staging, docs)
+	wm, err := dm.MapDocs(ctx, res.Staging, docs)
 	if err != nil {
-		return nil, nil, nil, staging, err
+		return res, err
 	}
 
 	fmt.Fprintf(out, "  %d %s, %d units\n", len(docs), src.noun, len(wm.Units))
@@ -373,6 +410,7 @@ func syncDocSource(ctx context.Context, out io.Writer, src docSource) (_ *mapper
 	// function to be routable.
 	routes := map[string]diff.Key{}
 	names := map[string]string{}
+	figures := map[string][]extract.Figure{}
 	for _, d := range docs {
 		routes[src.origin(d.Origin)] = diff.Key(d.Key)
 		// Keyed on Origin, the path the file is stored under, because that is
@@ -381,15 +419,20 @@ func syncDocSource(ctx context.Context, out io.Writer, src docSource) (_ *mapper
 		if d.Origin != "" && d.Title != "" {
 			names[d.Origin] = d.Title
 		}
+		if len(d.Figures) > 0 {
+			figures[d.Key] = d.Figures
+		}
 	}
-	return wm, routes, names, staging, nil
+
+	res.Map, res.Routes, res.Names, res.Figures = wm, routes, names, figures
+	return res, nil
 }
 
 // syncDocs ingests a documents directory through the upload connector.
-func syncDocs(ctx context.Context, out io.Writer, dir string) (*mapper.WorkspaceMap, map[string]diff.Key, map[string]string, string, error) {
+func syncDocs(ctx context.Context, out io.Writer, dir string) (docSync, error) {
 	absDocs, err := filepath.Abs(dir)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return docSync{}, err
 	}
 	return syncDocSource(ctx, out, docSource{
 		kind:    "upload",
@@ -413,7 +456,7 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (*mapper.Workspace
 }
 
 // syncWeb ingests fetched pages through the web connector.
-func syncWeb(ctx context.Context, out io.Writer, urls []string) (*mapper.WorkspaceMap, map[string]diff.Key, map[string]string, string, error) {
+func syncWeb(ctx context.Context, out io.Writer, urls []string) (docSync, error) {
 	return syncDocSource(ctx, out, docSource{
 		kind:    "web",
 		subject: fmt.Sprintf("%d url(s)", len(urls)),

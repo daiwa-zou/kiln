@@ -310,6 +310,7 @@ flowchart LR
     Local --> EX
     Fetch --> EX
     EX --> DM["docmap"]
+    EX --> FG["figures<br/><i>filtered, then stored</i>"]
 
     RM --> WM["One WorkspaceMap"]
     DM --> WM
@@ -324,6 +325,39 @@ pages are grounded rather than inferred.
 **Documents.** Extraction handles `.md`, `.pdf`, `.docx`, `.pptx`, `.xlsx`,
 `.epub`, `.html` and more. `docmap` splits a long document into section units so
 a 300-page PDF becomes chapters, each independently hash-gated.
+
+**Figures.** The same extraction recovers a document's pictures and graphs, so a
+report's charts reach the wiki instead of being described from their captions.
+
+Most images in a real document are not figures — header logos, bullet glyphs,
+rule lines, spacers — so recovery is mostly a filter: minimum edge and area,
+an aspect-ratio ceiling that rejects rules and banners, deduplication by
+content digest, and the strongest signal of all, *repetition across pages*. An
+image on four pages is a letterhead, and no size rule catches that because
+letterheads are often large.
+
+What survives is stored before generation, because what a page may show is
+exactly what has been stored. The model is then told which figures its unit
+owns, with each one's caption, page and pixel size, and chooses which earn a
+place; nothing is auto-inserted. Validation rejects a reference to a figure the
+unit does not own, the way it rejects a wikilink to a page that does not exist —
+with no tolerance count, because a dangling link renders as a visible gap the
+wiki treats as a request, while a broken image is just broken.
+
+Pages store the portable form `![caption](figure:ID)` and the API rewrites it to
+a servable URL on read, so a stored page does not depend on where this
+deployment serves images from.
+
+> **Raster only.** A chart drawn with vector operators — what Excel,
+> Illustrator and matplotlib's PDF backend produce — is not an embedded image
+> and is not recovered. Scanned pages, screenshots, photographs and charts
+> exported as PNG or JPEG all are. Rendering whole pages would catch the vector
+> case and is deliberately not done: a page render is the page, text and all,
+> not the figure on it.
+>
+> Fetched web pages carry no figures either. Their images are remote URLs
+> rather than embedded bytes, and retrieving them would have to go back through
+> the connector's address guard as a second class of request.
 
 **Uploads and staging.** Files uploaded through the API land in object storage.
 At sync time the worker stages them into a temp directory through an `os.Root`

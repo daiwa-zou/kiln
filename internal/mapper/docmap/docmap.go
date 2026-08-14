@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daiwa-zou/kiln/internal/extract"
 	"github.com/daiwa-zou/kiln/internal/mapper"
 )
 
@@ -42,6 +43,11 @@ type Doc struct {
 	Hash string
 	// Origin deep-links back to the source.
 	Origin string
+	// Figures are the pictures and graphs the document carried. Passengers
+	// here: the mapper never reads them, but they were recovered by the same
+	// extraction that produced Text and this is what carries them to the
+	// pipeline that stores them.
+	Figures []extract.Figure
 }
 
 // Mapper partitions documents into units.

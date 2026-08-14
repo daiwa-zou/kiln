@@ -103,6 +103,10 @@ type Server struct {
 	Admin AdminStore
 	// Files backs the uploaded-documents routes. Nil leaves them unmounted.
 	Files FileStore
+	// Figures backs the pictures recovered from documents. Nil leaves the
+	// route unmounted and page bodies keep their unresolved figure
+	// references, which is the correct degradation: the prose still reads.
+	Figures FigureStore
 	// Workspaces backs self-serve bench creation. Nil leaves it unmounted,
 	// which keeps a read-only embed unable to create anything.
 	Workspaces WorkspaceCreator
@@ -296,6 +300,11 @@ func (s *Server) mountRoutes(r chi.Router) {
 				}
 				r.Get("/pages", s.handlePages)
 				r.Get("/pages/*", s.handlePage)
+				// Figure bytes are fetched by the browser's own <img>
+				// request, which carries no Authorization header, so these
+				// sit with the other reads rather than behind a write guard.
+				r.Get("/figures", s.handleFiguresList)
+				r.Get("/figures/{id}", s.handleFigure)
 				r.Get("/index", s.handleArtifact("index"))
 				r.Get("/overview", s.handleArtifact("overview"))
 				r.Get("/log", s.handleArtifact("log"))
@@ -548,12 +557,18 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Figure references become URLs here rather than at write time, so the
+	// stored body stays independent of where this deployment serves images
+	// from.
+	body := resolveFigureBody(p.Body, chi.URLParam(r, "workspace"),
+		s.knownFigureIDs(r.Context(), ws.ID))
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path": p.Path, "slug": p.Slug, "type": string(p.Meta.Type),
 		"title": p.Meta.Title, "tags": p.Meta.Tags,
 		"related": p.Meta.Related, "sources": p.Meta.Sources,
 		"updated": p.Meta.Updated, "builtAtRef": p.Meta.BuiltAtRef,
-		"body": p.Body,
+		"body": body,
 	})
 }
 

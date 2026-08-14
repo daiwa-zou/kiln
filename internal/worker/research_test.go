@@ -56,6 +56,16 @@ func (s *pipelineStore) EnsureDeletionReviews(context.Context, string, []jobs.De
 }
 func (s *pipelineStore) TrailingUnitCost(context.Context, string) (float64, error) { return 0, nil }
 
+// Research reads a repository, which carries no figures; these exist to
+// satisfy the interface, not to be exercised.
+func (s *pipelineStore) ReplaceFigures(context.Context, string, string, []jobs.FigureRecord) ([]string, error) {
+	return nil, nil
+}
+
+func (s *pipelineStore) FiguresForSources(context.Context, string, []string) ([]jobs.FigureRecord, error) {
+	return nil, nil
+}
+
 // researchWorker wires a worker whose bench is one small repository and whose
 // agent is the free fake, so the whole claim-read-write-back path runs without
 // an API key.

@@ -212,7 +212,7 @@ func TestFileUploadUnavailableWithoutBlobStore(t *testing.T) {
 	// shares its store but has no blob store wired.
 	_, js, _ := testServer(t)
 	bare := httptest.NewServer((&Server{
-		Store: js, Writes: js, Runs: js, Admin: js, Files: js,
+		Store: js, Writes: js, Runs: js, Admin: js, Files: js, Figures: js,
 	}).Router())
 	defer bare.Close()
 	code, body := upload(t, bare, "demo", "", "", "notes.md", []byte("x"))

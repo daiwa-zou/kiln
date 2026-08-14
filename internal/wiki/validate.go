@@ -50,6 +50,14 @@ type ValidateOptions struct {
 	// set yet. Such a caller must run CheckLinks once every unit has landed,
 	// or dangling links would stop being caught at all.
 	DeferLinkCheck bool
+	// AllowedFigures are the ids of figures this page's unit may embed. Nil
+	// means the caller is not tracking figures and the check is skipped; an
+	// empty non-nil map means this unit has none, so any reference is wrong.
+	//
+	// No deferral counterpart to DeferLinkCheck: a unit's figures are known
+	// before generation starts, so unlike a wikilink to a page another unit is
+	// still writing, a bad figure id is wrong the moment it appears.
+	AllowedFigures map[string]bool
 }
 
 // DefaultMaxUnresolvedLinks is the tolerance before a page fails.
@@ -126,6 +134,9 @@ func ValidatePage(p *Page, opts ValidateOptions) []Violation {
 		if v, bad := checkLinks(p, opts.KnownSlugs, limit); bad {
 			out = append(out, v)
 		}
+	}
+	if opts.AllowedFigures != nil {
+		out = append(out, checkFigures(p, opts.AllowedFigures)...)
 	}
 
 	return out

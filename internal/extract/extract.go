@@ -53,6 +53,15 @@ type Result struct {
 	// Hash is a digest of the extracted text, so a re-extraction that produces
 	// identical content does not look like a change.
 	Hash string
+	// Figures are the document's pictures and graphs, when the caller asked
+	// for them and the extractor could recover them. Never populated by
+	// Extract; see ExtractWithFigures.
+	Figures []Figure
+	// FigureErr records why figures could not be recovered from a document
+	// whose text read fine. Carried rather than returned: the text is still
+	// worth a page, and this is what lets a caller report the degradation
+	// without treating it as a failed extraction.
+	FigureErr error
 }
 
 // Extractor converts one document to text.
@@ -100,8 +109,16 @@ func DefaultExtractors() Extractors {
 	}
 }
 
-// Extract normalizes one file.
+// Extract normalizes one file. Figures are not recovered; see
+// ExtractWithFigures for that.
 func (es Extractors) Extract(ctx context.Context, path string) (*Result, error) {
+	res, _, err := es.extract(ctx, path)
+	return res, err
+}
+
+// extract does the work and also reports which extractor won, so a caller can
+// ask that extractor for capabilities beyond text.
+func (es Extractors) extract(ctx context.Context, path string) (*Result, Extractor, error) {
 	format := DetectFormat(path)
 
 	var claimed bool
@@ -116,22 +133,22 @@ func (es Extractors) Extract(ctx context.Context, path string) (*Result, error) 
 
 		text, err := e.Extract(ctx, path)
 		if err != nil {
-			return nil, fmt.Errorf("extract: %s (%s): %w", filepath.Base(path), e.Tool(), err)
+			return nil, nil, fmt.Errorf("extract: %s (%s): %w", filepath.Base(path), e.Tool(), err)
 		}
 		return &Result{
 			Text:   text,
 			Format: format,
 			Tool:   e.Tool(),
 			Hash:   HashText(text),
-		}, nil
+		}, e, nil
 	}
 
 	if claimed {
 		// Something handles the format but cannot run, which is a deployment
 		// problem an operator can fix.
-		return nil, fmt.Errorf("%w: %s needs a tool that is not installed", ErrToolMissing, format)
+		return nil, nil, fmt.Errorf("%w: %s needs a tool that is not installed", ErrToolMissing, format)
 	}
-	return nil, fmt.Errorf("%w: %s", ErrNoExtractor, format)
+	return nil, nil, fmt.Errorf("%w: %s", ErrNoExtractor, format)
 }
 
 // Supported reports which formats can actually be extracted right now, so a
@@ -192,10 +209,14 @@ func (p *PassthroughExtractor) Extract(_ context.Context, path string) (string, 
 // into a very long loop, and one bad upload should not stall a run.
 const defaultTimeout = 2 * time.Minute
 
-// PDFExtractor shells out to poppler's pdftotext.
+// PDFExtractor shells out to poppler's pdftotext, and to its sibling
+// pdfimages for figures.
 type PDFExtractor struct {
-	Binary  string
-	Timeout time.Duration
+	Binary string
+	// FigureBinary overrides the image extractor, which ships in the same
+	// poppler package as Binary and is therefore present wherever it is.
+	FigureBinary string
+	Timeout      time.Duration
 }
 
 func (p *PDFExtractor) Handles(f Format) bool { return f == FormatPDF }

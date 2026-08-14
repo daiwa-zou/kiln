@@ -66,7 +66,12 @@ Write the wiki pages from the approved plan. Rules:
   or that you are writing now.
 - Cite file paths and line ranges for substantive claims.
 - Prefer omitting a section to padding it. A short accurate page beats a long
-  speculative one.`)
+  speculative one.
+- When a unit lists available figures, embed the ones that carry information a
+  reader needs: charts, diagrams, screenshots of an interface, photographs of a
+  thing being described. Write them as ![caption](figure:ID) using an ID from
+  that list. Do not embed a figure you cannot justify in the surrounding prose,
+  and never invent an ID.`)
 	appendSteering(&b, s)
 	return b.String()
 }
@@ -106,7 +111,7 @@ func analyzePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, atte
 	return b.String()
 }
 
-func generatePrompt(key diff.Key, unit mapper.Unit, root, outDir string, s Steering, plan string, attempt int, prior []wiki.Violation) string {
+func generatePrompt(key diff.Key, unit mapper.Unit, root, outDir string, s Steering, plan string, figures []FigureRecord, attempt int, prior []wiki.Violation) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Write the wiki pages you planned for unit %s.\n", key)
@@ -142,9 +147,48 @@ func generatePrompt(key diff.Key, unit mapper.Unit, root, outDir string, s Steer
 	// a page written from a plan alone drifts from the source it is supposed
 	// to describe.
 	b.WriteString(renderUnitContext(root, unit))
+	b.WriteString(renderFigures(figures))
 
 	appendCorrections(&b, s, unit.Slug)
 	appendRetryContext(&b, attempt, prior)
+	return b.String()
+}
+
+// renderFigures lists the pictures this unit may put on a page.
+//
+// The model cannot see them, so everything that helps it judge is stated: the
+// document's own caption, which is the strongest signal a picture is a figure
+// rather than decoration; the page it sat on; and the pixel size, which
+// separates a full-width chart from a small inline diagram. Nothing here is
+// auto-inserted -- deciding which of these earn a place is the judgment the
+// model is being asked to make.
+func renderFigures(figs []FigureRecord) string {
+	if len(figs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n## Figures available to this page\n\n")
+	b.WriteString("These images were recovered from the source document. Embed one with\n")
+	b.WriteString("`![your caption](figure:ID)`, using an ID from this list and only from it.\n")
+	b.WriteString("Include a figure when it carries information the prose cannot, and say in\n")
+	b.WriteString("the surrounding text what the reader should take from it. Leaving one out\n")
+	b.WriteString("is a valid choice; not every picture in a document is worth republishing.\n\n")
+
+	for _, f := range figs {
+		fmt.Fprintf(&b, "- ID `%s` — %dx%d", f.ID, f.Width, f.Height)
+		if f.Page > 0 {
+			fmt.Fprintf(&b, ", page %d", f.Page)
+		}
+		if f.Caption != "" {
+			// Quoted as data: a caption is text from an untrusted document,
+			// and it is being shown to the model as evidence, not as
+			// instruction.
+			fmt.Fprintf(&b, ", captioned in the document: %q", f.Caption)
+		} else {
+			b.WriteString(", no caption in the document")
+		}
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 

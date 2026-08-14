@@ -5,9 +5,9 @@
 # serve or mount.
 #
 # The runtime is debian-slim rather than distroless because the worker shells
-# out to real programs: git (repository sync), pdftotext (PDF extraction), and
-# pandoc (Office/HTML extraction). A scratch image would build fine and then
-# fail at the first PDF.
+# out to real programs: git (repository sync), pdftotext and pdfimages (PDF
+# text and figures), and pandoc (Office/HTML text and embedded media). A
+# scratch image would build fine and then fail at the first PDF.
 
 # --- build ------------------------------------------------------------------
 FROM golang:1.25-bookworm AS build
@@ -35,7 +35,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
 FROM debian:bookworm-slim AS runtime
 
 # ca-certificates: HTTPS to the Anthropic API, GitHub, and web sources.
-# git: repository connectors. poppler-utils: pdftotext. pandoc: Office/HTML.
+# git: repository connectors. poppler-utils: pdftotext and pdfimages, which
+# ship together. pandoc: Office/HTML text and --extract-media for figures.
 # tini: PID 1 that reaps zombies and forwards SIGTERM, which the worker's
 # drain-with-grace shutdown depends on.
 RUN apt-get update \

@@ -80,6 +80,44 @@ type Store interface {
 	// pre-spend estimate, so previews reflect what this workspace's pages
 	// really cost rather than a global constant.
 	TrailingUnitCost(ctx context.Context, workspaceID string) (float64, error)
+
+	// ReplaceFigures makes the recorded figures for one source exactly those
+	// given, returning the blob keys of any that are no longer referenced.
+	//
+	// Deliberately not part of Import. Figures are a fact about the document's
+	// bytes, established at sync, and they have to be readable by the
+	// generation step that decides which ones to put on a page -- which
+	// happens long before there is anything to import.
+	ReplaceFigures(ctx context.Context, workspaceID, sourceKey string, figs []FigureRecord) ([]string, error)
+
+	// FiguresForSources returns the figures belonging to the given source
+	// keys, for telling one unit's generation which pictures it may cite.
+	FiguresForSources(ctx context.Context, workspaceID string, keys []string) ([]FigureRecord, error)
+}
+
+// FigureRecord is one stored picture, as the pipeline sees it. The pipeline
+// deals in this rather than store.FigureRow for the same reason Store is
+// declared here: the SQL stays behind the interface, and the fake can be a map.
+type FigureRecord struct {
+	// ID is empty on the way in and set by the store on the way out; it is
+	// what a page's figure reference resolves to.
+	ID string
+	// SourceKey is the unit key of the document the figure came from.
+	SourceKey string
+	// Ref is the extractor's within-document identifier.
+	Ref         string
+	BlobKey     string
+	ContentType string
+	Width       int
+	Height      int
+	SizeBytes   int64
+	Page        int
+	// Caption is the document's own words for the figure, empty when it had
+	// none. This is the single most useful thing the model is given about a
+	// picture it cannot see.
+	Caption string
+	Ordinal int
+	SHA256  string
 }
 
 // DeletionCandidate is a source that vanished from the map and needs a human

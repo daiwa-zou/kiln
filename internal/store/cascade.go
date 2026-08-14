@@ -58,6 +58,14 @@ func cascadeDeleteSources(ctx context.Context, tx pgx.Tx, workspaceID string, re
 	if err := dropSources(ctx, tx, workspaceID, plan.DropSources); err != nil {
 		return diff.Cascade{}, err
 	}
+	// A document's figures leave with the document. They are reachable at a
+	// URL of their own, so a source deletion that left them behind would leave
+	// the pictures from a deleted PDF still being served.
+	figureBlobs, err := dropFiguresForSources(ctx, tx, workspaceID, keyStrings(plan.DropSources))
+	if err != nil {
+		return diff.Cascade{}, err
+	}
+	plan.DeleteBlobs = append(plan.DeleteBlobs, figureBlobs...)
 	// An open review asking whether this source should go has been answered by
 	// the deletion itself. Leaving it would put a question in the queue whose
 	// subject no longer exists and whose approval would do nothing.
@@ -138,10 +146,7 @@ func flagRegeneration(ctx context.Context, tx pgx.Tx, workspaceID string, pages 
 	if len(pages) == 0 {
 		return nil
 	}
-	drop := make([]string, len(dropping))
-	for i, k := range dropping {
-		drop[i] = string(k)
-	}
+	drop := keyStrings(dropping)
 	if _, err := tx.Exec(ctx, `
 		UPDATE sources SET needs_regen = TRUE, updated_at = now()
 		WHERE workspace_id = $1
@@ -162,10 +167,7 @@ func closeDeletionReviews(ctx context.Context, tx pgx.Tx, workspaceID string, ke
 	if len(keys) == 0 {
 		return nil
 	}
-	titles := make([]string, len(keys))
-	for i, k := range keys {
-		titles[i] = string(k)
-	}
+	titles := keyStrings(keys)
 	if _, err := tx.Exec(ctx, `
 		UPDATE review_items
 		SET status = 'resolved', resolved_at = now()
@@ -175,6 +177,15 @@ func closeDeletionReviews(ctx context.Context, tx pgx.Tx, workspaceID string, ke
 		return fmt.Errorf("store: close deletion reviews: %w", err)
 	}
 	return nil
+}
+
+// keyStrings converts source keys for use as a SQL text[] parameter.
+func keyStrings(keys []diff.Key) []string {
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		out[i] = string(k)
+	}
+	return out
 }
 
 // sourceKeysForConnector lists the sources a connector's syncs produced. Read
