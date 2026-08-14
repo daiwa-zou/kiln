@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
@@ -39,6 +40,11 @@ type memStore struct {
 	// ledgered as failed when the commit does not land.
 	failImport error
 
+	// figures mirrors the figure store, keyed by source key. Replace
+	// semantics, like the real one: what a document currently contains is
+	// what is recorded for it.
+	figures map[string][]FigureRecord
+
 	// trailingUnitCost is what TrailingUnitCost reports; zero means no history.
 	trailingUnitCost float64
 
@@ -56,7 +62,49 @@ func newMemStore() *memStore {
 	return &memStore{
 		sources: map[diff.Key]diff.SourceRecord{},
 		pages:   map[string]wiki.Page{},
+		figures: map[string][]FigureRecord{},
 	}
+}
+
+// ReplaceFigures mirrors the real store: the given set becomes exactly what
+// the source has, and blob keys nothing references any more come back.
+func (m *memStore) ReplaceFigures(_ context.Context, _, sourceKey string, figs []FigureRecord) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	keep := map[string]bool{}
+	for _, f := range figs {
+		keep[f.SHA256] = true
+	}
+	var orphaned []string
+	for _, prior := range m.figures[sourceKey] {
+		if !keep[prior.SHA256] {
+			orphaned = append(orphaned, prior.BlobKey)
+		}
+	}
+
+	// Ids are assigned here because the real store assigns them, and the
+	// prompt and validation both key on the id rather than the digest.
+	stored := make([]FigureRecord, 0, len(figs))
+	for i, f := range figs {
+		if f.ID == "" {
+			f.ID = fmt.Sprintf("fig-%s-%d", f.SHA256, i)
+		}
+		stored = append(stored, f)
+	}
+	m.figures[sourceKey] = stored
+	return orphaned, nil
+}
+
+func (m *memStore) FiguresForSources(_ context.Context, _ string, keys []string) ([]FigureRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var out []FigureRecord
+	for _, k := range keys {
+		out = append(out, m.figures[k]...)
+	}
+	return out, nil
 }
 
 func (m *memStore) LoadSources(context.Context, string) ([]diff.SourceRecord, error) {

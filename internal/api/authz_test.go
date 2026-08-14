@@ -65,7 +65,7 @@ func authedServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, string, *mutab
 		t.Fatalf("test keyring: %v", err)
 	}
 	srv := httptest.NewServer((&Server{
-		Store: js, Writes: js, Runs: js, Admin: js, Members: js, Files: js,
+		Store: js, Writes: js, Runs: js, Admin: js, Members: js, Files: js, Figures: js,
 		Workspaces: js,
 		Keyring:    keyring,
 		Blobs:      newMemBlobs(),

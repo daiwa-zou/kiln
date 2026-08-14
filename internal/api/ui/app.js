@@ -492,9 +492,15 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
 const unesc = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
   .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 
-// safeURL admits only destinations that cannot execute script: http(s) and
-// internal hash routes. Anything else renders as text, which fails safe.
-const safeURL = (u) => /^(https?:\/\/|#\/)/.test(u) ? u : null;
+// safeURL admits only destinations that cannot execute script: http(s),
+// internal hash routes, and same-origin API paths -- which is how a figure
+// recovered from a document is served. Anything else renders as text, which
+// fails safe.
+//
+// The API form is deliberately narrow: a leading "/api/v1/" and no "//" that
+// would make it protocol-relative and therefore off-origin.
+const safeURL = (u) =>
+  /^(https?:\/\/|#\/)/.test(u) || (/^\/api\/v1\//.test(u) && !u.startsWith("//")) ? u : null;
 
 // A very small markdown subset: enough to read a generated page without
 // shipping a parser. Everything is escaped first, so page content is data.
@@ -552,6 +558,28 @@ function renderMarkdown(src, headingOffset = 1) {
       continue;
     }
     if (/^\s*(---+|\*\*\*+)\s*$/.test(raw)) { flushPara(); closeList(); html += "<hr>"; continue; }
+
+    // An image alone on a line is a figure, not a word in a sentence: it gets
+    // <figure>/<figcaption> rather than an <img> inside a <p>. Handled here at
+    // block level because a <figure> nested in a <p> is invalid HTML, and the
+    // caption is the thing that makes a chart legible to someone who cannot
+    // see it well or at all.
+    const standalone = raw.trim().match(/^!\[([^\]]*)\]\(([^)\s]+)\)$/);
+    if (standalone) {
+      const u = safeURL(standalone[2]);
+      if (u) {
+        flushPara(); closeList();
+        const alt = standalone[1];
+        html += `<figure class="page-figure">` +
+          `<img src="${u}" alt="${alt}" loading="lazy" decoding="async" referrerpolicy="no-referrer">` +
+          (alt ? `<figcaption>${inline(alt)}</figcaption>` : "") +
+          `</figure>`;
+        continue;
+      }
+      // An unresolved figure reference falls through to prose, where it
+      // renders as the literal text it is. Visible and diagnosable beats a
+      // broken image icon.
+    }
     if (/^\s*[-*]\s+/.test(raw)) {
       flushPara(); openList("ul");
       html += `<li>${inline(raw.replace(/^\s*[-*]\s+/, ""))}</li>`;

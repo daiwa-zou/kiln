@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -181,6 +182,14 @@ page passed validation, and the import committed it transactionally.
 Content fingerprint: %s
 `, title, fmt.Sprintf("`%s`", unit), fingerprint)
 
+		// Cite whatever figures the prompt offered. The fake cannot judge which
+		// pictures matter, and does not pretend to -- it takes all of them,
+		// which is the wrong editorial choice and the right test: it exercises
+		// storage, reference validation, read-time URL resolution and rendering
+		// on every dev build, so a break in any of them shows up locally rather
+		// than only against a paid model.
+		body += offeredFigures(req.Prompt)
+
 		out.Pages = append(out.Pages, GeneratedPage{
 			Path:  p.Path,
 			Type:  p.Type,
@@ -190,6 +199,31 @@ Content fingerprint: %s
 		})
 	}
 	return out
+}
+
+// figureOffer matches one line of the prompt's figure list, capturing the id
+// and the document's caption when it had one. Kept deliberately loose: this
+// reads a prompt the jobs package writes, and a fake that broke on every
+// wording change would be worse than useless.
+var figureOffer = regexp.MustCompile("(?m)^- ID `([^`]+)`.*?(?:captioned in the document: \"(.*)\")?$")
+
+// offeredFigures renders a markdown embed for every figure the prompt listed.
+//
+// Returns empty for a unit with no figures, which is most of them.
+func offeredFigures(prompt string) string {
+	idx := strings.Index(prompt, "## Figures available to this page")
+	if idx < 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, m := range figureOffer.FindAllStringSubmatch(prompt[idx:], -1) {
+		caption := m[2]
+		if caption == "" {
+			caption = "Figure from the source document"
+		}
+		fmt.Fprintf(&b, "\n![%s](figure:%s)\n", caption, m[1])
+	}
+	return b.String()
 }
 
 // pageFor maps a unit key to its one page. Type and directory come from the

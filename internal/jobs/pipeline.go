@@ -13,6 +13,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/agent"
 	"github.com/daiwa-zou/kiln/internal/diff"
+	"github.com/daiwa-zou/kiln/internal/extract"
 	"github.com/daiwa-zou/kiln/internal/mapper"
 	"github.com/daiwa-zou/kiln/internal/wiki"
 )
@@ -37,13 +38,14 @@ type Pipeline struct {
 	FallbackModel string
 	Timeout       time.Duration
 
-	// Blobs, when set, deletes stored blobs the deletion cascade released.
-	// Nil (no object storage) leaves DeleteBlobs as computed-but-inert data,
-	// the pre-blob-store behavior. A narrow local interface rather than
-	// blob.Store: the pipeline only ever deletes.
-	Blobs interface {
-		Delete(ctx context.Context, key string) error
-	}
+	// Blobs, when set, stores the figures recovered from documents and deletes
+	// blobs the deletion cascade released. Nil (no object storage) leaves
+	// DeleteBlobs as computed-but-inert data and means a document's pictures
+	// are not kept -- its text still builds a page.
+	//
+	// A narrow local interface rather than blob.Store: the pipeline puts and
+	// deletes, and never reads.
+	Blobs BlobWriter
 
 	// MaxRetries is the number of corrective attempts after a validation
 	// failure. The first re-states the errors; the second halves the work.
@@ -106,6 +108,11 @@ type BuildRequest struct {
 	// cascade to storage. Section units inherit their parent document's blobs.
 	// Nil for sources that live outside the blob store (CLI --docs, repos).
 	BlobKeys map[string][]string
+
+	// Figures are the pictures recovered from each document this run synced,
+	// keyed by unit key. The pipeline stores them before generation, because
+	// what the model is allowed to put on a page is exactly what is stored.
+	Figures map[string][]extract.Figure
 
 	// SkippedKeys are unit keys deliberately left out of this sync (paused
 	// documents): absent from the map by choice, so deletion detection must
@@ -220,6 +227,15 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		}
 	}
 
+	// Figures land before anything is planned or generated. What a page may
+	// show is exactly what is stored, so the storing has to happen first --
+	// and it happens even on a run that generates nothing, because a document
+	// whose text is unchanged may still be the first run that recovered its
+	// pictures.
+	if !req.DryRun {
+		p.storeFigures(ctx, req, log)
+	}
+
 	// Route changes to dirty units, then drop any whose content hash is
 	// unchanged. This gate is the primary cost control: an unchanged workspace
 	// costs nothing, so sweeps and no-op webhooks are free.
@@ -307,6 +323,15 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		existingCreated[pg.Slug] = pg.Meta.Created
 	}
 
+	// What each unit may show. Loaded after storeFigures so this run's newly
+	// recovered pictures are already on record and already have ids.
+	figures, err := p.figuresByUnit(ctx, req.WorkspaceID, dirty)
+	if err != nil {
+		// A build that cannot read its figures still writes correct prose.
+		// Failing here would turn a picture problem into a total outage.
+		log.Warn("figures could not be loaded; pages will be written without them", "err", err)
+	}
+
 	conc := p.unitConcurrency()
 	ledger := newBudgetLedger(p.Budget.RunUSD)
 	outcomes, halted := p.generateUnits(ctx, req, dirty, units, conc, unitScope{
@@ -316,6 +341,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		existingCreated: existingCreated,
 		ledger:          ledger,
 		estPerCall:      perUnit,
+		figures:         figures,
 		deferLinks:      conc > 1,
 	}, log)
 	if halted != "" {
@@ -500,6 +526,10 @@ type unitScope struct {
 	// estPerCall is the fallback reservation when no per-call budget is
 	// configured, so a run budget still bounds something.
 	estPerCall float64
+	// figures are the pictures each unit may put on a page, keyed by unit
+	// key. Loaded once for the whole run rather than per unit: it is one
+	// query, and units generate concurrently.
+	figures map[diff.Key][]FigureRecord
 	// deferLinks moves the unresolved-wikilink check out of the retry loop
 	// and into mergeOutcomes. Set only when units actually run concurrently:
 	// at concurrency 1 the sequential pipeline's growing slug set is both
@@ -641,7 +671,7 @@ func (p *Pipeline) generateUnit(
 			BudgetUSD: p.Budget.PageUSD, Timeout: p.Timeout,
 			SystemPrompt:     generateSystemPrompt(sc.steering),
 			CacheableContext: req.Map.Summary,
-			Prompt:           generatePrompt(key, unit, req.SourceDir, scratch, sc.steering, plan, attempt, lastViolations),
+			Prompt:           generatePrompt(key, unit, req.SourceDir, scratch, sc.steering, plan, sc.figures[key], attempt, lastViolations),
 		})
 		sc.ledger.settle(want, costOf(genRes))
 		p.account(&res, key, genRes)
@@ -672,6 +702,7 @@ func (p *Pipeline) generateUnit(
 			Planned:        planned,
 			RequireDates:   true,
 			DeferLinkCheck: sc.deferLinks,
+			AllowedFigures: allowedFigures(sc.figures[key]),
 		})...)
 		if len(lastViolations) == 0 {
 			res.Pages = derefPages(collected)

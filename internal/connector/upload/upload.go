@@ -28,6 +28,10 @@ import (
 type Connector struct {
 	// Extractors converts documents to text. Defaults to the standard set.
 	Extractors extract.Extractors
+	// Figures bounds recovery of the pictures and graphs a document carries.
+	// Defaults to extract.DefaultFigureOptions; a caller that wants text only
+	// sets Max to a negative number.
+	Figures extract.FigureOptions
 }
 
 func init() { connector.Register(&Connector{}) }
@@ -72,6 +76,15 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 	if extractors == nil {
 		extractors = extract.DefaultExtractors()
 	}
+	// Figures are on by default. A bench ingesting a folder of reports wants
+	// their charts; making it opt-in would mean every deployment silently
+	// dropped them until someone found the setting.
+	figures := c.Figures
+	if figures.Max == 0 {
+		figures = extract.DefaultFigureOptions()
+	} else if figures.Max < 0 {
+		figures = extract.FigureOptions{}
+	}
 
 	files, err := listDocuments(abs)
 	if err != nil {
@@ -87,10 +100,17 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 	for _, rel := range files {
 		full := filepath.Join(abs, filepath.FromSlash(rel))
 
-		res, err := extractors.Extract(ctx, full)
+		res, err := extractors.ExtractWithFigures(ctx, full, figures)
 		if err != nil {
 			skips = append(skips, SkipReason{Path: rel, Reason: skipReason(err)})
 			continue
+		}
+		// A document whose text read fine but whose pictures did not is
+		// reported, not skipped: the prose is still worth a page, and a silent
+		// loss of figures is exactly the failure nobody would notice.
+		if res.FigureErr != nil {
+			skips = append(skips, SkipReason{
+				Path: rel, Reason: "figures could not be read: " + res.FigureErr.Error()})
 		}
 		if strings.TrimSpace(res.Text) == "" {
 			// An empty extraction is not material. Sending it on would spend a
@@ -124,7 +144,7 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		})
 		docs = append(docs, docmap.Doc{
 			Key: key, Path: staged, Title: naming.FromDocument(rel, res.Text),
-			Text: res.Text, Hash: res.Hash, Origin: rel,
+			Text: res.Text, Hash: res.Hash, Origin: rel, Figures: res.Figures,
 		})
 	}
 
