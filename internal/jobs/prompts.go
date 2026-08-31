@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/daiwa-zou/kiln/internal/agent"
@@ -106,6 +107,7 @@ func analyzePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, atte
 
 	b.WriteString(renderUnitContext(root, unit))
 
+	appendSuppressions(&b, s)
 	appendCorrections(&b, s, unit.Slug)
 	appendRetryContext(&b, attempt, prior)
 	return b.String()
@@ -149,6 +151,7 @@ func generatePrompt(key diff.Key, unit mapper.Unit, root, outDir string, s Steer
 	b.WriteString(renderUnitContext(root, unit))
 	b.WriteString(renderFigures(figures))
 
+	appendSuppressions(&b, s)
 	appendCorrections(&b, s, unit.Slug)
 	appendRetryContext(&b, attempt, prior)
 	return b.String()
@@ -197,6 +200,41 @@ func renderFigures(figs []FigureRecord) string {
 // Pages are never hand-edited, because an edit would be clobbered on the next
 // regeneration. Corrections live outside the page and are re-injected every
 // time, which is what lets human knowledge survive a rebuild.
+// appendSuppressions tells the agent which pages a human has deleted.
+//
+// Stated as instruction, not merely enforced at import, for two reasons. It
+// avoids paying a model to write a page that is about to be discarded, which on
+// a bench with a few deleted pages is the difference between a cheap run and a
+// wasteful one. And the reason travels with it: "do not write this" invites the
+// agent to route the material somewhere else, which is usually what the person
+// deleting a redundant page actually wanted.
+//
+// Listed whole rather than filtered to this unit's plan, because a unit can
+// invent a page nobody planned, and that invention is exactly what a
+// suppression most often exists to stop.
+func appendSuppressions(b *strings.Builder, s Steering) {
+	if len(s.Suppressed) == 0 {
+		return
+	}
+	slugs := make([]string, 0, len(s.Suppressed))
+	for slug := range s.Suppressed {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+
+	b.WriteString("\n## Pages a human has deleted\n\n")
+	b.WriteString("Do not write these pages. They were removed deliberately, and anything ")
+	b.WriteString("you write to them is discarded. If the material belongs somewhere, put ")
+	b.WriteString("it on a page that is not in this list.\n\n")
+	for _, slug := range slugs {
+		if reason := strings.TrimSpace(s.Suppressed[slug]); reason != "" {
+			fmt.Fprintf(b, "- `%s` — %s\n", slug, reason)
+			continue
+		}
+		fmt.Fprintf(b, "- `%s`\n", slug)
+	}
+}
+
 func appendCorrections(b *strings.Builder, s Steering, slug string) {
 	corrections := s.Corrections[slug]
 	if len(corrections) == 0 {

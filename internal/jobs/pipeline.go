@@ -351,6 +351,14 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	written, newSources, findings, spent := p.mergeOutcomes(res, req, outcomes, known, perUnit, log)
 	res.Summary.CostUSD = spent
 
+	// The backstop behind the prompt. The agent was told which pages a human
+	// deleted, but being told is not the same as being prevented, and a page
+	// that slipped through would silently undo someone's deletion on the next
+	// build. Dropped rather than failed: the human already decided, and turning
+	// their decision into a validation error would spend a retry arguing with
+	// it.
+	written = dropSuppressed(written, steering.Suppressed, log)
+
 	// Post-pass: rebuild the derived artifacts from what pages now exist. The
 	// agent never writes these, so they cannot drift from the content.
 	merged := mergePages(pages, written, cascade.DeletePages)

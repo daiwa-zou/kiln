@@ -107,6 +107,9 @@ type Server struct {
 	// route unmounted and page bodies keep their unresolved figure
 	// references, which is the correct degradation: the prose still reads.
 	Figures FigureStore
+	// Pages backs deleting and restoring individual pages. Nil leaves those
+	// routes unmounted.
+	Pages PageDeleter
 	// Workspaces backs self-serve bench creation. Nil leaves it unmounted,
 	// which keeps a read-only embed unable to create anything.
 	Workspaces WorkspaceCreator
@@ -305,6 +308,7 @@ func (s *Server) mountRoutes(r chi.Router) {
 				// sit with the other reads rather than behind a write guard.
 				r.Get("/figures", s.handleFiguresList)
 				r.Get("/figures/{id}", s.handleFigure)
+				r.Get("/pages-deleted", s.handleDeletedPagesList)
 				r.Get("/index", s.handleArtifact("index"))
 				r.Get("/overview", s.handleArtifact("overview"))
 				r.Get("/log", s.handleArtifact("log"))
@@ -381,6 +385,12 @@ func (s *Server) mountRoutes(r chi.Router) {
 					// that subtree with an {id} param would leave method
 					// dispatch to router tie-breaking rules.
 					r.Patch("/correction/{id}", s.handleCorrectionPatch)
+					// Deleting a page sits with corrections rather than with
+					// the admin routes: same blast radius as pinning a
+					// correction that rewrites the page on every build, and
+					// reversible from the deleted list.
+					r.Delete("/pages/*", s.handlePageDelete)
+					r.Post("/pages-deleted/{slug}/restore", s.handlePageRestore)
 					r.Post("/reviews/{id}/resolve", s.handleReviewResolve)
 					// Queueing research spends real money, so it sits behind
 					// the same write limiter and role gate as a rebuild. The

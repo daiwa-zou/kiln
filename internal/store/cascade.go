@@ -95,13 +95,8 @@ func cascadeDeleteSources(ctx context.Context, tx pgx.Tx, workspaceID string, re
 	if err := resolveLinks(ctx, tx, wikiID); err != nil {
 		return diff.Cascade{}, err
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE wikis
-		SET revision = revision + 1,
-		    updated_at = now(),
-		    page_count = (SELECT count(*) FROM pages WHERE wiki_id = $1 AND deleted_at IS NULL)
-		WHERE id = $1`, wikiID); err != nil {
-		return diff.Cascade{}, fmt.Errorf("store: bump revision: %w", err)
+	if err := bumpRevision(ctx, tx, wikiID); err != nil {
+		return diff.Cascade{}, err
 	}
 
 	return plan, nil

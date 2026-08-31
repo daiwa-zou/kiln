@@ -124,7 +124,10 @@ func (s *WikiStore) LoadPages(ctx context.Context, workspaceID string) ([]wiki.P
 // never hand-edited, so a correction lives outside the page and is re-injected
 // into every prompt that rebuilds it.
 func (s *WikiStore) LoadSteering(ctx context.Context, workspaceID string) (jobs.Steering, error) {
-	out := jobs.Steering{Corrections: map[string][]string{}}
+	out := jobs.Steering{
+		Corrections: map[string][]string{},
+		Suppressed:  map[string]string{},
+	}
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT kind, body FROM steering_docs WHERE workspace_id = $1`, workspaceID)
@@ -168,7 +171,29 @@ func (s *WikiStore) LoadSteering(ctx context.Context, workspaceID string) (jobs.
 		}
 		out.Corrections[slug] = append(out.Corrections[slug], body)
 	}
-	return out, corr.Err()
+	if err := corr.Err(); err != nil {
+		return out, err
+	}
+
+	// Pages a human deleted. Loaded with the rest of the steering because it is
+	// the same kind of fact -- a standing decision about this wiki that has to
+	// survive every regeneration -- and because the generate step needs it to
+	// avoid paying to write a page that import would then discard.
+	sup, err := s.pool.Query(ctx,
+		`SELECT slug, reason FROM page_suppressions WHERE workspace_id = $1`, workspaceID)
+	if err != nil {
+		return out, fmt.Errorf("store: load page suppressions: %w", err)
+	}
+	defer sup.Close()
+
+	for sup.Next() {
+		var slug, reason string
+		if err := sup.Scan(&slug, &reason); err != nil {
+			return out, fmt.Errorf("store: scan page suppression: %w", err)
+		}
+		out.Suppressed[slug] = reason
+	}
+	return out, sup.Err()
 }
 
 // Import commits one run's output.
