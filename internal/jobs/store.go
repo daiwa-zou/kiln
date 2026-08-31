@@ -137,6 +137,14 @@ type Steering struct {
 	// never hand-edited -- an edit would be clobbered on regeneration -- so
 	// corrections live outside the page and are re-injected every time.
 	Corrections map[string][]string
+	// Suppressed maps the slug of a page a human deleted to their reason for
+	// deleting it, empty when they gave none.
+	//
+	// The same mechanism as Corrections and the opposite instruction: a
+	// correction says write this differently, a suppression says do not write
+	// it at all. Carried here because a deleted page whose source still exists
+	// would otherwise be rewritten by the very next run.
+	Suppressed map[string]string
 }
 
 // ImportRequest is everything one run changed.

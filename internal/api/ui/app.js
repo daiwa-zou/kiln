@@ -1326,11 +1326,13 @@ async function showPage(slug) {
             : `<div class="hint">No pages link here yet.</div>`}
         </div>`}
         ${correctionsPanel(corrections)}
+        ${deletePanel(p)}
       </div>
     </div>`)) return;
 
     buildTOC();
     wireCorrections(p.slug);
+    wirePageDelete(p.slug);
   } catch (err) {
     if (err.handled || !view.current()) return;
     view.done(`<div class="banner" role="alert">Could not load that page: ${esc(err.message)}</div>`);
@@ -1363,6 +1365,67 @@ function correctionsPanel(corrections) {
         <span class="hint" id="correction-note" role="status"></span>
       </div>
     </div>`;
+}
+
+// deletePanel offers to remove the page for good.
+//
+// The wording carries the whole point. Everything else a build touches comes
+// back on the next run, so someone who has watched a page reappear has every
+// reason to assume this one will too -- the panel has to say, before they
+// click, that this one will not.
+function deletePanel(p) {
+  return `
+    <div class="danger-panel">
+      <div class="group-label">Delete this page</div>
+      <p class="hint">Removes <strong>${esc(p.title || p.slug)}</strong> and keeps it
+        removed: future builds are told not to write it again. Reversible from
+        Deleted pages.</p>
+      <label class="sr-only" for="page-delete-reason">Why are you deleting this page?</label>
+      <input id="page-delete-reason" placeholder="why (optional — the wiki is told)"
+             autocomplete="off">
+      <button class="btn danger" id="page-delete">Delete page</button>
+      <div id="page-delete-note" class="hint" role="status"></div>
+    </div>`;
+}
+
+// refreshPages reloads the page set the sidebar, the index and every wikilink
+// resolve against.
+//
+// Needed because deleting a page changes what exists, and state.pages is
+// otherwise only loaded on a bench switch: without this the page vanishes from
+// the server and lingers in the rail until the next reload, which reads as the
+// delete having half-worked.
+async function refreshPages() {
+  state.pages = await loadAllPages(state.workspace);
+  state.slugs = new Set(state.pages.map((p) => p.slug));
+  renderTree(lastActiveSlug);
+}
+
+function wirePageDelete(slug) {
+  const btn = $("page-delete");
+  if (!btn) return;
+  once(btn, async () => {
+    // Armed rather than confirmed through a dialog, matching how the source
+    // rows behave: one deliberate second click, no modal to dismiss.
+    if (!armButton(btn, "delete permanently")) return;
+    try {
+      const reason = ($("page-delete-reason")?.value || "").trim();
+      await api(`/workspaces/${encodeURIComponent(state.workspace)}/pages/${encodeURIComponent(slug)}`,
+        { method: "DELETE", body: reason ? { reason } : {} });
+      await refreshPages();
+      toast("Page deleted — future builds will not write it again");
+      // The page just read is gone, so there is nowhere to stay: the index is
+      // where its deletion is now recorded.
+      if (location.hash === `#/page/${encodeURIComponent(slug)}`) {
+        location.hash = "#/index";
+      } else {
+        showIndex();
+      }
+    } catch (err) {
+      const el = $("page-delete-note");
+      if (!err.handled && el) { el.textContent = err.message; el.classList.add("error"); }
+    }
+  });
 }
 
 // once guards a button against double submission: disabled while in flight.
@@ -1566,12 +1629,20 @@ async function showIndex() {
   const byType = {};
   for (const p of state.pages) (byType[p.type] ||= []).push(p);
   const types = TYPE_ORDER.filter((t) => byType[t]);
-  if (!types.length) {
+
+  // Deletions live at the foot of the index rather than in a view of their
+  // own. A deleted page is a fact about this wiki's contents, and the contents
+  // is what someone came here to read -- putting it behind another nav item
+  // would make the one list that can undo a mistake the hardest one to find.
+  const deleted = await api(`/workspaces/${encodeURIComponent(state.workspace)}/pages-deleted`)
+    .catch(() => null);
+
+  if (!types.length && !(deleted || []).length) {
     view.done(`<h1>Index</h1><div class="empty">No pages yet — the index is
       written by the first ingest. <a href="#/overview">Start here</a>.</div>`);
     return;
   }
-  view.done(`<h1>Index</h1>
+  if (!view.done(`<h1>Index</h1>
     <p class="view-deck">Every page, grouped by type. The dot is freshness — hover
       one for the word.</p>
     <div class="type-cards">
@@ -1583,7 +1654,57 @@ async function showIndex() {
         ${[...byType[t]].sort(byTitle).map((p) =>
           `<a href="#/page/${encodeURIComponent(p.slug)}">${freshDot(p)}<span>${esc(p.title || p.slug)}</span></a>`).join("")}
       </div>`).join("")}
-    </div>`);
+    </div>
+    ${deletedPagesSection(deleted)}`)) return;
+
+  wireRestore();
+}
+
+// deletedPagesSection lists what has been deleted and offers it back.
+//
+// Returns nothing when the endpoint is unavailable or nothing has been deleted:
+// an empty "Deleted pages · 0" heading on every bench would be permanent
+// furniture advertising a feature most readers never use.
+function deletedPagesSection(deleted) {
+  if (!deleted || !deleted.length) return "";
+  return `
+    <div class="sec-head"><div class="group-label">Deleted pages · ${deleted.length}</div></div>
+    <p class="hint">These stay deleted: builds are told not to write them again.
+      Restoring one lets the next build produce it.</p>
+    <div class="type-cards">
+      <div class="type-card">
+        ${deleted.map((d) => `
+          <div class="deleted-row">
+            <div>
+              <div>${esc(d.title || d.slug)}</div>
+              <div class="hint">${esc(d.reason || "no reason given")} · deleted ${esc(relTime(d.deleted))}</div>
+            </div>
+            <button class="linkish" data-restore="${esc(d.slug)}">restore</button>
+          </div>`).join("")}
+      </div>
+    </div>`;
+}
+
+function wireRestore() {
+  for (const b of document.querySelectorAll("[data-restore]")) {
+    once(b, async () => {
+      try {
+        const out = await api(
+          `/workspaces/${encodeURIComponent(state.workspace)}/pages-deleted/${encodeURIComponent(b.dataset.restore)}/restore`,
+          { method: "POST" });
+        // Two different outcomes, and the difference matters to the reader:
+        // the page is back now, or only the next build can bring it back
+        // because the stored copy was already swept.
+        await refreshPages();
+        toast(out && out.pageBack
+          ? "Page restored"
+          : "Restored — the next build will write this page again");
+        showIndex();
+      } catch (err) {
+        if (!err.handled) toast(err.message);
+      }
+    });
+  }
 }
 
 // ---- the build log ----------------------------------------------------------

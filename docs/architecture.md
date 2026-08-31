@@ -649,18 +649,20 @@ immediate but not yet permanent.
 ## The human loop
 
 Pages are never hand-edited — regeneration would clobber the edit. Human
-judgment enters through three durable channels instead.
+judgment enters through four durable channels instead.
 
 ```mermaid
 flowchart LR
     subgraph inputs["Human input"]
         S["<b>Steering docs</b><br/>purpose · schema"]
         C["<b>Page corrections</b><br/>pinned to one page"]
+        D["<b>Page deletions</b><br/>this page should not exist"]
         R["<b>Review queue</b><br/>the wiki's questions"]
     end
 
     S -->|"injected into<br/><i>every</i> prompt"| Gen["Generation"]
     C -->|"re-injected into every<br/>future rebuild of that page"| Gen
+    D -->|"named in every prompt,<br/>and dropped at import"| Gen
     R -->|"approvals gate<br/>deletion by disappearance"| Del["Deletion cascade"]
 
     Gen -->|"agent files contradictions,<br/>uncertainties, gaps"| R
@@ -676,6 +678,25 @@ survives regeneration. The **review queue** is where the wiki asks its humans
 about things it would otherwise have to guess at — including every deletion it
 would otherwise have to infer. Deleting a source outright does not go through
 it: that is not a thing the wiki has to guess at.
+
+**Deletions** are the corrections mechanism with the opposite instruction. A
+correction says *write this differently*; a deletion says *do not write this at
+all*. It needs to be durable for the same reason: the source that produced the
+page is still there and still hashes the same, so a delete that only removed
+the row would be undone by the next build — a delay, not a delete.
+
+It is enforced in two places, and neither is redundant. Every prompt names the
+deleted pages and the reason given, which stops a run paying to write something
+that will be discarded and lets the agent put the material somewhere useful
+instead. Import then drops any suppressed page that was written anyway, because
+a prompt is guidance and not a guarantee. Dropped rather than failed: the human
+already decided, and turning their decision into a validation error would spend
+a retry arguing with it.
+
+The page itself is soft-deleted, so it is recoverable for the retention window
+like anything else the cascade removes, and the deletion is listed until someone
+restores it. Restoring lifts the suppression; if the row has already been swept,
+the next build writes the page again.
 
 ### Research runs
 

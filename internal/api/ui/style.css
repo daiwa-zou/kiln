@@ -691,6 +691,24 @@
   }
   .btn.quiet:hover { border-color: var(--ember); color: var(--ember); }
   .btn.danger { background: var(--oxide); border-color: var(--oxide); color: #fff; }
+
+  /* Deleting a page is the one destructive control in the reading rail, so it
+     is set apart rather than styled like the correction form above it: a
+     hairline, its own space, and the button only reddening once armed. */
+  .danger-panel { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .danger-panel input {
+    width: 100%; margin: 8px 0; padding: 6px 9px; font-size: 13px;
+    background: var(--sunk); border: 1px solid var(--border);
+    border-radius: 7px; color: var(--ink);
+  }
+  .danger-panel .btn { width: 100%; }
+
+  .deleted-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 8px 0; border-bottom: 1px solid var(--border-soft);
+  }
+  .deleted-row:last-child { border-bottom: none; }
+  .deleted-row .hint { margin-top: 2px; }
   .btn:disabled { opacity: 0.55; cursor: default; }
   .btn kbd {
     background: rgba(0, 0, 0, 0.10); border: none; font-size: 10px;
