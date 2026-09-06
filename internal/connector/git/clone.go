@@ -121,7 +121,7 @@ func CloneShallow(ctx context.Context, opts CloneOptions) error {
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 
 	if opts.Token != "" {
-		askpass, cleanup, err := writeAskpass(opts.Dir)
+		askpass, cleanup, err := WriteAskpass(opts.Dir)
 		if err != nil {
 			return err
 		}
@@ -150,10 +150,14 @@ func CloneShallow(ctx context.Context, opts CloneOptions) error {
 	return nil
 }
 
-// writeAskpass materializes the credential helper git calls for a username
+// WriteAskpass materializes the credential helper git calls for a username
 // and password. The token travels via environment, so neither the command
 // line nor the script contains it.
-func writeAskpass(near string) (path string, cleanup func(), err error) {
+//
+// Exported because publishing a wiki authenticates the same way a clone does,
+// and a second implementation of "hand git a token safely" is exactly the kind
+// of duplication that drifts into a leak.
+func WriteAskpass(near string) (path string, cleanup func(), err error) {
 	dir, err := os.MkdirTemp(filepath.Dir(near), "kiln-askpass-")
 	if err != nil {
 		return "", nil, fmt.Errorf("connector/git: askpass dir: %w", err)

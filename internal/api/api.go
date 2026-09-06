@@ -110,6 +110,10 @@ type Server struct {
 	// Pages backs deleting and restoring individual pages. Nil leaves those
 	// routes unmounted.
 	Pages PageDeleter
+	// Publish backs mirroring the wiki to a git repository. Nil leaves the
+	// routes reporting "not configured" rather than unmounted, so the UI can
+	// say the feature is unavailable instead of erroring.
+	Publish PublishStore
 	// Workspaces backs self-serve bench creation. Nil leaves it unmounted,
 	// which keeps a read-only embed unable to create anything.
 	Workspaces WorkspaceCreator
@@ -309,6 +313,7 @@ func (s *Server) mountRoutes(r chi.Router) {
 				r.Get("/figures", s.handleFiguresList)
 				r.Get("/figures/{id}", s.handleFigure)
 				r.Get("/pages-deleted", s.handleDeletedPagesList)
+				r.Get("/publish", s.handlePublishGet)
 				r.Get("/index", s.handleArtifact("index"))
 				r.Get("/overview", s.handleArtifact("overview"))
 				r.Get("/log", s.handleArtifact("log"))
@@ -338,6 +343,13 @@ func (s *Server) mountRoutes(r chi.Router) {
 						r.Patch("/connectors/{id}", s.handleConnectorPatch)
 						r.Delete("/connectors/{id}", s.handleConnectorDelete)
 						r.Get("/credentials", s.handleCredentialsList)
+						// Where the wiki is mirrored to is the same class of
+						// decision as what the bench reads: it names an
+						// external repository and attaches a credential that
+						// can write to it.
+						r.Put("/publish", s.handlePublishPut)
+						r.Patch("/publish", s.handlePublishPatch)
+						r.Delete("/publish", s.handlePublishDelete)
 						r.Post("/credentials", s.handleCredentialCreate)
 						r.Delete("/credentials/{id}", s.handleCredentialDelete)
 					})

@@ -27,6 +27,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/observability"
 	"github.com/daiwa-zou/kiln/internal/store"
+	"github.com/daiwa-zou/kiln/internal/wiki"
 )
 
 // Store is what the worker needs from persistence, declared here so the loop
@@ -51,6 +52,15 @@ type Store interface {
 	RequeueRun(ctx context.Context, runID string) error
 	Sweep(ctx context.Context, softDeleteRetention, runRetention time.Duration) (int64, error)
 	QueueDepth(ctx context.Context) (map[string]int, error)
+
+	// Publishing reads the finished wiki back out and records where it went.
+	// The pipeline writes the wiki; the worker mirrors it, so these live here
+	// rather than on jobs.Store.
+	PublishTargetFor(ctx context.Context, workspaceID string) (store.PublishTarget, error)
+	MarkPublished(ctx context.Context, workspaceID, commit, publishErr string) error
+	LoadPages(ctx context.Context, workspaceID string) ([]wiki.Page, error)
+	LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error)
+	ListFigures(ctx context.Context, workspaceID string) ([]store.FigureRow, error)
 }
 
 // Worker is one claim-and-build loop.
@@ -336,6 +346,11 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		w.metrics().RunFinished(string(res.Summary.Status), time.Since(started),
 			res.Summary.CostUSD, res.Summary.Created, res.Summary.Updated, res.Summary.Deleted)
 		w.warnNearBudget(ctx, run.WorkspaceID, log)
+		// Mirror the finished wiki to its repository, if this bench publishes.
+		// After the import and outside the run's success: the wiki is already
+		// committed and correct by now, so a repository that cannot be written
+		// is a degraded copy of something that exists, not a broken build.
+		w.publishAfterBuild(ctx, run.WorkspaceID, run.WorkspaceSlug, run.Trigger, log)
 		w.enqueueContinuation(ctx, run, res, log)
 	}
 	// Terminal bookkeeping, so it outlives cancellation like the requeue and

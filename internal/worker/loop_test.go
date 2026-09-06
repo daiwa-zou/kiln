@@ -14,6 +14,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
+	"github.com/daiwa-zou/kiln/internal/wiki"
 )
 
 // loopStore scripts the queue for loop tests: a fixed set of runs to hand
@@ -556,3 +557,17 @@ func TestRunDrainsInFlightRunOnShutdown(t *testing.T) {
 		t.Errorf("run left in limbo: failed=%v requeued=%v", st.failed, st.requeued)
 	}
 }
+
+// A bench with no publish target is the default, so these stubs report exactly
+// that: publishing is opt-in and the loop must be unaffected without it.
+func (l *loopStore) PublishTargetFor(context.Context, string) (store.PublishTarget, error) {
+	return store.PublishTarget{}, store.ErrNotFound
+}
+func (l *loopStore) MarkPublished(context.Context, string, string, string) error { return nil }
+func (l *loopStore) LoadArtifact(context.Context, string, string) (string, error) {
+	return "", nil
+}
+func (l *loopStore) ListFigures(context.Context, string) ([]store.FigureRow, error) {
+	return nil, nil
+}
+func (l *loopStore) LoadPages(context.Context, string) ([]wiki.Page, error) { return nil, nil }
