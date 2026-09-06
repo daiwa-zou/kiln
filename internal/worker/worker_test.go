@@ -13,6 +13,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/store"
+	"github.com/daiwa-zou/kiln/internal/wiki"
 )
 
 // fakeStore satisfies Store for exercising the resolution logic without
@@ -513,3 +514,17 @@ func TestSourceSpecAllowsUploadOnlyWorkspace(t *testing.T) {
 		t.Errorf("upload-only resolution: ids=%+v spec=%+v", ids, spec)
 	}
 }
+
+// A bench with no publish target is the default, so these stubs report exactly
+// that: publishing is opt-in and the loop must be unaffected without it.
+func (f *fakeStore) PublishTargetFor(context.Context, string) (store.PublishTarget, error) {
+	return store.PublishTarget{}, store.ErrNotFound
+}
+func (f *fakeStore) MarkPublished(context.Context, string, string, string) error { return nil }
+func (f *fakeStore) LoadArtifact(context.Context, string, string) (string, error) {
+	return "", nil
+}
+func (f *fakeStore) ListFigures(context.Context, string) ([]store.FigureRow, error) {
+	return nil, nil
+}
+func (f *fakeStore) LoadPages(context.Context, string) ([]wiki.Page, error) { return nil, nil }

@@ -19,6 +19,7 @@ Operational concerns — deploying, upgrading, backups — live in
 - [Validation](#validation)
 - [Import and the derived artifacts](#import-and-the-derived-artifacts)
 - [Deletion](#deletion)
+- [Publishing to a repository](#publishing-to-a-repository)
 - [The human loop](#the-human-loop)
 - [Cost control](#cost-control)
 - [Data model](#data-model)
@@ -643,6 +644,60 @@ Deleted pages are soft-deleted either way and swept after
 `storage.soft_delete_retention` (default 30 days). That retention window is
 what makes deleting without a second question defensible: the destruction is
 immediate but not yet permanent.
+
+---
+
+## Publishing to a repository
+
+A bench can mirror its wiki into a git repository, so it can be read on GitHub
+without kiln running, reviewed in a pull request, diffed between builds, and
+kept after the bench is gone. Those are different properties from the database,
+not better ones — which is why this is a mirror and not a move. Postgres stays
+authoritative, and every push rewrites the published files from it.
+
+```mermaid
+flowchart LR
+    B["Successful build"] --> T{"Publish target<br/>configured and enabled?"}
+    T -->|"no"| Skip["Nothing happens"]
+    T -->|"yes"| Tree["Render the tree<br/><i>pages · index · overview · log<br/>referenced figures · README</i>"]
+    Tree --> Push["Empty the managed subtree,<br/>write it, commit, push"]
+    Push -->|"changed"| Commit["Commit recorded<br/>on the target"]
+    Push -->|"identical"| Noop["No commit —<br/>recorded as success"]
+    Push -->|"failed"| Err["Error on the target;<br/><b>the build still succeeded</b>"]
+
+    style Skip fill:#1e3a2f,stroke:#3f8f6a,color:#d8f0e4
+```
+
+**Overwrite is what makes it correct.** A wiki is a set of pages, not a stream
+of edits: a page deleted in kiln has to disappear from the repository, and
+reconciling that by computing per-file changes would mean maintaining a second
+model of what the repository holds. The managed subtree is emptied and
+rewritten, and git works out the diff — the one thing git is unambiguously
+better at than any code here. Only that subtree is touched, so a repository can
+hold a hand-written README, CI workflows and a published wiki at once.
+
+**Figure references are rewritten on the way out.** A page stores
+`![caption](figure:ID)` because the API resolves it at read time, which is right
+for kiln and useless on GitHub — the reference is not a URL and renders as
+literal text. Published pages point at a checked-in file under `figures/`
+instead, and only referenced images are written.
+
+**A failed push never fails the build.** By the time publishing runs the wiki is
+already committed and correct; a repository that could not be written is a
+degraded copy of something that still exists. The outcome lands on the target
+row next to the configuration that caused it, the way a connector's sync error
+does, and an unchanged wiki records a success with no new commit rather than an
+error.
+
+The remote is held to the same policy as a clone — https only, no credentials
+in the URL, nothing resolving into private address space — and checked when the
+target is configured rather than only at push time, so a bad URL is reported
+while someone is looking at the form. The token reaches git through the same
+askpass helper the clone path uses, so it never appears in a command line or in
+the repository's config.
+
+Turning publishing off leaves the repository exactly as it was. kiln wrote those
+files, but it does not own the repository.
 
 ---
 

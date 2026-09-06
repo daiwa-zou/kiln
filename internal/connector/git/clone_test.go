@@ -58,9 +58,9 @@ func TestWriteAskpass(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, cleanup, err := writeAskpass(near)
+	script, cleanup, err := WriteAskpass(near)
 	if err != nil {
-		t.Fatalf("writeAskpass: %v", err)
+		t.Fatalf("WriteAskpass: %v", err)
 	}
 
 	info, err := os.Stat(script)

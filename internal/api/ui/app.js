@@ -1367,6 +1367,97 @@ function correctionsPanel(corrections) {
     </div>`;
 }
 
+// publishPanel configures mirroring the wiki into a git repository.
+//
+// The copy leads with the property that surprises people: the repository is a
+// mirror, rewritten from kiln on every build, so anything edited there is lost.
+// Someone who discovers that by having a hand edit vanish has been failed by
+// this panel.
+function publishPanel(publish) {
+  if (!publish) return ""; // not permitted, or the route is unavailable
+  const t = publish.configured ? publish : null;
+
+  const status = !t ? "" : `
+    <div class="prov">
+      ${t.lastError
+        ? `<div class="prov-row"><span>Last attempt</span><span class="error">${esc(t.lastError)}</span></div>`
+        : ""}
+      ${t.lastPublished
+        ? `<div class="prov-row"><span>Last published</span><span>${esc(relTime(t.lastPublished))}</span></div>`
+        : `<div class="prov-row"><span>Last published</span><span>never</span></div>`}
+      ${t.lastCommit
+        ? `<div class="prov-row"><span>Commit</span><span class="mono">${esc(t.lastCommit.slice(0, 9))}</span></div>`
+        : ""}
+      <div class="prov-row"><span>Authenticated</span><span>${t.authenticated ? "yes" : "no credential"}</span></div>
+    </div>`;
+
+  return `
+    <div class="sec-head"><div class="group-label">Publish to a repository</div></div>
+    <p class="hint">Mirrors this wiki into a git repository after every successful
+      build, so it can be read on GitHub, reviewed in a pull request and diffed
+      between builds. <strong>The repository is a mirror</strong> — each push
+      rewrites the published files from kiln, so edits made there are replaced
+      rather than merged.</p>
+    ${status}
+    <div class="row">
+      <input id="publish-repo" placeholder="https://github.com/owner/repo.git"
+             autocomplete="off" spellcheck="false" value="${esc(t?.repo || "")}">
+    </div>
+    <div class="row">
+      <input id="publish-branch" placeholder="branch (default main)"
+             autocomplete="off" spellcheck="false" value="${esc(t?.branch || "")}">
+      <input id="publish-prefix" placeholder="subdirectory (optional, e.g. wiki)"
+             autocomplete="off" spellcheck="false" value="${esc(t?.pathPrefix || "")}">
+    </div>
+    <div class="row">
+      <input id="publish-credential" placeholder="credential id (a git_pat that can push)"
+             autocomplete="off" spellcheck="false" value="${esc(t?.credentialId || "")}">
+      <button class="btn" id="publish-save">${t ? "Update" : "Configure"}</button>
+      ${t ? `<button class="btn" id="publish-remove">Stop publishing</button>` : ""}
+    </div>
+    <div id="publish-note" class="hint" role="status"></div>`;
+}
+
+function wirePublish() {
+  const note = (msg, isErr) => {
+    const el = $("publish-note");
+    if (el) { el.textContent = msg; el.classList.toggle("error", Boolean(isErr)); }
+  };
+  const save = $("publish-save");
+  if (save) once(save, async () => {
+    const repo = ($("publish-repo")?.value || "").trim();
+    if (!repo) { note("A repository URL is required.", true); return; }
+    try {
+      const out = await api(`/workspaces/${encodeURIComponent(state.workspace)}/publish`, {
+        method: "PUT",
+        body: {
+          repo,
+          branch: ($("publish-branch")?.value || "").trim(),
+          pathPrefix: ($("publish-prefix")?.value || "").trim(),
+          credentialId: ($("publish-credential")?.value || "").trim(),
+        },
+      });
+      toast(out?.note || "Publishing configured — the next build mirrors the wiki");
+      showBench();
+    } catch (err) {
+      if (!err.handled) note(err.message, true);
+    }
+  });
+
+  const remove = $("publish-remove");
+  if (remove) once(remove, async () => {
+    if (!armButton(remove, "stop publishing")) return;
+    try {
+      const out = await api(`/workspaces/${encodeURIComponent(state.workspace)}/publish`,
+        { method: "DELETE" });
+      toast(out?.note || "Publishing stopped");
+      showBench();
+    } catch (err) {
+      if (!err.handled) note(err.message, true);
+    }
+  });
+}
+
 // deletePanel offers to remove the page for good.
 //
 // The wording carries the whole point. Everything else a build touches comes
@@ -3171,6 +3262,10 @@ async function showBench() {
   const bench = state.benches.find((b) => b.slug === state.workspace);
   const pages = state.pages.length;
   try {
+    // Owner-gated on the server, so a 403 here is expected for an editor and
+    // costs them the section rather than the page.
+    const publish = await api(`/workspaces/${encodeURIComponent(state.workspace)}/publish`)
+      .catch(() => null);
     if (!view.done(`${viewHead("Bench configuration", "bench")}
       <div class="stats n3">
         <div class="stat">
@@ -3189,6 +3284,8 @@ async function showBench() {
         </div>
       </div>
 
+      ${publishPanel(publish)}
+
       <div class="sec-head"><div class="group-label">Delete this bench</div></div>
       <p class="hint">Removes <strong>${esc(bench?.name || state.workspace)}</strong> and
         everything in it — every page, run, review, connector and uploaded document.
@@ -3201,6 +3298,8 @@ async function showBench() {
         <button class="btn danger" id="bench-delete" disabled>Delete bench</button>
       </div>
       <div id="bench-delete-note" class="hint" role="status"></div>`)) return;
+
+    wirePublish();
 
     // Deleting a bench is gated three times over, which is proportionate to it
     // being the one control in the UI that destroys work outright: the server
