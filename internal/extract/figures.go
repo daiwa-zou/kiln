@@ -172,12 +172,17 @@ func (es Extractors) ExtractWithFigures(ctx context.Context, path string, o Figu
 		return res, nil
 	}
 
+	// One return for both outcomes, because there is only one outcome as far
+	// as the caller is concerned: the extraction succeeded. A figure failure is
+	// recorded on the result rather than returned, so the two branches differ
+	// in what they record and not in what they answer.
 	figs, ferr := fe.ExtractFigures(ctx, path, res.Text, o.withDefaults())
-	if ferr != nil {
+	switch {
+	case ferr != nil:
 		res.FigureErr = ferr
-		return res, nil
+	default:
+		res.Figures = selectFigures(figs, o.withDefaults())
 	}
-	res.Figures = selectFigures(figs, o.withDefaults())
 	return res, nil
 }
 
