@@ -4,17 +4,17 @@ go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/anthropics/anthropic-sdk-go v1.61.0
-	github.com/go-chi/chi/v5 v5.3.1
+	github.com/anthropics/anthropic-sdk-go v1.70.1
+	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/minio/minio-go/v7 v7.2.1
+	github.com/minio/minio-go/v7 v7.3.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
-	golang.org/x/mod v0.38.0
+	golang.org/x/mod v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -43,8 +43,8 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
-	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
+	github.com/klauspost/compress v1.19.2 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
@@ -73,20 +73,20 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
-	github.com/tinylib/msgp v1.6.1 // indirect
+	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	gopkg.in/ini.v1 v1.67.2 // indirect
+	gopkg.in/ini.v1 v1.67.3 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
