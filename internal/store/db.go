@@ -26,10 +26,25 @@ func Open(ctx context.Context, cfg *config.Config) (*DB, error) {
 		return nil, fmt.Errorf("store: parse dsn (%s): %w", cfg.Database.Redacted(), err)
 	}
 
-	poolCfg.MaxConns = cfg.Database.MaxConns
-	poolCfg.MinConns = cfg.Database.MinConns
-	poolCfg.MaxConnLifetime = cfg.Database.MaxConnLifetime
-	poolCfg.MaxConnIdleTime = cfg.Database.MaxConnIdleTime
+	// Only values the caller actually set override pgx's own defaults. Every
+	// one of these has a default in config/defaults.go, so a configured
+	// process always sets them -- but a zero here is not "use the default", it
+	// is a value pgx takes literally: MaxConns of 0 is rejected outright, and
+	// a MaxConnLifetime of 0 expires every connection the moment it is made.
+	// Copying unconditionally meant any caller holding a config it built
+	// itself got a pool that could not serve a single query.
+	if cfg.Database.MaxConns > 0 {
+		poolCfg.MaxConns = cfg.Database.MaxConns
+	}
+	if cfg.Database.MinConns > 0 {
+		poolCfg.MinConns = cfg.Database.MinConns
+	}
+	if cfg.Database.MaxConnLifetime > 0 {
+		poolCfg.MaxConnLifetime = cfg.Database.MaxConnLifetime
+	}
+	if cfg.Database.MaxConnIdleTime > 0 {
+		poolCfg.MaxConnIdleTime = cfg.Database.MaxConnIdleTime
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {

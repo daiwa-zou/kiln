@@ -143,3 +143,27 @@ func TestServeMetricsListenerLifecycle(t *testing.T) {
 		t.Fatal("metrics listener did not shut down")
 	}
 }
+
+// The empty rate is the decision input for whether lexical matching suffices:
+// full-text search ranks what matches but cannot match what shares no word
+// with the question, and only this counter says how often that costs a caller
+// an answer. A single counter with no outcome split would answer "how much
+// search happens", which nobody was asking.
+func TestSearchesAreSplitByWhetherTheyFoundAnything(t *testing.T) {
+	m := NewMetrics()
+	m.SearchObserved(3)
+	m.SearchObserved(1)
+	m.SearchObserved(0)
+
+	if got := testutil.ToFloat64(m.searches.WithLabelValues("hit")); got != 2 {
+		t.Errorf("hit searches = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.searches.WithLabelValues("empty")); got != 1 {
+		t.Errorf("empty searches = %v, want 1", got)
+	}
+
+	body := scrape(t, m)
+	if !strings.Contains(body, `kiln_searches_total{outcome="empty"}`) {
+		t.Errorf("exposition missing the empty-outcome series:\n%s", body)
+	}
+}

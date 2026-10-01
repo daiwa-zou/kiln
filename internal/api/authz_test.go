@@ -20,13 +20,18 @@ import (
 
 // mutableSource authenticates the fixed token "kiln_valid" as whatever
 // identity the test currently wants, so one server can play several callers.
-type mutableSource struct{ id auth.Identity }
+// Setting revoked makes it stop recognizing the token at all, the way the
+// tokens table does once revoked_at is set.
+type mutableSource struct {
+	id      auth.Identity
+	revoked bool
+}
 
 func (m *mutableSource) IdentityForToken(_ context.Context, hash string) (auth.Identity, error) {
-	if hash == auth.HashToken("kiln_valid") {
-		return m.id, nil
+	if m.revoked || hash != auth.HashToken("kiln_valid") {
+		return auth.Identity{}, auth.ErrUnauthenticated
 	}
-	return auth.Identity{}, auth.ErrUnauthenticated
+	return m.id, nil
 }
 
 // authedServer is testServer with the auth middleware actually wired. The
