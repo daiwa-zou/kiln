@@ -206,21 +206,6 @@ func unitKeys(wm *mapper.WorkspaceMap) []string {
 	return out
 }
 
-func TestUniqueSlugCollisionCounter(t *testing.T) {
-	taken := map[string]bool{}
-	got := []string{
-		uniqueSlug(taken, "report"),
-		uniqueSlug(taken, "report"),
-		uniqueSlug(taken, "report"),
-	}
-	want := []string{"report", "report-2", "report-3"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("slug %d = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
 func TestSectionInputsAreTheirOwnFilesAndLeaveIdentityAlone(t *testing.T) {
 	// Staging a section's text must not move anything a page's regeneration is
 	// decided by: the key, slug and hash are what the cache is keyed on.

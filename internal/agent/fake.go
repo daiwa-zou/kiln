@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/daiwa-zou/kiln/internal/mapper"
 )
 
 // FakeRunner generates deterministic placeholder pages with zero API spend.
@@ -325,27 +327,11 @@ func plannedPages(prompt string) []AnalysisPage {
 	return plan.Pages
 }
 
-// slugify collapses a unit key into the schema's slug alphabet:
-// lowercase alphanumerics with single hyphens.
+// slugify collapses a unit key into the schema's slug alphabet: lowercase
+// alphanumerics with single hyphens. It is mapper.Slugify, so the fake runner's
+// slugs follow the same rules as the pages the mappers name.
 func slugify(s string) string {
-	var b strings.Builder
-	lastHyphen := true // suppress a leading hyphen
-	for _, r := range strings.ToLower(s) {
-		isAlnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
-		switch {
-		case isAlnum:
-			b.WriteRune(r)
-			lastHyphen = false
-		case !lastHyphen:
-			b.WriteByte('-')
-			lastHyphen = true
-		}
-	}
-	out := strings.TrimSuffix(b.String(), "-")
-	if out == "" {
-		return "unit"
-	}
-	return out
+	return mapper.Slugify(s, "unit")
 }
 
 // humanize turns a unit key into a readable title.

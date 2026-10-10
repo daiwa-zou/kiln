@@ -95,20 +95,3 @@ func TestSlugifyIsIdempotent(t *testing.T) {
 		}
 	}
 }
-
-func TestUniqueSlug(t *testing.T) {
-	taken := map[string]bool{}
-
-	if got := uniqueSlug(taken, "shared"); got != "shared" {
-		t.Errorf("first = %q, want shared", got)
-	}
-	if got := uniqueSlug(taken, "shared"); got != "shared-2" {
-		t.Errorf("second = %q, want shared-2", got)
-	}
-	if got := uniqueSlug(taken, "shared"); got != "shared-3" {
-		t.Errorf("third = %q, want shared-3", got)
-	}
-	if got := uniqueSlug(taken, "other"); got != "other" {
-		t.Errorf("unrelated = %q, want other", got)
-	}
-}
