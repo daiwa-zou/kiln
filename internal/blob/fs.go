@@ -58,20 +58,42 @@ func (s *fsStore) Put(ctx context.Context, key string, r io.Reader, size int64) 
 	if err != nil {
 		return fmt.Errorf("blob: put %s: %w", key, err)
 	}
-	if _, err := io.Copy(f, r); err != nil {
-		f.Close()
-		_ = s.root.Remove(tmp) // best effort; a stray .tmp is inert
-		return fmt.Errorf("blob: put %s: %w", key, err)
+	// Sync before rename is what makes "never a torn blob" true across power
+	// loss: rename only orders the directory entry, and without an fsync of
+	// the data a filesystem may persist the new name first and leave a
+	// zero-length file behind it. Close can also be where a deferred write
+	// error surfaces, so its result counts too -- but the first failure is
+	// the one worth reporting.
+	_, err = io.Copy(f, r)
+	if err == nil {
+		err = f.Sync()
 	}
-	if err := f.Close(); err != nil {
-		_ = s.root.Remove(tmp)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = s.root.Remove(tmp) // best effort; a stray .tmp is inert
 		return fmt.Errorf("blob: put %s: %w", key, err)
 	}
 	if err := s.root.Rename(tmp, key); err != nil {
 		_ = s.root.Remove(tmp)
 		return fmt.Errorf("blob: put %s: %w", key, err)
 	}
+	s.syncDir(path.Dir(key))
 	return nil
+}
+
+// syncDir fsyncs a directory so a completed rename survives power loss. It is
+// best effort: the blob is already in place and durable-by-data, and some
+// filesystems refuse to fsync a directory, which must not turn a stored blob
+// into a failed upload.
+func (s *fsStore) syncDir(dir string) {
+	d, err := s.root.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 func (s *fsStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {

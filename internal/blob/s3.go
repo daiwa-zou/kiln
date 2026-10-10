@@ -66,11 +66,29 @@ func openS3(cfg config.Storage) (*s3Store, error) {
 	return &s3Store{client: client, bucket: cfg.Bucket}, nil
 }
 
+// streamPartSize is the multipart buffer for uploads of unknown length. It is
+// minio-go's own minimum part size, so it is the smallest value the client
+// will pick on its own, and at 10000 parts it still reaches ~156 GiB -- far
+// beyond the 32 MiB extract cap the upload route enforces.
+const streamPartSize = 16 << 20
+
+// putOptions bounds the memory a Put may cost. With size -1 and no PartSize,
+// minio-go sizes its part buffer for a 5 TiB object (OptimalPartInfo: 5 TiB /
+// 10000 parts, rounded up to 16 MiB multiples = 528 MiB) and allocates all of
+// it up front, so every streamed upload of a few kilobytes would pin half a
+// gigabyte. Known sizes already get a right-sized buffer and need no help.
+func putOptions(size int64) minio.PutObjectOptions {
+	if size < 0 {
+		return minio.PutObjectOptions{PartSize: streamPartSize}
+	}
+	return minio.PutObjectOptions{}
+}
+
 func (s *s3Store) Put(ctx context.Context, key string, r io.Reader, size int64) error {
 	if err := validKey(key); err != nil {
 		return err
 	}
-	if _, err := s.client.PutObject(ctx, s.bucket, key, r, size, minio.PutObjectOptions{}); err != nil {
+	if _, err := s.client.PutObject(ctx, s.bucket, key, r, size, putOptions(size)); err != nil {
 		return fmt.Errorf("blob: put %s: %w", key, err)
 	}
 	return nil

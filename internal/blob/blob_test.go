@@ -136,6 +136,44 @@ func TestFSPutAtomicity(t *testing.T) {
 	}
 }
 
+// TestFSPutLeavesOnlyTheBlob covers the fsync path added for power-loss
+// safety: the sync of the data file and of the parent directory must not
+// disturb a successful put, whether the key is nested or sits at the root, and
+// a failed put must clean up its temp file rather than leave a straggler. The
+// fsync itself is not observable from a test; this pins the behavior around it.
+func TestFSPutLeavesOnlyTheBlob(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := openFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"ws/w/uploads/f", "topLevel"} {
+		if err := s.Put(ctx, key, strings.NewReader("fired clay"), -1); err != nil {
+			t.Fatalf("put %q: %v", key, err)
+		}
+	}
+	failing := io.MultiReader(strings.NewReader("partial"), errReader{})
+	if err := s.Put(ctx, "ws/w/uploads/g", failing, -1); err == nil {
+		t.Fatal("put with failing reader succeeded")
+	}
+
+	var left []string
+	err = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(dir, p)
+			left = append(left, filepath.ToSlash(rel))
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "topLevel ws/w/uploads/f"; strings.Join(left, " ") != want {
+		t.Fatalf("files on disk = %v, want exactly %q", left, want)
+	}
+}
+
 func TestFSRejectsEscape(t *testing.T) {
 	ctx := context.Background()
 	s, err := openFS(t.TempDir())

@@ -124,7 +124,10 @@ func (s *Server) handleFigure(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", f.ContentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	w.Header().Set("Cache-Control", "public, max-age="+strconv.Itoa(figureCacheSeconds)+", immutable")
+	// private, not public: the route is authenticated and workspace-scoped,
+	// and a shared cache (CDN, reverse proxy) that stored a "public" response
+	// would replay one tenant's figure to anyone who asked for the URL.
+	w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(figureCacheSeconds)+", immutable")
 	if f.SizeBytes > 0 {
 		w.Header().Set("Content-Length", strconv.FormatInt(f.SizeBytes, 10))
 	}
