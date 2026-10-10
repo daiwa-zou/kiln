@@ -1851,12 +1851,12 @@ function logSummary(r) {
   }
   if (r.status === "queued") return "Waiting for a worker to claim it.";
   if (r.trigger === "research") {
-    if (r.status === "failed") return r.error ? String(r.error).split("\n")[0] : "The research pass did not finish.";
+    if (r.status === "failed") return "The research pass did not finish.";
     if (r.status === "canceled") return "The research pass was canceled before it finished.";
     if (r.status === "over_budget") return "The run reached its budget cap and stopped before finishing.";
     return "Read the sources to answer a question filed under Reviews. The findings are on that review item; no pages were written.";
   }
-  if (r.status === "failed") return r.error ? String(r.error).split("\n")[0] : "The build did not finish.";
+  if (r.status === "failed") return "The build did not finish.";
   if (r.status === "over_budget") return "The run reached its budget cap and stopped before finishing.";
   if (r.status === "canceled") return "The build was canceled before it finished.";
   const parts = [];
@@ -1947,6 +1947,7 @@ async function showLog() {
               <span class="log-when">${r.status === "running" ? "in progress" : esc(relTime(r.created))}</span>
             </div>
             <p class="log-summary">${esc(logSummary(r))}</p>
+            ${runErrorHTML(r)}
             ${(() => {
               const f = logFooter(r);
               return f.length ? `<div class="log-foot">${f.map((x) => `<span>${esc(x)}</span>`).join("")}</div>` : "";

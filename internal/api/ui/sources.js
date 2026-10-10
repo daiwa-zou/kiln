@@ -667,36 +667,79 @@ const liveTokens = (items) => items.reduce((n, it) => n + (Number(it.tokens) || 
 // A run's error arrives from the queue as "<cache key>: <what went wrong>",
 // written for whoever reads the logs. Both halves leak: the key is the cache
 // namespacing the reader was never meant to meet, and the tail is often a
-// validation report addressed to whoever maintains the generator, not to the
-// person who uploaded a PDF. So: say which source failed in the words used
-// everywhere else on this page, say what happened in a sentence, and keep the
-// report itself one click away rather than in their face. Nothing is
-// discarded -- an operator who needs the detail still has it, and the CLI and
-// the logs still carry the original untouched.
+// validation report or a CLI transcript addressed to whoever maintains the
+// generator, not to the person who uploaded a PDF. So: say which source failed
+// in the words used everywhere else on this page, say what happened and what
+// to do next in a sentence, and keep the raw text one click away rather than
+// in their face. Nothing is discarded -- an operator who needs the detail still
+// has it, and the CLI and the logs still carry the original untouched.
+//
+// This is the one renderer for a run's error: the Ingest timeline, a source's
+// last error and the Log view all call it, so a cause taught here is taught
+// everywhere.
 const KEY_RE = /^((?:doc:(?:upload:|web:)?|module:|arch:|entry:)[^\s].*?): ([\s\S]*)$/;
-const VIOLATIONS_RE = /^(\d+) validation violation\(s\): ([\s\S]*)$/;
+
+// Known causes, tried in order against the error text (the unit key already
+// removed); the first match wins. To teach the UI a new failure, add one entry:
+//   re     tested against the text
+//   say    (match) => the sentence to show: what happened, and what to do
+//   label  (optional) summary text of the disclosure holding the raw error
+//   raw    (optional) (match) => the text inside the disclosure (default: all of it)
+// Keep `say` to a single line: .detail is pre-wrap so that a server error
+// keeps its own line breaks, which means any whitespace written here would
+// reach the reader as a line break they did not ask for.
+const firstGroup = (text, res) => {
+  for (const re of res) {
+    const m = re.exec(text);
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  return "";
+};
+const ERROR_CAUSES = [
+  {
+    re: /^(\d+) validation violation\(s\): ([\s\S]*)$/,
+    say: (m) => `Written but failed ${m[1] === "1" ? "a check" : `${m[1]} checks`}, `
+      + `so its pages were not kept. Ingest again once the source is fixed.`,
+    label: "what failed the check",
+    raw: (m) => m[2],
+  },
+  {
+    re: /failed to authenticate|oauth|not logged in|unauthori[sz]ed|authentication|\b401\b|login expired/i,
+    say: () => "The model login expired — re-authenticate the worker, then Ingest again.",
+  },
+  {
+    re: /\b429\b|rate.?limit|session limit|usage limit|too many requests|quota/i,
+    say: (m) => {
+      const when = firstGroup(m.input, [
+        /resets?\s+(?:at\s+|in\s+)?([^.;·\n(]+)/i,
+        /retry[- ]after:?\s*(\d+\s*[a-z]+)/i,
+      ]);
+      return when ? `Rate-limited — retry after ${when}.` : "Rate-limited — wait a little, then Ingest again.";
+    },
+  },
+];
+const GENERIC_ERROR = "This run hit an error. Check the details below, then Ingest again.";
 
 function runErrorHTML(r) {
   if (!r.error) return "";
   const keyed = KEY_RE.exec(r.error);
   // An error that does not name a unit is about the run itself; it has no
-  // source to attribute and no report to hide.
-  if (!keyed) return `<div class="detail hint error">${esc(r.error)}</div>`;
-  const [, key, tail] = keyed;
-  const bad = VIOLATIONS_RE.exec(tail);
-  if (!bad) {
-    return `<div class="detail hint error run-error">${unitKeyHTML(key)}<span>${esc(tail)}</span></div>`;
+  // source to attribute.
+  const key = keyed ? keyed[1] : "";
+  const tail = keyed ? keyed[2] : String(r.error);
+  let say = GENERIC_ERROR, label = "what the error said", raw = tail;
+  for (const c of ERROR_CAUSES) {
+    const m = c.re.exec(tail);
+    if (!m) continue;
+    say = c.say(m);
+    if (c.label) label = c.label;
+    if (c.raw) raw = c.raw(m);
+    break;
   }
-  const n = Number(bad[1]);
-  // One line, deliberately: .review .detail is pre-wrap so that a server
-  // error keeps its own line breaks, which means any indentation written here
-  // would reach the reader as a line break they did not ask for.
-  const sentence = `was written but failed ${n === 1 ? "a check" : `${n} checks`}, `
-    + `so its pages were not kept. Ingest again once the source is fixed.`;
-  return `<div class="detail hint error run-error">${unitKeyHTML(key)}<span>${sentence}</span></div>
-    <details class="run-units" data-keep="err:${esc(r.id)}">
-      <summary>what failed the check</summary>
-      <div class="detail mono">${esc(bad[2])}</div>
+  return `<div class="detail hint error run-error">${key ? unitKeyHTML(key) : ""}<span>${esc(say)}</span></div>
+    <details class="run-units" data-keep="err:${esc(r.id ?? "")}">
+      <summary>${esc(label)}</summary>
+      <div class="detail mono">${esc(raw)}</div>
     </details>`;
 }
 
@@ -1001,7 +1044,7 @@ async function showSources() {
             aria-label="Delete ${esc(c.name)}" title="delete">${iconTrash}</button>
         </div>
       </div>
-      ${c.lastError ? `<div class="src-err">${esc(c.lastError)}</div>` : ""}`;
+      ${c.lastError ? `<div class="src-err">${runErrorHTML({ id: `conn-${c.id}`, error: c.lastError })}</div>` : ""}`;
     };
 
     const fileRow = (f) => `
