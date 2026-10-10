@@ -40,7 +40,7 @@ func TestBuildFullRebuildRepeatCostsNothing(t *testing.T) {
 	// The CLI path always sends FullRebuild: true, so this is the invariant
 	// the README sells: a second build over unchanged sources makes zero
 	// agent calls -- including the architecture synthesis, which is gated by
-	// the whole-map hash.
+	// the repository's structural digest (ArchHash).
 	store := newMemStore()
 	runner := &structuredRunner{byUnit: map[string][]agent.GeneratedPage{
 		"module:ripple": {{
@@ -55,7 +55,7 @@ func TestBuildFullRebuildRepeatCostsNothing(t *testing.T) {
 	p := testPipeline(store, runner)
 
 	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h1"})
-	m.Hash = "map-hash-1"
+	m.ArchHash = "map-hash-1"
 
 	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
 	req.ScratchDir = ""

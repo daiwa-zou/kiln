@@ -326,6 +326,11 @@ func TestScanHashIsStableAndSensitive(t *testing.T) {
 		t.Error("map hash differs across scans of identical trees")
 	}
 
+	// The workspace map carries it as the architecture synthesis's gate.
+	if got := first.ToWorkspaceMap().ArchHash; got == "" || got != first.Hash {
+		t.Errorf("workspace map ArchHash = %q, want the structural hash %q", got, first.Hash)
+	}
+
 	changed := map[string]string{
 		"go.mod":            base["go.mod"],
 		"main.go":           base["main.go"],

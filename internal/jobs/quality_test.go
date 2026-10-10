@@ -24,7 +24,7 @@ func TestDeletionFlaggedForLastSourceOfAKind(t *testing.T) {
 	p := testPipeline(store, agent.NewFakeRunner(agent.FakeOptions{}))
 
 	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h1"})
-	m.Hash = "map-1"
+	m.ArchHash = "map-1"
 	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
 
 	// Uploads were synced this run and came back empty: that IS a deletion,
@@ -60,7 +60,7 @@ func TestPerSourceConnectorAttribution(t *testing.T) {
 		mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h1"},
 		mapper.Unit{Key: "doc:" + diff.UploadOrigin("guide.md"), Kind: "doc", Hash: "h2"},
 	)
-	m.Hash = "map-1"
+	m.ArchHash = "map-1"
 	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
 	req.Connectors = SourceConnectors{Git: "conn-git", Upload: "conn-up", Web: "conn-web"}
 	// The doc unit must be routable or no source record is written for it.
@@ -107,7 +107,7 @@ func TestCrossUnitPageCollisionFailsTheLaterUnit(t *testing.T) {
 		mapper.Unit{Key: "module:alpha", Slug: "alpha", Hash: "h1"},
 		mapper.Unit{Key: "module:beta", Slug: "beta", Hash: "h2"},
 	)
-	m.Hash = "map-1"
+	m.ArchHash = "map-1"
 	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
 	req.Router.ModuleDirs["apps/alpha"] = diff.ModuleKey("alpha")
 	req.Router.ModuleDirs["apps/beta"] = diff.ModuleKey("beta")

@@ -433,9 +433,13 @@ flowchart LR
     style Gen fill:#4a3510,stroke:#c88a2e,color:#f5e6c8
 ```
 
-The architecture synthesis has no unit of its own, so the **whole-map hash**
-gates it. Without that, every build — including a completely unchanged one —
-would pay for an architecture regeneration.
+The architecture synthesis has no unit of its own, so the repository's
+**structural digest** (`ArchHash`: modules, dependencies, entry points, protobuf
+and compose services) gates it. Documents and web pages are deliberately not part
+of it, and the merge carries it through unchanged, so editing a document — or
+running with a different set of connectors — never re-pays for the synthesis.
+Without that gate, every build — including a completely unchanged one — would
+pay for an architecture regeneration.
 
 A source record is updated **only on success**. A failed unit keeps its old
 hash, so it is planned again on the next run. That single rule is what makes
