@@ -447,17 +447,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		}
 	}
 
-	if res.Summary.Status == StatusRunning {
-		res.Summary.Status = runStatus(res.Summary.Items)
-	}
-	if res.Summary.Err == "" && res.Summary.Status != StatusSucceeded && res.Summary.Status != StatusNoChanges {
-		for _, it := range res.Summary.Items {
-			if it.Err != "" {
-				res.Summary.Err = fmt.Sprintf("%s: %s", it.Key, it.Err)
-				break
-			}
-		}
-	}
+	res.Summary.Status, res.Summary.Err = finalizeStatus(res.Summary)
 	return res, p.Store.RecordRun(importCtx, res.Summary)
 }
 
