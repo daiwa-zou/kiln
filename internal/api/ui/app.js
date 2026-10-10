@@ -1411,20 +1411,24 @@ function publishPanel(publish) {
       rather than merged.</p>
     ${status}
     <div class="row">
+      <label class="sr-only" for="publish-repo">Repository URL</label>
       <input id="publish-repo" placeholder="https://github.com/owner/repo.git"
              autocomplete="off" spellcheck="false" value="${esc(t?.repo || "")}">
     </div>
     <div class="row">
+      <label class="sr-only" for="publish-branch">Branch</label>
       <input id="publish-branch" placeholder="branch (default main)"
              autocomplete="off" spellcheck="false" value="${esc(t?.branch || "")}">
+      <label class="sr-only" for="publish-prefix">Subdirectory</label>
       <input id="publish-prefix" placeholder="subdirectory (optional, e.g. wiki)"
              autocomplete="off" spellcheck="false" value="${esc(t?.pathPrefix || "")}">
     </div>
     <div class="row">
+      <label class="sr-only" for="publish-credential">Credential id</label>
       <input id="publish-credential" placeholder="credential id (a git_pat that can push)"
              autocomplete="off" spellcheck="false" value="${esc(t?.credentialId || "")}">
       <button class="btn" id="publish-save">${t ? "Update" : "Configure"}</button>
-      ${t ? `<button class="btn" id="publish-remove">Stop publishing</button>` : ""}
+      ${t ? `<button class="btn quiet" id="publish-remove">Stop publishing</button>` : ""}
     </div>
     <div id="publish-note" class="hint" role="status"></div>`;
 }
@@ -2116,9 +2120,8 @@ function inboxRowsHTML() {
            such as confirming a deletion after a source disappears.`}</div>`;
   }
   return reviewRows.map((r, i) => `
-    <button class="inbox-row ${kindClass(r.kind)}" role="option" data-idx="${i}"
-            aria-current="${i === selectedReviewIndex}"
-            aria-selected="${i === selectedReviewIndex}">
+    <button class="inbox-row ${kindClass(r.kind)}" data-idx="${i}"
+            aria-current="${i === selectedReviewIndex}">
       <span class="inbox-row-top">
         <span class="kind-sq">${REVIEW_KIND_ICONS[r.kind] || iconUncertain}</span>
         <span class="kind-name">${esc(r.kind)}</span>
@@ -2223,7 +2226,7 @@ async function showReviews(history) {
             ${inboxPillsHTML(reviewCounts(open))}
           </div>
         </div>
-        <div class="inbox-scroll" id="inbox-scroll" role="listbox" aria-label="Reviews">
+        <div class="inbox-scroll" id="inbox-scroll" role="group" aria-label="Reviews">
           ${inboxRowsHTML()}
         </div>
       </div>
@@ -2357,7 +2360,6 @@ function wireInbox(view) {
     for (const el of document.querySelectorAll(".inbox-row")) {
       const on = Number(el.dataset.idx) === selectedReviewIndex;
       el.setAttribute("aria-current", String(on));
-      el.setAttribute("aria-selected", String(on));
       if (on) el.scrollIntoView({ block: "nearest" });
     }
     showDetail();
@@ -3643,6 +3645,9 @@ async function showMembers() {
     }
     for (const b of document.querySelectorAll("[data-remove]")) {
       once(b, async () => {
+        // Removing someone ends their access to the bench at once; a stray
+        // click should not do that, so it arms first like every other delete.
+        if (!armButton(b, "remove")) return;
         try {
           await api(`/workspaces/${encodeURIComponent(state.workspace)}/members/${encodeURIComponent(b.dataset.remove)}`,
             { method: "DELETE" });

@@ -402,13 +402,14 @@ function openSourceWizard(ctx) {
         <label class="hint" for="wiz-git-url">HTTPS remote, or a server path under the worker's permitted roots</label>
         <input id="wiz-git-url" placeholder="https://github.com/org/repo.git" autocomplete="off" spellcheck="false">
         <label class="hint" for="wiz-git-cred">Credential for private remotes</label>
-        <select id="wiz-git-cred" aria-label="Credential">
+        <select id="wiz-git-cred">
           <option value="">none (public)</option>${credOptions}
         </select>
-        <input id="wiz-git-pat" type="password" placeholder="…or paste a new git PAT to seal"
+        <label class="hint" for="wiz-git-pat">Or paste a new git PAT to seal</label>
+        <input id="wiz-git-pat" type="password" placeholder="personal access token"
                autocomplete="off" spellcheck="false">
         <label class="hint" for="wiz-git-trigger">When should it build?</label>
-        <select id="wiz-git-trigger" aria-label="Trigger mode">
+        <select id="wiz-git-trigger">
           <option value="manual" selected>only when I press Ingest now</option>
           <option value="webhook">automatically on pushes (GitHub webhook)</option>
           <option value="poll">on a regular poll schedule</option>
@@ -456,7 +457,7 @@ function openSourceWizard(ctx) {
         <label class="hint" for="wiz-web-urls">HTTPS addresses, one per line</label>
         <textarea id="wiz-web-urls" rows="4" placeholder="https://example.com/handbook"></textarea>
         <label class="hint" for="wiz-web-trigger">How should they stay fresh?</label>
-        <select id="wiz-web-trigger" aria-label="Trigger mode">
+        <select id="wiz-web-trigger">
           <option value="poll" selected>re-fetch on a regular poll schedule</option>
           <option value="manual">only when I press Ingest now</option>
         </select>
@@ -646,7 +647,7 @@ const runOutcome = (r) => {
 // Unit states as the queue's own words. The one being written now is bolded by
 // CSS, which is what separates it from the ones merely queued behind it.
 const unitLabel = {
-  running: ["pending", "run-running"],
+  running: ["writing", "run-running"],
   pending: ["queued", "run-queued"],
   deferred: ["left for the next run", "run-queued"],
   failed: ["failed", "run-failed"],
@@ -1137,7 +1138,7 @@ async function showSources() {
           uploadConn && !uploadConn.enabled ? "; paused, so skipped on ingest" : ""}</span>
       </div>
       <div id="upload-progress" class="hint" role="status"></div>
-      <div class="card rows" id="file-drop" aria-label="Uploaded documents; drop files to add more">
+      <div class="card rows" id="file-drop" role="region" aria-label="Uploaded documents; drop files to add more">
         ${filesErr ? `<div class="empty card-empty">${esc(filesErr)}</div>`
           : files.map(fileRow).join("") ||
             `<div class="empty card-empty">No documents yet. Add markdown, PDFs, Office
@@ -1237,6 +1238,22 @@ async function showSources() {
       uploadWorkspaceFiles(ws, e.dataTransfer.files, $("upload-progress"), () => {
         if (view.current()) showSources();
       });
+    });
+    // A file dropped anywhere else on the page is, by default, opened by the
+    // browser -- it navigates away from kiln to the file. Swallow file drags
+    // on the document while this view is up, and show the no-drop cursor
+    // outside the list so the reader is told where a drop will count.
+    const isFileDrag = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+    const stray = (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      if (e.type === "dragover" && !e.target.closest?.("#file-drop")) e.dataTransfer.dropEffect = "none";
+    };
+    document.addEventListener("dragover", stray);
+    document.addEventListener("drop", stray);
+    onViewCleanup(() => {
+      document.removeEventListener("dragover", stray);
+      document.removeEventListener("drop", stray);
     });
 
     for (const b of document.querySelectorAll("[data-file-toggle]")) {
