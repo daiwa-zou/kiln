@@ -411,6 +411,10 @@ func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, app
 		return false
 	}
 
+	// One reference count for every candidate: planning each from scratch is
+	// quadratic in the sources, which matters when a whole namespace vanishes.
+	planner := diff.NewCascadePlanner(sources)
+
 	var out []DeletionCandidate
 	for _, s := range sources {
 		if s.Key == diff.ArchOverview || skip[s.Key] || skippedByParent(s.Key) {
@@ -428,7 +432,7 @@ func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, app
 		}
 		out = append(out, DeletionCandidate{
 			Key:    s.Key,
-			Detail: describeDeletion(sources, s.Key),
+			Detail: describeDeletion(planner, s.Key),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
@@ -438,8 +442,8 @@ func deletionCandidates(sources []diff.SourceRecord, m *mapper.WorkspaceMap, app
 // describeDeletion states the consequence a reviewer is approving: how many
 // pages go, which ones, and that shared pages are regenerated rather than
 // removed. This is the number a deletion review shows before anyone confirms.
-func describeDeletion(sources []diff.SourceRecord, key diff.Key) string {
-	c := diff.PlanCascade(sources, []diff.Key{key})
+func describeDeletion(planner *diff.CascadePlanner, key diff.Key) string {
+	c := planner.Plan([]diff.Key{key})
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Source %s is no longer present in the map.", key)

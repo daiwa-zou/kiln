@@ -47,23 +47,59 @@ type Cascade struct {
 // exists, and leaving that is how a wiki accumulates confident claims about
 // deleted code.
 func PlanCascade(all []SourceRecord, removed []Key) Cascade {
+	return NewCascadePlanner(all).Plan(removed)
+}
+
+// CascadePlanner plans several cascades against the same set of sources.
+//
+// PlanCascade reference counts every page and blob on every call, which is
+// O(sources x files). That is fine for one deletion and quadratic for a review
+// per vanished source, so the planner counts once and derives each plan by
+// subtracting the removed sources' own claims.
+type CascadePlanner struct {
+	byKey map[Key][]SourceRecord
+	pages map[string]int
+	blobs map[string]int
+}
+
+// NewCascadePlanner reference counts the pages and blobs claimed by all.
+func NewCascadePlanner(all []SourceRecord) *CascadePlanner {
+	p := &CascadePlanner{
+		byKey: make(map[Key][]SourceRecord, len(all)),
+		pages: map[string]int{},
+		blobs: map[string]int{},
+	}
+	for _, s := range all {
+		p.byKey[s.Key] = append(p.byKey[s.Key], s)
+		for _, f := range s.FilesWritten {
+			p.pages[f]++
+		}
+		for _, b := range s.BlobKeys {
+			p.blobs[b]++
+		}
+	}
+	return p
+}
+
+// Plan is PlanCascade for the planner's sources.
+func (p *CascadePlanner) Plan(removed []Key) Cascade {
 	removing := make(map[Key]bool, len(removed))
 	for _, k := range removed {
 		removing[k] = true
 	}
 
-	// Reference count pages and blobs across the sources that survive.
-	survivingPages := map[string]int{}
-	survivingBlobs := map[string]int{}
-	for _, s := range all {
-		if removing[s.Key] {
-			continue
-		}
-		for _, p := range s.FilesWritten {
-			survivingPages[p]++
-		}
-		for _, b := range s.BlobKeys {
-			survivingBlobs[b]++
+	// What the surviving sources still claim is what everyone claims, less the
+	// removed sources' own claims.
+	leavingPages := map[string]int{}
+	leavingBlobs := map[string]int{}
+	for k := range removing {
+		for _, s := range p.byKey[k] {
+			for _, f := range s.FilesWritten {
+				leavingPages[f]++
+			}
+			for _, b := range s.BlobKeys {
+				leavingBlobs[b]++
+			}
 		}
 	}
 
@@ -71,20 +107,19 @@ func PlanCascade(all []SourceRecord, removed []Key) Cascade {
 	regenerate := map[string]bool{}
 	deleteBlobs := map[string]bool{}
 
-	for _, s := range all {
-		if !removing[s.Key] {
-			continue
-		}
-		for _, p := range s.FilesWritten {
-			if survivingPages[p] > 0 {
-				regenerate[p] = true
-			} else {
-				deletePages[p] = true
+	for k := range removing {
+		for _, s := range p.byKey[k] {
+			for _, f := range s.FilesWritten {
+				if p.pages[f]-leavingPages[f] > 0 {
+					regenerate[f] = true
+				} else {
+					deletePages[f] = true
+				}
 			}
-		}
-		for _, b := range s.BlobKeys {
-			if survivingBlobs[b] == 0 {
-				deleteBlobs[b] = true
+			for _, b := range s.BlobKeys {
+				if p.blobs[b]-leavingBlobs[b] == 0 {
+					deleteBlobs[b] = true
+				}
 			}
 		}
 	}
