@@ -136,12 +136,12 @@ func TestSyncRejectsBadPaths(t *testing.T) {
 func TestRegisteredInRegistry(t *testing.T) {
 	// The blank-import registration is what lets the build command look a
 	// connector up by kind rather than constructing it directly.
-	got, err := connector.Get("git")
+	got, err := connector.Get(connector.KindGit)
 	if err != nil {
 		t.Fatalf("git connector not registered: %v", err)
 	}
-	if got.Trigger() != connector.TriggerManual {
-		t.Errorf("Trigger = %q, want manual for a local path", got.Trigger())
+	if got.Kind() != connector.KindGit {
+		t.Errorf("Kind = %q, want %q", got.Kind(), connector.KindGit)
 	}
 }
 

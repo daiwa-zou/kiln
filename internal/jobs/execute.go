@@ -157,7 +157,7 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 	// registry rather than calling the scanner directly, so the abstraction is
 	// exercised by the path that uses it rather than assumed to work.
 	if src.Path != "" {
-		conn, err := connector.Get("git")
+		conn, err := connector.Get(connector.KindGit)
 		if err != nil {
 			return fail(err)
 		}
@@ -442,7 +442,7 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (docSync, error) {
 		return docSync{}, err
 	}
 	return syncDocSource(ctx, out, docSource{
-		kind:    "upload",
+		kind:    connector.KindUpload,
 		subject: absDocs,
 		prefix:  "kiln-docs-",
 		noun:    "document(s)",
@@ -465,7 +465,7 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (docSync, error) {
 // syncWeb ingests fetched pages through the web connector.
 func syncWeb(ctx context.Context, out io.Writer, urls []string) (docSync, error) {
 	return syncDocSource(ctx, out, docSource{
-		kind:    "web",
+		kind:    connector.KindWeb,
 		subject: fmt.Sprintf("%d url(s)", len(urls)),
 		prefix:  "kiln-web-",
 		noun:    "page(s)",

@@ -20,6 +20,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/config"
+	"github.com/daiwa-zou/kiln/internal/connector"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/crypto"
@@ -641,7 +642,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 		// Web connectors carry URLs, not paths: policy is enforced by the
 		// connector's pinned dialer at fetch time (and at config write time),
 		// so nothing needs resolving here.
-		if c.Kind == "web" {
+		if c.Kind == connector.KindWeb {
 			if len(spec.WebURLs) > 0 {
 				return fail2(fmt.Errorf("workspace %s has multiple web connectors; only one is supported", run.WorkspaceSlug))
 			}
@@ -655,7 +656,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 
 		// An upload connector without a path is in files mode: its material
 		// is the workspace's uploaded files, staged from the blob store.
-		if path, _ := c.Config["path"].(string); c.Kind == "upload" && path == "" {
+		if path, _ := c.Config["path"].(string); c.Kind == connector.KindUpload && path == "" {
 			if spec.DocsDir != "" {
 				return fail2(fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug))
 			}
@@ -686,7 +687,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 			gitToken string
 			err      error
 		)
-		if remoteURL, _ := c.Config["url"].(string); remoteURL != "" && c.Kind == "git" {
+		if remoteURL, _ := c.Config["url"].(string); remoteURL != "" && c.Kind == connector.KindGit {
 			var clean func()
 			resolved, gitToken, clean, err = w.cloneRemote(ctx, c, remoteURL)
 			if clean != nil {
@@ -710,14 +711,14 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 		}
 
 		switch c.Kind {
-		case "git":
+		case connector.KindGit:
 			if spec.Path != "" {
 				return fail2(fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug))
 			}
 			spec.Path = resolved
 			spec.GitToken = gitToken
 			ids.Git = c.ID
-		case "upload":
+		case connector.KindUpload:
 			if spec.DocsDir != "" {
 				return fail2(fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug))
 			}

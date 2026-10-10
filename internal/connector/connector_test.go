@@ -2,16 +2,15 @@ package connector
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
 type stubConnector struct {
-	kind    string
-	trigger TriggerMode
+	kind string
 }
 
-func (s *stubConnector) Kind() string         { return s.kind }
-func (s *stubConnector) Trigger() TriggerMode { return s.trigger }
+func (s *stubConnector) Kind() string { return s.kind }
 func (s *stubConnector) Sync(context.Context, Config, string) (*SourceSet, error) {
 	return &SourceSet{Kind: s.kind}, nil
 }
@@ -44,8 +43,8 @@ func TestConfigAccessors(t *testing.T) {
 
 func TestRegistry(t *testing.T) {
 	// Registration is process-global, so this uses names no real connector uses.
-	Register(&stubConnector{kind: "test-alpha", trigger: TriggerManual})
-	Register(&stubConnector{kind: "test-beta", trigger: TriggerPoll})
+	Register(&stubConnector{kind: "test-alpha"})
+	Register(&stubConnector{kind: "test-beta"})
 
 	got, err := Get("test-alpha")
 	if err != nil {
@@ -61,8 +60,8 @@ func TestRegistry(t *testing.T) {
 	if err == nil {
 		t.Fatal("Get accepted an unregistered kind")
 	}
-	if !contains(Kinds(), "test-alpha") || !contains(Kinds(), "test-beta") {
-		t.Errorf("Kinds() = %v", Kinds())
+	if !strings.Contains(err.Error(), "test-alpha") || !strings.Contains(err.Error(), "test-beta") {
+		t.Errorf("Get error should list the registered kinds, got: %v", err)
 	}
 }
 
@@ -75,13 +74,4 @@ func TestRegisterTwicePanics(t *testing.T) {
 
 	Register(&stubConnector{kind: "test-duplicate"})
 	Register(&stubConnector{kind: "test-duplicate"})
-}
-
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }

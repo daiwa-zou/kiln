@@ -25,6 +25,16 @@ const (
 	TriggerPoll TriggerMode = "poll"
 )
 
+// Connector kinds, as stored in connectors.kind and returned by Connector.Kind.
+// Callers that branch on a source type use these rather than a literal, so a
+// misspelling is a compile error instead of a connector that silently matches
+// nothing.
+const (
+	KindGit    = "git"
+	KindUpload = "upload"
+	KindWeb    = "web"
+)
+
 // Item is one piece of raw material.
 type Item struct {
 	// Key is the namespaced cache key. It must be stable across syncs: the
@@ -67,10 +77,8 @@ type SourceSet struct {
 // and is expressed through the item hashes it reports, not through extra methods
 // the pipeline would have to understand.
 type Connector interface {
-	// Kind identifies the connector: git, upload, web.
+	// Kind identifies the connector: KindGit, KindUpload or KindWeb.
 	Kind() string
-	// Trigger says how this connector expects to be scheduled.
-	Trigger() TriggerMode
 	// Sync materializes source material into dst and describes what it found.
 	// dst may be ignored by connectors whose material is already local.
 	Sync(ctx context.Context, cfg Config, dst string) (*SourceSet, error)
@@ -127,13 +135,6 @@ func Get(kind string) (Connector, error) {
 		return nil, fmt.Errorf("connector: no connector registered for %q (have: %v)", kind, kindsLocked())
 	}
 	return c, nil
-}
-
-// Kinds lists the registered connector kinds.
-func Kinds() []string {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-	return kindsLocked()
 }
 
 func kindsLocked() []string {

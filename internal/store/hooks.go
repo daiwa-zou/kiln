@@ -13,6 +13,7 @@ import (
 // events. The set is small (one row per watched repository), so repo matching
 // happens in Go where URL parsing is honest, instead of in SQL patterns.
 func (s *WikiStore) WebhookConnectors(ctx context.Context) ([]ConnectorRow, error) {
+	// 'webhook' is connector.TriggerWebhook, kept as a SQL literal.
 	return s.queryConnectors(ctx, `WHERE enabled AND trigger_mode = 'webhook'`)
 }
 
@@ -20,6 +21,7 @@ func (s *WikiStore) WebhookConnectors(ctx context.Context) ([]ConnectorRow, erro
 // than the interval (or that have never synced). The worker turns each into
 // an enqueue; the active-run index keeps duplicates impossible.
 func (s *WikiStore) PollDueConnectors(ctx context.Context, olderThan time.Duration) ([]ConnectorRow, error) {
+	// 'poll' is connector.TriggerPoll, kept as a SQL literal.
 	return s.queryConnectors(ctx, `
 		WHERE enabled AND trigger_mode = 'poll'
 		  AND (last_synced_at IS NULL OR last_synced_at < now() - make_interval(secs => $1))`,
