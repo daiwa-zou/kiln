@@ -89,6 +89,49 @@ tokens rather than one-off colours:
 "Delete page" is also quiet until it is armed, as the comment on
 `.danger-panel` always said.
 
+### The reader prose pass (M11 item 9)
+
+Measured in headless Chrome against the dev benches, in both themes, at
+1440px, 375px and 320px:
+
+| Check | Result |
+| --- | --- |
+| Citation marker text (`--ember-text` on `--bg`) | 5.47:1 light, 6.52:1 dark |
+| Provenance list: number / lines | 5.75 / 6.03 light, 6.10 / 6.71 dark |
+| Citation card: path / lines | 16.3 / 6.03 light, 13.35 / 6.71 dark |
+| Index freshness word (`--ink-dim` on `--panel`) | 6.03 light, 6.71 dark |
+| Run pill and account label | 5.35 light, 6.56 dark |
+| Citation marker box | 24×24 CSS px, every marker |
+| Run pill / account at 375px and 320px | visible, 106px / 28px wide, label unclipped, inside the viewport, no horizontal scroll |
+
+- **Citation markers** are real `<button>`s, so Tab reaches them and Enter or
+  a tap opens them. The accessible name is short — "Source 2, lines 356 to
+  363" — and the path is in the card, which the marker points at with
+  `aria-describedby` only while the card is shown. Ember as text is
+  `--ember-text`, not `--ember`, which measured 4.39:1 on `--surface` in light;
+  hover and an open card underline the digit rather than tint behind it,
+  because `--ember-soft` behind a 12px digit fails. Citations inside link text
+  or alt text stay plain text, so no button is ever nested in a link.
+- **The marker box is a full 24×24 target, not an exception.** It sits inside
+  the line box with no negative margins and is raised by relative offset only,
+  so a line holding a marker is spaced exactly like one without (paragraph
+  heights stay whole multiples of the line height), and adjacent markers keep
+  a 3px gap. Sampling `elementFromPoint` over every wikilink on the line above
+  a marker (2,992 points in a paragraph built to put one above each of 40
+  markers) never returned the marker.
+- **The citation card meets 1.4.13.** It opens on hover, focus or tap; Escape
+  closes it without moving focus; it can be hovered without vanishing; it
+  stays while its marker holds focus; and a click on an open marker keeps it
+  open rather than toggling it shut.
+- **Freshness is a word in the Index**, beside each title, and the rail's
+  links carry it in their `title` along with the untruncated page title. The
+  dot is decoration in both places.
+- **The run pill's accessible name begins with its visible label** ("Written
+  2 months ago · outside the queue — open build detail"), so speech input can
+  say what it sees (2.5.3). On a phone the label shortens to "Outside queue",
+  which fits the pill unclipped down to 320px, and the name shortens with it. The account button's name likewise
+  contains its visible word.
+
 ## Deliberate exceptions
 
 **Dead wikilinks** are drawn at low contrast *with a dashed underline*. Color
