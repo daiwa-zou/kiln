@@ -143,6 +143,111 @@ makes stored connector credentials unrecoverable. Rotation is online —
 ledgered per run and per unit; the rolling budget window refuses new runs and
 files a review item rather than failing silently.
 
+## Sandboxing the CLI runner
+
+This applies to `agent.runner = "cli"`, which shells out to `claude -p`. The
+default `api` runner gives the model no tools and no filesystem, and none of
+this is needed for it.
+
+The CLI is the one component that executes model-chosen actions on untrusted
+content: repository files, extracted documents, fetched pages, and the steering
+and corrections any workspace member can write. A prompt injected through any
+of them can steer it. kiln limits what it can do in three layers, each of which
+assumes the one before it failed.
+
+1. **The CLI's own sandbox.** Every step runs with `--restricted`, which removes
+   the tools that run commands and confines Read, Grep and Glob to the working
+   directory and the directories explicitly granted. The tool lists are
+   explicit, with Bash, WebFetch, WebSearch and the rest denied by name. Needs
+   CLI **2.1.248 or later**; an older CLI rejects the flag and every unit
+   fails, rather than running unconfined.
+2. **Writes confined to a scratch directory.** The agent's working directory is
+   the unit's scratch directory, and the sources are granted read-only. Generate
+   also carries an explicit `Edit(//<sources>/**)` deny rule, which the CLI
+   checks before the permission mode, so `acceptEdits` cannot approve a write to
+   them. For a local-path connector the sources are the operator's real
+   directory, not a copy.
+3. **A check afterwards.** Before the agent runs, kiln snapshots the unit's part
+   of the source tree (path, size, mtime, mode); after each call it looks again.
+   If anything differs the unit fails with `the agent modified the source tree`,
+   none of its pages are imported, the paths are logged at error level, and
+   nothing is restored. The snapshot is bounded (the root's own entries, the
+   unit's inputs and the directories above them, and the unit's own directory,
+   at most 20,000 entries), so it costs milliseconds per look but does **not**
+   see a write to an unrelated file elsewhere in a large tree. A person editing
+   the checkout during a build also trips it; the unit is rebuilt next run.
+
+### What this does not do
+
+These are in-process controls. The CLI runs as the same user as the worker, in
+the same filesystem and PID namespace, and enforcement is the CLI's own
+permission engine. kiln does not isolate the child at the operating-system
+level yet, so what remains is:
+
+- A bug in the CLI's path handling or permission checks is not contained.
+  Against the same uid, an unconfined file tool could read
+  `/proc/<worker pid>/environ` (which holds `KILN_MASTER_KEY`), the `fs` blob
+  root (other tenants' uploads), other tenants' staging directories, and `HOME`
+  with the CLI's credentials. The child's own environment is already minimal
+  (`KILN_*` secrets are never passed to it); the worker's is not.
+- The guard in layer 3 only sees what it samples.
+- Nothing stops the agent writing misleading prose. Validation constrains where
+  pages go and what they link to, not whether they are true.
+
+### Recommended deployment
+
+Treat the CLI child as a hostile process and give it only what a unit needs:
+
+- Run it under **a separate uid** from the worker, or in **its own container**
+  per call.
+- Mount **only the unit's root (read-only) and its scratch directory (writable)**,
+  at the same absolute paths kiln passes in argv, plus a private writable
+  `HOME` for the CLI's session files and credentials.
+- Do not mount the blob root, the worker's `/proc` (use a separate PID
+  namespace, or `hidepid=2`), the worker's environment, or other workspaces'
+  staging directories.
+- Allow network egress only to the Anthropic API (or the gateway named by
+  `agent.base_url`).
+- Read-only root filesystem, no capabilities, no privilege escalation.
+
+`agent.binary` can point at a wrapper that does this, since kiln only needs
+something that accepts the CLI's arguments and writes its result to stdout. A
+sketch, untested and not shipped, using Docker; the paths in argv are absolute
+and must resolve identically inside:
+
+```sh
+#!/bin/sh
+# /usr/local/bin/claude-sandboxed  (agent.binary)
+# kiln runs this with the unit's scratch directory as the working directory.
+# Every directory named by --add-dir is a source root and is mounted read-only.
+set -eu
+mounts=""
+in_dirs=0
+for a in "$@"; do
+  case "$a" in
+    --add-dir) in_dirs=1 ;;
+    --*) in_dirs=0 ;;
+    *) if [ "$in_dirs" = 1 ] && [ -d "$a" ]; then mounts="$mounts -v $a:$a:ro"; fi ;;
+  esac
+done
+exec docker run --rm -i --network=claude-egress --read-only --cap-drop=ALL \
+  --security-opt=no-new-privileges --user 65533 \
+  -e ANTHROPIC_API_KEY -e ANTHROPIC_BASE_URL -e HOME=/home/agent \
+  --tmpfs /home/agent:rw,mode=1777 \
+  -v "$PWD:$PWD" -w "$PWD" $mounts \
+  claude-cli-image claude "$@"
+```
+
+The credential has to arrive through the environment or a mounted secret, since
+the `HOME` above is thrown away. On Kubernetes the equivalent is a Job or
+sidecar per unit with the same mounts, a `NetworkPolicy` allowing only the API,
+and `readOnlyRootFilesystem`.
+
+Sessions are stored by the CLI under its `HOME`, in a directory per working
+directory. Each unit's scratch directory is new, so `~/.claude/projects`
+accumulates one directory per unit per run; prune old ones on a schedule, or
+point `HOME` at a volume that is discarded.
+
 ## Image
 
 `ghcr.io/daiwa-zou/kiln` — multi-arch (amd64, arm64), non-root (uid 65532),

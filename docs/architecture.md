@@ -543,6 +543,22 @@ the front of every request identical across the calls that can share it.
   repeating it, and forks it (`--fork-session`) on every attempt, so a retry is
   the analysis plus its own feedback rather than the analysis plus every failed
   attempt.
+- *The working directory is not part of the cached system prompt.* The CLI
+  runner starts every call about a unit in that unit's scratch directory, which
+  differs per unit, and the CLI would otherwise state it (and the auto-memory
+  path) in the system prompt, making the map a new prefix for every unit.
+  `--exclude-dynamic-system-prompt-sections` moves those into the first user
+  message. Analyze and generate start in the *same* directory because the CLI
+  stores a session under its working directory and generate resumes analyze's.
+
+**The CLI runner is sandboxed in layers**, because it executes model-chosen
+actions on untrusted content: `--restricted` confines its file tools; the
+sources are read-only to it (it starts in the scratch directory, and generate
+carries an explicit edit deny on the sources); and after every call the pipeline
+checks that the unit's part of the source tree is unchanged, failing the unit
+and importing none of its pages if not. None of this is OS-level isolation.
+What it does and does not cover, and the recommended deployment, are in
+[Sandboxing the CLI runner](deployment.md#sandboxing-the-cli-runner).
 
 What this does not buy: the structured-output schema (analyze) and the CLI's
 `StructuredOutput` tool both differ between analyze and generate, and a request
