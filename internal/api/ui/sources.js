@@ -340,6 +340,17 @@ function openSourceWizard(ctx) {
       ${inner}
       <span class="hint" id="wizard-note" role="status"></span>`;
     $("wizard-x").addEventListener("click", finish);
+    // Replacing the body destroys whatever had focus, which drops it to
+    // <body>: Escape then reaches nothing, and Tab walks into the page behind
+    // the dialog. Every step puts it back -- on its first field, or, when it
+    // has none, on its own title so a screen reader announces where it is.
+    const first = body.querySelector("input:not([hidden]), select, textarea");
+    if (first) first.focus();
+    else {
+      const title = body.querySelector(".wizard-steps");
+      title.tabIndex = -1;
+      title.focus();
+    }
   };
 
   const KINDS = [

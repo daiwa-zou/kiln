@@ -2192,6 +2192,7 @@ async function showReviews(history) {
     setReviewRows(open, shown);
     // A review that finished researching while nobody was on this screen.
     const finished = noteResearchDone(open);
+    let openedByName = false;
     if (reviewSelectId) {
       const at = reviewRows.findIndex((r) => r.id === reviewSelectId);
       if (at >= 0) {
@@ -2200,6 +2201,7 @@ async function showReviews(history) {
         // Asked for by name: on a narrow screen that means the detail, not
         // the list it was picked from.
         document.body.classList.add("inbox-detail-open");
+        openedByName = true;
       }
       reviewSelectId = null;
     }
@@ -2230,6 +2232,12 @@ async function showReviews(history) {
 
     for (const r of finished) announceResearchDone(r);
     wireInbox(view);
+    // Arrived by name (a review followed into Researching, or opened from a
+    // toast) on a screen too narrow to show the list: land on the detail.
+    if (openedByName && NARROW.matches) {
+      const h = $("inbox-detail").querySelector("h2");
+      if (h) { h.tabIndex = -1; h.focus(); }
+    }
   } catch (err) {
     if (!err.handled) view.done(banner(err));
   }
@@ -2353,7 +2361,19 @@ function wireInbox(view) {
       if (on) el.scrollIntoView({ block: "nearest" });
     }
     showDetail();
-    if (focusDetail) document.body.classList.add("inbox-detail-open");
+    if (focusDetail) {
+      document.body.classList.add("inbox-detail-open");
+      // Below 860px this hides the list the focused row lives in, which would
+      // leave focus on nothing. Move it to the detail's heading, where a
+      // screen reader starts reading the review it just opened.
+      if (NARROW.matches) focusDetailHeading();
+    }
+  };
+  const focusDetailHeading = () => {
+    const h = $("inbox-detail").querySelector("h2");
+    if (!h) return;
+    h.tabIndex = -1;
+    h.focus();
   };
 
   // The detail pane, rebuilt from the selected row. Shared by selection and by
@@ -2416,8 +2436,12 @@ function wireInbox(view) {
   };
 
   function wireDetail() {
-    $("inbox-back")?.addEventListener("click", () =>
-      document.body.classList.remove("inbox-detail-open"));
+    $("inbox-back")?.addEventListener("click", () => {
+      document.body.classList.remove("inbox-detail-open");
+      // Back un-hides the list; put focus on the row that was open so the
+      // reader resumes where they left, not at the top of the page.
+      document.querySelector('.inbox-row[aria-current="true"]')?.focus();
+    });
     for (const b of document.querySelectorAll("#inbox-detail [data-review]")) {
       once(b, () => resolve(b));
     }
