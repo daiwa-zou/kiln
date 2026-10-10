@@ -91,7 +91,7 @@ func TestGeneratePromptNamesDeletedPages(t *testing.T) {
 	}
 
 	// Analysis too: a page that must not be written should not be planned.
-	plan := analyzePrompt("module:ripple", ripple, inlineSource("", ripple), s, 0, nil)
+	plan := analyzePrompt("module:ripple", ripple, inlineSource("", ripple), s)
 	if !strings.Contains(plan, "Pages a human has deleted") {
 		t.Error("analyze prompt does not mention deleted pages")
 	}

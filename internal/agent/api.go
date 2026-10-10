@@ -34,8 +34,6 @@ type APIRunner struct {
 	Model string
 	// Effort tunes thinking depth and overall spend.
 	Effort anthropic.OutputConfigEffort
-	// FallbackModel survives an overload without failing the run.
-	FallbackModel string
 }
 
 // CachesUnit: the unit's source material goes in Request.CacheableUnit, ahead

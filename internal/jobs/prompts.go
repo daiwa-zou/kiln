@@ -185,7 +185,7 @@ func buildSources(r agent.Runner, root string, unit mapper.Unit) (analyze, gener
 	return inline, inline, ""
 }
 
-func analyzePrompt(key diff.Key, unit mapper.Unit, src unitSource, s Steering, attempt int, prior []wiki.Violation) string {
+func analyzePrompt(key diff.Key, unit mapper.Unit, src unitSource, s Steering) string {
 	var b strings.Builder
 
 	// The rules lead the task text. They were the analyze system prompt, and
@@ -215,7 +215,6 @@ func analyzePrompt(key diff.Key, unit mapper.Unit, src unitSource, s Steering, a
 
 	appendSuppressions(&b, s)
 	appendCorrections(&b, s, unit.Slug)
-	appendRetryContext(&b, attempt, prior)
 	return b.String()
 }
 

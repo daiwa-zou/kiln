@@ -48,7 +48,8 @@ type Pipeline struct {
 	Blobs BlobWriter
 
 	// MaxRetries is the number of corrective attempts after a validation
-	// failure. The first re-states the errors; the second halves the work.
+	// failure. Each re-states the previous attempt's errors in the prompt, and
+	// the last runs on FallbackModel when one is set (see modelFor).
 	MaxRetries int
 	// UnitConcurrency is how many units may generate at once. Values below 2
 	// keep the pipeline sequential, which is the default: fan-out multiplies
@@ -660,7 +661,7 @@ func (p *Pipeline) generateUnit(
 		// The unit's own material is identical for every call about this unit,
 		// so it rides a second breakpoint (API runner only; empty otherwise).
 		CacheableUnit: cacheableUnit,
-		Prompt:        analyzePrompt(key, unit, analyzeSrc, sc.steering, 0, nil),
+		Prompt:        analyzePrompt(key, unit, analyzeSrc, sc.steering),
 	})
 	sc.ledger.settle(want, costOf(analyzeRes))
 	p.account(&res, key, analyzeRes)
@@ -851,9 +852,8 @@ func sourceTallies(m *mapper.WorkspaceMap, recorded []diff.SourceRecord, dropped
 		}
 	}
 
-	order := []string{"module", "doc", "doc:upload", "doc:web"}
-	out := make([]wiki.SourceTally, 0, len(order))
-	for _, kind := range order {
+	out := make([]wiki.SourceTally, 0, len(diff.TalliedNamespaces))
+	for _, kind := range diff.TalliedNamespaces {
 		if n := counts[kind]; n > 0 {
 			out = append(out, wiki.SourceTally{Kind: kind, Count: n})
 		}
