@@ -45,7 +45,7 @@ func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: stateCookie, Value: state, Path: "/auth",
 		MaxAge: int(stateTTL.Seconds()), HttpOnly: true,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   auth.CookieSecure(r, s.PublicURL),
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, s.GitHub.AuthorizeURL(state), http.StatusFound)
@@ -104,7 +104,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	auth.SetSessionCookies(w, r, session, csrf, s.SessionTTL)
+	auth.SetSessionCookies(w, r, s.PublicURL, session, csrf, s.SessionTTL)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 

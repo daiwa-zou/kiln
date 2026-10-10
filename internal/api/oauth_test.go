@@ -297,3 +297,46 @@ func TestRepeatSignInUpdatesNotDuplicates(t *testing.T) {
 		t.Errorf("users for gh id 77 = %d, want 1 (upsert, not insert)", users)
 	}
 }
+
+// TestGitHubLoginStateCookieSecureFollowsPublicURL covers the one cookie the
+// sign-in flow sets before any database is involved. Secure must come from the
+// configured public_url, not from a header the client controls.
+func TestGitHubLoginStateCookieSecureFollowsPublicURL(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		publicURL string
+		forwarded string
+		want      bool
+	}{
+		{"https origin, forwarded http", "https://kiln.example.com", "http", true},
+		{"http loopback origin, forwarded https", "http://127.0.0.1:8080", "https", false},
+		{"unconfigured falls back to forwarded https", "", "https", true},
+		{"unconfigured, plain", "", "", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Server{
+				PublicURL: tt.publicURL,
+				GitHub:    &github.Client{ClientID: "cid"},
+			}
+			r := httptest.NewRequest(http.MethodGet, "/auth/github/login", nil)
+			if tt.forwarded != "" {
+				r.Header.Set("X-Forwarded-Proto", tt.forwarded)
+			}
+			w := httptest.NewRecorder()
+			s.handleGitHubLogin(w, r)
+
+			var got *http.Cookie
+			for _, c := range w.Result().Cookies() {
+				if c.Name == stateCookie {
+					got = c
+				}
+			}
+			if got == nil {
+				t.Fatal("no state cookie set")
+			}
+			if got.Secure != tt.want {
+				t.Errorf("state cookie Secure = %v, want %v", got.Secure, tt.want)
+			}
+		})
+	}
+}
