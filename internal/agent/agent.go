@@ -8,6 +8,9 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -28,6 +31,20 @@ const (
 	// bounded to a slice.
 	StepResearch Step = "research"
 )
+
+// Valid reports whether s is a step the pipeline can make. This is the only
+// list of steps: every runner validates through Request.Validate, which asks
+// here, so a step added above is accepted by all of them or by none. The
+// switches in BuildArgs and schemaFor decide what each step *does*, but they
+// can assume a valid step precisely because nothing reaches them without
+// passing this first.
+func (s Step) Valid() bool {
+	switch s {
+	case StepAnalyze, StepGenerate, StepResearch:
+		return true
+	}
+	return false
+}
 
 // Request is one claude invocation.
 type Request struct {
@@ -66,6 +83,52 @@ type Request struct {
 	// MaxTokens caps the response. Zero uses the runner's default.
 	MaxTokens int64
 }
+
+// Validate checks the request against the contract every runner shares, as
+// adjusted for what this kind of runner needs, which it states through c.
+//
+// Three runners used to carry their own copy of this and the copies drifted: the
+// CLI runner rejected an empty WorkDir the others accepted, and rejected the
+// research step the API runner accepted -- each only discovered in production,
+// because the test doubles in front of them validated nothing. One function,
+// called by every runner and every double, is what stops that recurring.
+//
+// What a request must carry depends on whether the runner works on files:
+//
+//   - ReadsSources: the agent explores the material itself, from WorkDir, so a
+//     missing WorkDir is an error rather than a request that quietly runs in the
+//     wrong directory.
+//   - WritesFiles: the generate step writes its pages into ScratchDir.
+//
+// A runner that takes everything in the prompt and returns data (the API runner)
+// needs neither, and an empty WorkDir or ScratchDir is simply ignored.
+//
+// Checks run in a fixed order so the same bad request always reports the same
+// error, and the messages are the ones the CLI runner has always produced.
+func (req Request) Validate(c Capabilities) error {
+	switch {
+	case c.ReadsSources && req.WorkDir == "":
+		return errors.New("agent: WorkDir is required")
+	case strings.TrimSpace(req.Prompt) == "":
+		return errors.New("agent: Prompt is required")
+	case c.WritesFiles && req.Step == StepGenerate && req.ScratchDir == "":
+		return errors.New("agent: ScratchDir is required for the generate step")
+	case !req.Step.Valid():
+		return fmt.Errorf("agent: unknown step %q", req.Step)
+	}
+	return nil
+}
+
+// StandInCapabilities is what a runner that merely stands in for the real ones
+// -- FakeRunner, and the scripted doubles in tests -- validates against.
+//
+// It requires a WorkDir, which is what the CLI runner requires and the most
+// common way a request has been wrong, but not a ScratchDir: the pipeline hands
+// one only to runners that declare WritesFiles, and a stand-in is used on both
+// sides of that line. Holding it to the strictest rule on every other axis means
+// a pipeline change that would be rejected by the CLI runner fails a test here
+// instead of in production.
+var StandInCapabilities = Capabilities{ReadsSources: true}
 
 // Usage is the token accounting returned by the CLI.
 type Usage struct {

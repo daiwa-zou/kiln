@@ -1184,6 +1184,14 @@ pricing table, where a cost of zero means "no entry for this model" rather than
 authoritative cost), which is what keeps the pipeline's own test fakes working
 without implementing anything.
 
+The same declaration decides what a request must carry. Every runner validates
+through `Request.Validate(Capabilities)`, the single definition of the request
+contract: a valid `Step` and a prompt always, a `WorkDir` when `ReadsSources`
+(the agent explores the material itself), a `ScratchDir` for generate when
+`WritesFiles`. `FakeRunner` and the pipeline tests' scripted runner validate
+against `StandInCapabilities`, so a request the CLI runner would reject fails
+there too, instead of in production.
+
 Provider-specific configuration travels in `agent.settings`, a free-form map
 handed through untouched, so reaching a new model never means widening
 `config.Agent` with a field only one provider reads. Which providers exist is a
