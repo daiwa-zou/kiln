@@ -236,6 +236,52 @@ func TestCLIRunnerBuildsADocumentsOnlyBench(t *testing.T) {
 	}
 }
 
+// Research through the real CLI runner, not the scripted one. BuildArgs had a
+// research case from the start, but validate rejected the step before it got
+// there, so every Research on a CLI-runner deployment failed with
+// `agent: unknown step "research"` -- invisible to tests that never left the
+// scripted runner, and hidden in practice behind the WorkDir failure that
+// documents-only benches hit first.
+func TestCLIRunnerResearchesADocumentsOnlyBench(t *testing.T) {
+	docs := t.TempDir()
+	writeTree(t, docs, map[string]string{
+		"beachhead-markets.md": "# Beachhead markets\n\nPick one segment first.\n",
+	})
+	argvLog := filepath.Join(t.TempDir(), "argv.json")
+	script, err := json.Marshal(map[string]any{
+		"record_args_to": argvLog,
+		"envelope": map[string]any{
+			"subtype": "success", "terminal_reason": "completed",
+			"total_cost_usd": 0.01, "num_turns": 1,
+			// Schema-constrained output arrives as envelope text on this runner.
+			"result": `{"findings":"Not answerable from these sources.","resolved":false}`,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &agent.ClaudeRunner{
+		Binary: fakeClaudeBinary(t),
+		Env:    append(os.Environ(), "KILN_FAKE_SCRIPT="+string(script)),
+	}
+	p := testPipeline(newMemStore(), runner)
+
+	out, err := p.Research(context.Background(), ResearchRequest{
+		RunID: "run-research", WorkspaceID: "ws-1",
+		Source:   SourceSpec{DocsDir: docs, Slug: "bench"},
+		Question: Question{Kind: "uncertain", Title: "Who wrote the beachhead markets notes?"},
+	})
+	if err != nil {
+		t.Fatalf("Research through the CLI runner: %v", err)
+	}
+	if out.Findings != "Not answerable from these sources." {
+		t.Errorf("findings = %q, want the envelope's", out.Findings)
+	}
+	if _, err := os.Stat(argvLog); err != nil {
+		t.Errorf("the CLI was never invoked: %v", err)
+	}
+}
+
 func sameDir(t *testing.T, a, b string) bool {
 	t.Helper()
 	ra, err := filepath.EvalSymlinks(a)

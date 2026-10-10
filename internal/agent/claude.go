@@ -149,7 +149,7 @@ func (req Request) validate() error {
 		return errors.New("agent: Prompt is required")
 	case req.Step == StepGenerate && req.ScratchDir == "":
 		return errors.New("agent: ScratchDir is required for the generate step")
-	case req.Step != StepAnalyze && req.Step != StepGenerate:
+	case req.Step != StepAnalyze && req.Step != StepGenerate && req.Step != StepResearch:
 		return fmt.Errorf("agent: unknown step %q", req.Step)
 	}
 	return nil
