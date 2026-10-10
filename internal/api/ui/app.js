@@ -4031,7 +4031,10 @@ async function ingestNow() {
 let closePalette = null, palRows = [], palSelection = 0;
 
 // paletteGroups returns [{label, items}]; items carry the flat order the
-// keyboard walks, so a group header can never be landed on.
+// keyboard walks, so a group header can never be landed on. A row marked
+// `spends` starts paid work rather than navigating; renderPalette never
+// pre-selects one, so Enter on a freshly opened or freshly typed palette
+// cannot queue a build.
 function paletteGroups(q) {
   const groups = [];
   const pageRow = (p, html) => ({
@@ -4045,7 +4048,7 @@ function paletteGroups(q) {
       .map((s) => pageRow(bySlug.get(s)));
     if (recent.length) groups.push({ label: "Recent", items: recent });
     groups.push({ label: "Actions", items: [
-      { html: "Ingest now", hint: "queue a build", dot: "t-action", act: ingestNow },
+      { html: "Ingest now", hint: "queue a build", dot: "t-action", act: ingestNow, spends: true },
       ...PALETTE_DESTINATIONS.map((v) =>
         ({ html: esc(v.title), hint: "go to", dot: "t-action", hash: v.hash })),
     ] });
@@ -4068,13 +4071,16 @@ function paletteGroups(q) {
   const actions = [];
   const ingest = fuzzy(q, "Ingest now");
   if (ingest) actions.push({ html: fuzzyHi("Ingest now", ingest.idx), hint: "queue a build",
-    dot: "t-action", act: ingestNow, score: ingest.score });
+    dot: "t-action", act: ingestNow, spends: true, score: ingest.score });
   for (const v of PALETTE_DESTINATIONS) {
     const m = fuzzy(q, v.title);
     if (m) actions.push({ html: fuzzyHi(v.title, m.idx), hint: "go to", dot: "t-action",
       hash: v.hash, score: m.score });
   }
-  actions.sort((a, b) => (b.score || 0) - (a.score || 0));
+  // On equal scores the row that goes somewhere outranks the one that spends:
+  // "ingest" matches the Ingest view and "Ingest now" alike, and the build must
+  // never be the one that wins the tie.
+  actions.sort((a, b) => (b.score || 0) - (a.score || 0) || Boolean(a.spends) - Boolean(b.spends));
   actions.push({
     html: `Search full text for “${esc(q)}”`, hint: "every page", dot: "t-action",
     hash: `#/search/${encodeURIComponent(q)}`,
@@ -4086,20 +4092,24 @@ function paletteGroups(q) {
 function renderPalette(q) {
   const groups = paletteGroups(q.trim());
   palRows = groups.flatMap((g) => g.items);
-  palSelection = 0;
+  // The first row that is safe to fire. Spending rows stay in the list and
+  // are reached by arrow keys or a click -- an explicit choice -- never by
+  // simply pressing Enter.
+  palSelection = Math.max(0, palRows.findIndex((r) => !r.spends));
   let i = 0;
   const html = groups.map((g) => `<li class="pal-group" role="presentation">${esc(g.label)}</li>` +
     g.items.map((r) => {
       const idx = i++;
-      return `<li id="pal-opt-${idx}" role="option" aria-selected="${idx === 0}"${
-        idx === 0 ? ' class="active"' : ""}>
+      return `<li id="pal-opt-${idx}" role="option" aria-selected="${idx === palSelection}"${
+        idx === palSelection ? ' class="active"' : ""}>
         <span class="dot dot-6 ${r.dot}" aria-hidden="true"></span>
         <span class="pal-label">${r.html}</span>
         <span class="kind">${esc(r.hint)}</span></li>`;
     }).join("")).join("");
   $("palette-list").innerHTML = palRows.length ? html
     : `<li class="pal-empty" role="presentation">Nothing matched.</li>`;
-  $("palette-input").setAttribute("aria-activedescendant", palRows.length ? "pal-opt-0" : "");
+  $("palette-input").setAttribute("aria-activedescendant",
+    palRows.length ? `pal-opt-${palSelection}` : "");
 }
 
 function movePaletteSelection(delta) {
