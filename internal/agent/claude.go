@@ -228,8 +228,20 @@ func BuildArgs(req Request) []string {
 			args = append(args, "--fallback-model", req.FallbackModel)
 		}
 		if req.SessionID != "" {
-			// Resume the analyze session so source context stays prompt-cached.
-			args = append(args, "--resume", SessionUUID(req.SessionID))
+			// Resume the analyze session so the unit's source material is
+			// already in context (the generate prompt does not repeat it).
+			//
+			// Forked, on every attempt including the first. A plain resume
+			// appends to the session it resumes, so attempt 1 would find the
+			// analysis plus attempt 0's whole transcript -- every page it
+			// wrote and every tool call -- and attempt 2 would carry both
+			// failures; the retry feedback in the prompt already says what was
+			// wrong, and the transcript only adds tokens. Forking leaves the
+			// analyze session untouched, so each attempt is the analysis plus
+			// its own prompt and nothing else. The fork's id is new each time
+			// and nothing needs it: the next attempt forks from the analyze
+			// session again, whose id stays deterministic (SessionUUID).
+			args = append(args, "--resume", SessionUUID(req.SessionID), "--fork-session")
 		}
 	}
 

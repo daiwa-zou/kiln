@@ -14,7 +14,8 @@
 //	  "envelope": { ...Result fields... },
 //	  "write_files": { "relative/path.md": "contents" },
 //	  "write_dir": "/abs/path to write into, defaults to --add-dir",
-//	  "record_args_to": "/abs/path to dump argv as JSON"
+//	  "record_args_to": "/abs/path to dump argv as JSON (last call wins)",
+//	  "append_args_to": "/abs/path to append one JSON line of argv per call"
 //	}
 package main
 
@@ -35,6 +36,7 @@ type script struct {
 	WriteFiles   map[string]string `json:"write_files"`
 	WriteDir     string            `json:"write_dir"`
 	RecordArgsTo string            `json:"record_args_to"`
+	AppendArgsTo string            `json:"append_args_to"`
 }
 
 func main() {
@@ -52,6 +54,17 @@ func main() {
 		record := map[string]any{"args": args, "cwd": mustGetwd(), "env": os.Environ()}
 		if b, err := json.MarshalIndent(record, "", "  "); err == nil {
 			_ = os.WriteFile(s.RecordArgsTo, b, 0o644)
+		}
+	}
+	if s.AppendArgsTo != "" {
+		// One compact JSON object per line, for tests that make several calls
+		// and need every argv rather than only the last.
+		record := map[string]any{"args": args, "cwd": mustGetwd()}
+		if b, err := json.Marshal(record); err == nil {
+			if f, err := os.OpenFile(s.AppendArgsTo, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+				_, _ = f.Write(append(b, '\n'))
+				_ = f.Close()
+			}
 		}
 	}
 

@@ -38,6 +38,10 @@ type APIRunner struct {
 	FallbackModel string
 }
 
+// CachesUnit: the unit's source material goes in Request.CacheableUnit, ahead
+// of the instructions, and carries its own cache breakpoint.
+func (r *APIRunner) CachesUnit() bool { return true }
+
 // Capabilities: page content comes back as structured data, so no scratch
 // directory is needed; cost is computed from the local pricing table in
 // pricing.go, so budget enforcement must treat it as an estimate.
@@ -109,9 +113,7 @@ func (r *APIRunner) Run(ctx context.Context, req Request) (*Result, error) {
 		Model:     anthropic.Model(model),
 		MaxTokens: maxTokens,
 		System:    r.buildSystem(req),
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt)),
-		},
+		Messages:  []anthropic.MessageParam{r.buildUserMessage(req)},
 		OutputConfig: anthropic.OutputConfigParam{
 			Effort: r.Effort,
 			Format: anthropic.JSONOutputFormatParam{Schema: schemaFor(req)},
@@ -153,6 +155,35 @@ func (r *APIRunner) buildSystem(req Request) []anthropic.TextBlockParam {
 	// together and every later unit in the run reads rather than writes.
 	blocks[len(blocks)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
 	return blocks
+}
+
+// maxCacheBreakpoints is the API's limit on cache_control markers in one
+// request. Ours are the system prefix and the unit block, so this is headroom,
+// but the number is stated because a third marker added later fails at the API
+// rather than here.
+const maxCacheBreakpoints = 4
+
+// buildUserMessage lays the user turn out as [unit source material][step
+// instructions].
+//
+// Same prefix rule as buildSystem, one level down. Everything that differs
+// between calls about the same unit -- which step this is, the plan, the retry
+// feedback -- comes after the second breakpoint, so analyze, generate, and each
+// generate retry all start with the same cached bytes. With no unit material
+// there is only the instruction block and no marker, so a unit with no readable
+// inputs costs nothing extra.
+//
+// A prefix shorter than the model's minimum cacheable length is simply not
+// cached -- no error, no write charge -- so a tiny unit needs no special case.
+func (r *APIRunner) buildUserMessage(req Request) anthropic.MessageParam {
+	var blocks []anthropic.ContentBlockParamUnion
+	if strings.TrimSpace(req.CacheableUnit) != "" {
+		unit := anthropic.NewTextBlock(req.CacheableUnit)
+		unit.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		blocks = append(blocks, unit)
+	}
+	blocks = append(blocks, anthropic.NewTextBlock(req.Prompt))
+	return anthropic.NewUserMessage(blocks...)
 }
 
 func schemaFor(req Request) map[string]any {
