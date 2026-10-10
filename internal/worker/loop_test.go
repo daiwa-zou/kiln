@@ -628,7 +628,10 @@ func TestRunDrainsInFlightRunOnShutdown(t *testing.T) {
 func (l *loopStore) PublishTargetFor(context.Context, string) (store.PublishTarget, error) {
 	return store.PublishTarget{}, store.ErrNotFound
 }
-func (l *loopStore) MarkPublished(context.Context, string, string, string) error { return nil }
+func (l *loopStore) MarkPublished(context.Context, string, string, int64, string) error {
+	return nil
+}
+func (l *loopStore) WikiRevision(context.Context, string) (int64, error) { return 0, nil }
 func (l *loopStore) LoadArtifact(context.Context, string, string) (string, error) {
 	return "", nil
 }

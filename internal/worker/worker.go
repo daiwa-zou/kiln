@@ -64,7 +64,8 @@ type Store interface {
 	// The pipeline writes the wiki; the worker mirrors it, so these live here
 	// rather than on jobs.Store.
 	PublishTargetFor(ctx context.Context, workspaceID string) (store.PublishTarget, error)
-	MarkPublished(ctx context.Context, workspaceID, commit, publishErr string) error
+	MarkPublished(ctx context.Context, workspaceID, commit string, revision int64, publishErr string) error
+	WikiRevision(ctx context.Context, workspaceID string) (int64, error)
 	LoadPages(ctx context.Context, workspaceID string) ([]wiki.Page, error)
 	LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error)
 	ListFigures(ctx context.Context, workspaceID string) ([]store.FigureRow, error)

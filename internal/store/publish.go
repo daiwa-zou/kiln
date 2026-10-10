@@ -30,6 +30,12 @@ type PublishTarget struct {
 	LastCommit      string
 	LastPublishedAt *time.Time
 	LastError       string
+
+	// PublishedRevision is the wiki revision the repository last matched, or
+	// zero when it has never been published to (or the target was reconfigured
+	// since). The worker compares it with the wiki's current revision to skip a
+	// push that cannot change anything.
+	PublishedRevision int64
 }
 
 // PublishTargetPatch is a partial update. Nil fields are left alone, so the UI
@@ -53,10 +59,12 @@ func (s *WikiStore) PublishTargetFor(ctx context.Context, workspaceID string) (P
 	)
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, workspace_id, kind, repo_url, branch, path_prefix,
-		       credential_id::text, enabled, last_commit, last_published_at, last_error
+		       credential_id::text, enabled, last_commit, last_published_at, last_error,
+		       published_revision
 		FROM publish_targets WHERE workspace_id = $1`, workspaceID).
 		Scan(&t.ID, &t.WorkspaceID, &t.Kind, &t.RepoURL, &t.Branch, &t.PathPrefix,
-			&cred, &t.Enabled, &t.LastCommit, &published, &lastErr)
+			&cred, &t.Enabled, &t.LastCommit, &published, &lastErr,
+			&t.PublishedRevision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PublishTarget{}, ErrNotFound
 	}
@@ -91,7 +99,8 @@ func (s *WikiStore) SetPublishTarget(ctx context.Context, t PublishTarget) (stri
 	var id string
 	// The last outcome is cleared on reconfiguration: an error from the old
 	// repository says nothing about the new one, and leaving it would show a
-	// stale failure against a target that has never been tried.
+	// stale failure against a target that has never been tried. The same goes for
+	// the revision the repository matched: it described the old destination.
 	if err := s.pool.QueryRow(ctx, `
 		INSERT INTO publish_targets
 			(workspace_id, kind, repo_url, branch, path_prefix, credential_id, enabled)
@@ -104,6 +113,7 @@ func (s *WikiStore) SetPublishTarget(ctx context.Context, t PublishTarget) (stri
 			credential_id = EXCLUDED.credential_id,
 			enabled = EXCLUDED.enabled,
 			last_error = NULL,
+			published_revision = 0,
 			updated_at = now()
 		RETURNING id`,
 		t.WorkspaceID, kind, t.RepoURL, branch, t.PathPrefix,
@@ -124,8 +134,14 @@ func (s *WikiStore) PatchPublishTarget(ctx context.Context, workspaceID string, 
 		}
 	}
 
+	// Moving the destination invalidates what is known about it: the new
+	// repository, branch or path has not been pushed to, whatever revision the
+	// old one matched.
+	destinationChanged := p.RepoURL != nil || p.Branch != nil || p.PathPrefix != nil
+
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE publish_targets SET
+			published_revision = CASE WHEN $8 THEN 0 ELSE published_revision END,
 			repo_url    = coalesce($2, repo_url),
 			branch      = coalesce($3, branch),
 			path_prefix = coalesce($4, path_prefix),
@@ -134,7 +150,7 @@ func (s *WikiStore) PatchPublishTarget(ctx context.Context, workspaceID string, 
 			updated_at  = now()
 		WHERE workspace_id = $1`,
 		workspaceID, p.RepoURL, p.Branch, p.PathPrefix,
-		credentialSet, credential, p.Enabled)
+		credentialSet, credential, p.Enabled, destinationChanged)
 	if err != nil {
 		return fmt.Errorf("store: patch publish target: %w", err)
 	}
@@ -160,12 +176,28 @@ func (s *WikiStore) DeletePublishTarget(ctx context.Context, workspaceID string)
 	return nil
 }
 
+// WikiRevision is the counter that moves whenever the set of live pages or the
+// derived artifacts change, and zero for a bench that has no wiki yet.
+func (s *WikiStore) WikiRevision(ctx context.Context, workspaceID string) (int64, error) {
+	var rev int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT revision FROM wikis WHERE workspace_id = $1`, workspaceID).Scan(&rev)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: load wiki revision: %w", err)
+	}
+	return rev, nil
+}
+
 // MarkPublished records the outcome of one push.
 //
-// A success stamps the commit and clears the error; a failure records it and
-// leaves the last successful commit in place, so the UI can say both "this
-// broke" and "here is what is currently published".
-func (s *WikiStore) MarkPublished(ctx context.Context, workspaceID, commit, publishErr string) error {
+// A success stamps the commit and the wiki revision the repository now matches
+// and clears the error; a failure records it and leaves the last successful
+// commit and revision in place, so the UI can say both "this broke" and "here is
+// what is currently published", and the next build tries again.
+func (s *WikiStore) MarkPublished(ctx context.Context, workspaceID, commit string, revision int64, publishErr string) error {
 	if publishErr != "" {
 		if _, err := s.pool.Exec(ctx, `
 			UPDATE publish_targets SET last_error = $2, updated_at = now()
@@ -179,8 +211,9 @@ func (s *WikiStore) MarkPublished(ctx context.Context, workspaceID, commit, publ
 		SET last_commit = coalesce(nullif($2, ''), last_commit),
 		    last_published_at = now(),
 		    last_error = NULL,
+		    published_revision = $3,
 		    updated_at = now()
-		WHERE workspace_id = $1`, workspaceID, commit); err != nil {
+		WHERE workspace_id = $1`, workspaceID, commit, revision); err != nil {
 		return fmt.Errorf("store: mark published: %w", err)
 	}
 	return nil
