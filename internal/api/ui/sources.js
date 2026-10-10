@@ -340,6 +340,17 @@ function openSourceWizard(ctx) {
       ${inner}
       <span class="hint" id="wizard-note" role="status"></span>`;
     $("wizard-x").addEventListener("click", finish);
+    // Replacing the body destroys whatever had focus, which drops it to
+    // <body>: Escape then reaches nothing, and Tab walks into the page behind
+    // the dialog. Every step puts it back -- on its first field, or, when it
+    // has none, on its own title so a screen reader announces where it is.
+    const first = body.querySelector("input:not([hidden]), select, textarea");
+    if (first) first.focus();
+    else {
+      const title = body.querySelector(".wizard-steps");
+      title.tabIndex = -1;
+      title.focus();
+    }
   };
 
   const KINDS = [
@@ -391,13 +402,14 @@ function openSourceWizard(ctx) {
         <label class="hint" for="wiz-git-url">HTTPS remote, or a server path under the worker's permitted roots</label>
         <input id="wiz-git-url" placeholder="https://github.com/org/repo.git" autocomplete="off" spellcheck="false">
         <label class="hint" for="wiz-git-cred">Credential for private remotes</label>
-        <select id="wiz-git-cred" aria-label="Credential">
+        <select id="wiz-git-cred">
           <option value="">none (public)</option>${credOptions}
         </select>
-        <input id="wiz-git-pat" type="password" placeholder="…or paste a new git PAT to seal"
+        <label class="hint" for="wiz-git-pat">Or paste a new git PAT to seal</label>
+        <input id="wiz-git-pat" type="password" placeholder="personal access token"
                autocomplete="off" spellcheck="false">
         <label class="hint" for="wiz-git-trigger">When should it build?</label>
-        <select id="wiz-git-trigger" aria-label="Trigger mode">
+        <select id="wiz-git-trigger">
           <option value="manual" selected>only when I press Ingest now</option>
           <option value="webhook">automatically on pushes (GitHub webhook)</option>
           <option value="poll">on a regular poll schedule</option>
@@ -445,7 +457,7 @@ function openSourceWizard(ctx) {
         <label class="hint" for="wiz-web-urls">HTTPS addresses, one per line</label>
         <textarea id="wiz-web-urls" rows="4" placeholder="https://example.com/handbook"></textarea>
         <label class="hint" for="wiz-web-trigger">How should they stay fresh?</label>
-        <select id="wiz-web-trigger" aria-label="Trigger mode">
+        <select id="wiz-web-trigger">
           <option value="poll" selected>re-fetch on a regular poll schedule</option>
           <option value="manual">only when I press Ingest now</option>
         </select>
@@ -635,7 +647,7 @@ const runOutcome = (r) => {
 // Unit states as the queue's own words. The one being written now is bolded by
 // CSS, which is what separates it from the ones merely queued behind it.
 const unitLabel = {
-  running: ["pending", "run-running"],
+  running: ["writing", "run-running"],
   pending: ["queued", "run-queued"],
   deferred: ["left for the next run", "run-queued"],
   failed: ["failed", "run-failed"],
@@ -667,36 +679,79 @@ const liveTokens = (items) => items.reduce((n, it) => n + (Number(it.tokens) || 
 // A run's error arrives from the queue as "<cache key>: <what went wrong>",
 // written for whoever reads the logs. Both halves leak: the key is the cache
 // namespacing the reader was never meant to meet, and the tail is often a
-// validation report addressed to whoever maintains the generator, not to the
-// person who uploaded a PDF. So: say which source failed in the words used
-// everywhere else on this page, say what happened in a sentence, and keep the
-// report itself one click away rather than in their face. Nothing is
-// discarded -- an operator who needs the detail still has it, and the CLI and
-// the logs still carry the original untouched.
+// validation report or a CLI transcript addressed to whoever maintains the
+// generator, not to the person who uploaded a PDF. So: say which source failed
+// in the words used everywhere else on this page, say what happened and what
+// to do next in a sentence, and keep the raw text one click away rather than
+// in their face. Nothing is discarded -- an operator who needs the detail still
+// has it, and the CLI and the logs still carry the original untouched.
+//
+// This is the one renderer for a run's error: the Ingest timeline, a source's
+// last error and the Log view all call it, so a cause taught here is taught
+// everywhere.
 const KEY_RE = /^((?:doc:(?:upload:|web:)?|module:|arch:|entry:)[^\s].*?): ([\s\S]*)$/;
-const VIOLATIONS_RE = /^(\d+) validation violation\(s\): ([\s\S]*)$/;
+
+// Known causes, tried in order against the error text (the unit key already
+// removed); the first match wins. To teach the UI a new failure, add one entry:
+//   re     tested against the text
+//   say    (match) => the sentence to show: what happened, and what to do
+//   label  (optional) summary text of the disclosure holding the raw error
+//   raw    (optional) (match) => the text inside the disclosure (default: all of it)
+// Keep `say` to a single line: .detail is pre-wrap so that a server error
+// keeps its own line breaks, which means any whitespace written here would
+// reach the reader as a line break they did not ask for.
+const firstGroup = (text, res) => {
+  for (const re of res) {
+    const m = re.exec(text);
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  return "";
+};
+const ERROR_CAUSES = [
+  {
+    re: /^(\d+) validation violation\(s\): ([\s\S]*)$/,
+    say: (m) => `Written but failed ${m[1] === "1" ? "a check" : `${m[1]} checks`}, `
+      + `so its pages were not kept. Ingest again once the source is fixed.`,
+    label: "what failed the check",
+    raw: (m) => m[2],
+  },
+  {
+    re: /failed to authenticate|oauth|not logged in|unauthori[sz]ed|authentication|\b401\b|login expired/i,
+    say: () => "The model login expired — re-authenticate the worker, then Ingest again.",
+  },
+  {
+    re: /\b429\b|rate.?limit|session limit|usage limit|too many requests|quota/i,
+    say: (m) => {
+      const when = firstGroup(m.input, [
+        /resets?\s+(?:at\s+|in\s+)?([^.;·\n(]+)/i,
+        /retry[- ]after:?\s*(\d+\s*[a-z]+)/i,
+      ]);
+      return when ? `Rate-limited — retry after ${when}.` : "Rate-limited — wait a little, then Ingest again.";
+    },
+  },
+];
+const GENERIC_ERROR = "This run hit an error. Check the details below, then Ingest again.";
 
 function runErrorHTML(r) {
   if (!r.error) return "";
   const keyed = KEY_RE.exec(r.error);
   // An error that does not name a unit is about the run itself; it has no
-  // source to attribute and no report to hide.
-  if (!keyed) return `<div class="detail hint error">${esc(r.error)}</div>`;
-  const [, key, tail] = keyed;
-  const bad = VIOLATIONS_RE.exec(tail);
-  if (!bad) {
-    return `<div class="detail hint error run-error">${unitKeyHTML(key)}<span>${esc(tail)}</span></div>`;
+  // source to attribute.
+  const key = keyed ? keyed[1] : "";
+  const tail = keyed ? keyed[2] : String(r.error);
+  let say = GENERIC_ERROR, label = "what the error said", raw = tail;
+  for (const c of ERROR_CAUSES) {
+    const m = c.re.exec(tail);
+    if (!m) continue;
+    say = c.say(m);
+    if (c.label) label = c.label;
+    if (c.raw) raw = c.raw(m);
+    break;
   }
-  const n = Number(bad[1]);
-  // One line, deliberately: .review .detail is pre-wrap so that a server
-  // error keeps its own line breaks, which means any indentation written here
-  // would reach the reader as a line break they did not ask for.
-  const sentence = `was written but failed ${n === 1 ? "a check" : `${n} checks`}, `
-    + `so its pages were not kept. Ingest again once the source is fixed.`;
-  return `<div class="detail hint error run-error">${unitKeyHTML(key)}<span>${sentence}</span></div>
-    <details class="run-units" data-keep="err:${esc(r.id)}">
-      <summary>what failed the check</summary>
-      <div class="detail mono">${esc(bad[2])}</div>
+  return `<div class="detail hint error run-error">${key ? unitKeyHTML(key) : ""}<span>${esc(say)}</span></div>
+    <details class="run-units" data-keep="err:${esc(r.id ?? "")}">
+      <summary>${esc(label)}</summary>
+      <div class="detail mono">${esc(raw)}</div>
     </details>`;
 }
 
@@ -1001,7 +1056,7 @@ async function showSources() {
             aria-label="Delete ${esc(c.name)}" title="delete">${iconTrash}</button>
         </div>
       </div>
-      ${c.lastError ? `<div class="src-err">${esc(c.lastError)}</div>` : ""}`;
+      ${c.lastError ? `<div class="src-err">${runErrorHTML({ id: `conn-${c.id}`, error: c.lastError })}</div>` : ""}`;
     };
 
     const fileRow = (f) => `
@@ -1083,7 +1138,7 @@ async function showSources() {
           uploadConn && !uploadConn.enabled ? "; paused, so skipped on ingest" : ""}</span>
       </div>
       <div id="upload-progress" class="hint" role="status"></div>
-      <div class="card rows" id="file-drop" aria-label="Uploaded documents; drop files to add more">
+      <div class="card rows" id="file-drop" role="region" aria-label="Uploaded documents; drop files to add more">
         ${filesErr ? `<div class="empty card-empty">${esc(filesErr)}</div>`
           : files.map(fileRow).join("") ||
             `<div class="empty card-empty">No documents yet. Add markdown, PDFs, Office
@@ -1183,6 +1238,22 @@ async function showSources() {
       uploadWorkspaceFiles(ws, e.dataTransfer.files, $("upload-progress"), () => {
         if (view.current()) showSources();
       });
+    });
+    // A file dropped anywhere else on the page is, by default, opened by the
+    // browser -- it navigates away from kiln to the file. Swallow file drags
+    // on the document while this view is up, and show the no-drop cursor
+    // outside the list so the reader is told where a drop will count.
+    const isFileDrag = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+    const stray = (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      if (e.type === "dragover" && !e.target.closest?.("#file-drop")) e.dataTransfer.dropEffect = "none";
+    };
+    document.addEventListener("dragover", stray);
+    document.addEventListener("drop", stray);
+    onViewCleanup(() => {
+      document.removeEventListener("dragover", stray);
+      document.removeEventListener("drop", stray);
     });
 
     for (const b of document.querySelectorAll("[data-file-toggle]")) {
@@ -1296,10 +1367,12 @@ async function showGetStarted() {
       : p.everRan
         ? "Ingested. If no pages appeared, check Ingest for what the run reported."
         : "Reads every source and writes the pages. Only changed sources cost anything.";
+    const progressAria = (r) =>
+      `Ingest progress: ${r.unitsDone || 0} of ${r.unitsTotal} units done`;
     const ingestBar = running && running.unitsTotal
-      ? `<div class="run-progress">
+      ? `<div class="run-progress" id="gs-progress">
           <progress max="${running.unitsTotal}" value="${running.unitsDone || 0}"
-            aria-label="Ingest progress: ${running.unitsDone || 0} of ${running.unitsTotal} units done"></progress>
+            aria-label="${esc(progressAria(running))}"></progress>
         </div>`
       : "";
 
@@ -1326,8 +1399,8 @@ async function showGetStarted() {
         <li class="step ${ingestState}">
           ${stepIcon(ingestState)}
           <div><strong>Ingest</strong>
-            ${p.active ? runningNow(p.runs) : ""}
-            <span class="hint">${esc(ingestDetail)}</span>
+            <span id="gs-live">${p.active ? runningNow(p.runs) : ""}</span>
+            <span class="hint" id="gs-ingest-detail">${esc(ingestDetail)}</span>
             ${ingestBar}
             ${p.hasSource && !p.active
               ? `<div class="meta"><button class="btn ${p.everRan ? "quiet" : ""} icon-btn" id="gs-ingest"
@@ -1381,15 +1454,60 @@ async function showGetStarted() {
 
     // While a run is moving, keep the checklist honest and pick up the pages
     // the moment they land -- the payoff should not need a manual refresh.
+    //
+    // Each tick patches the Ingest step's progress in place. Re-running the
+    // view (beginView) every five seconds moved focus to <main>, scrolled to
+    // the top, replayed the entrance animation and shut any open disclosure --
+    // on the one page a reader watches for minutes. The view is only rebuilt
+    // when the checklist itself changes shape (a run starting or ending, a
+    // source arriving), which is a real transition rather than a tick.
     if (p.active) {
-      setTimeout(async () => {
+      const shape = (q) => `${q.hasSource}|${q.active}|${q.everRan}`;
+      let timer = 0;
+      onViewCleanup(() => clearTimeout(timer));
+      const tick = async () => {
         if (!view.current()) return;
+        let q;
         try {
+          q = await benchProgress(ws);
+          if (!q) return; // a 401: the token form is up
           const pages = await api(`/workspaces/${ws}/pages`);
           if (pages.length) { location.reload(); return; }
-        } catch { /* fall through to another tick */ }
-        showGetStarted();
-      }, 5000);
+        } catch (err) {
+          if (err?.handled) return;
+          timer = setTimeout(tick, 5000); // a blip: try again
+          return;
+        }
+        if (!view.current()) return;
+        if (shape(q) !== shape(p)) { showGetStarted(); return; }
+        const running = q.runs.find((r) => r.status === "running");
+        // The kiln keeps its element, and so its animation phase; only the
+        // count beside it changes.
+        const live = $("gs-live");
+        if (live) {
+          const label = live.querySelector(".kiln-firing-text");
+          const text = running && running.unitsTotal
+            ? `Firing — ${running.unitsDone || 0} of ${running.unitsTotal} done` : "Firing";
+          if (running && !label) live.innerHTML = runningNow(q.runs);
+          else if (!running && label) live.innerHTML = "";
+          else if (label && label.textContent !== text) label.textContent = text;
+        }
+        const bar = $("gs-progress");
+        if (running && running.unitsTotal) {
+          const meter = bar?.querySelector("progress");
+          if (meter) {
+            meter.max = running.unitsTotal;
+            meter.value = running.unitsDone || 0;
+            meter.setAttribute("aria-label", progressAria(running));
+          } else {
+            $("gs-ingest-detail")?.insertAdjacentHTML("afterend", `<div class="run-progress" id="gs-progress">
+              <progress max="${running.unitsTotal}" value="${running.unitsDone || 0}"
+                aria-label="${esc(progressAria(running))}"></progress></div>`);
+          }
+        } else bar?.remove();
+        timer = setTimeout(tick, 5000);
+      };
+      timer = setTimeout(tick, 5000);
     }
   } catch (err) {
     if (!err.handled) view.done(banner(err));
