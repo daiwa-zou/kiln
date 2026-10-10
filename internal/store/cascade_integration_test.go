@@ -333,6 +333,7 @@ func TestDeleteConnectorRemovesItsPages(t *testing.T) {
 	// One source from the connector, one uploaded document, and a concept page
 	// both wrote -- so the test also proves the connector's deletion is scoped
 	// to its own sources.
+	uploadFile(t, js, ws, "notes.md")
 	if err := js.Import(ctx, jobs.ImportRequest{
 		WorkspaceID: ws,
 		UpsertPages: []wiki.Page{

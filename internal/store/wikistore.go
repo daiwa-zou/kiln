@@ -211,10 +211,28 @@ func (s *WikiStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 	// One import per workspace at a time. Two concurrent imports would
 	// interleave read-modify-write on pages, links, and artifacts with
 	// last-writer-wins results; the transaction-scoped advisory lock
-	// serializes them and releases automatically on commit or rollback.
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtext('kiln:import:' || $1))`, in.WorkspaceID); err != nil {
-		return fmt.Errorf("store: acquire import lock: %w", err)
+	// serializes them and releases automatically on commit or rollback. The
+	// explicit deletes take the same lock, which is what lets the fence below
+	// trust what it reads.
+	if err := lockImports(ctx, tx, in.WorkspaceID); err != nil {
+		return err
+	}
+
+	// A run is long and an explicit delete is not: by the time this lands, the
+	// document or connector a source came from may be gone. Those sources, and
+	// the pages only they wrote, are left out so the delete stays a delete; the
+	// rest of the run still lands.
+	fenced, err := fenceImport(ctx, tx, in)
+	if err != nil {
+		return err
+	}
+	in = fenced.req
+	if fenced.pagesDropped {
+		// The index and overview were built from a page set that included
+		// pages that are not being stored. Keeping the previous ones leaves
+		// them one run stale; writing these would link to pages that do not
+		// exist.
+		in.Index, in.Overview = "", ""
 	}
 
 	wikiID, err := ensureWiki(ctx, tx, in.WorkspaceID)
@@ -237,6 +255,9 @@ func (s *WikiStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 		if err := upsertSource(ctx, tx, in.WorkspaceID, src); err != nil {
 			return err
 		}
+	}
+	if err := flagSourcesForRegeneration(ctx, tx, in.WorkspaceID, fenced.regen); err != nil {
+		return err
 	}
 	if err := dropSources(ctx, tx, in.WorkspaceID, in.DropSources); err != nil {
 		return err

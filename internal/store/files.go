@@ -140,6 +140,13 @@ func (s *WikiStore) DeleteFile(ctx context.Context, workspaceID, id string) (blo
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
+	// Before the row goes, so an import in flight finishes first and its output
+	// is visible to the cascade below; one that starts afterwards finds the file
+	// gone and leaves this document out (see fenceImport).
+	if err := lockImports(ctx, tx, workspaceID); err != nil {
+		return "", diff.Cascade{}, err
+	}
+
 	var path string
 	err = tx.QueryRow(ctx, `
 		DELETE FROM workspace_files WHERE workspace_id = $1 AND id = $2

@@ -155,6 +155,14 @@ func (s *WikiStore) DeleteConnector(ctx context.Context, workspaceID, id string)
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
+	// Before the sources are read, not after: an import in flight holds this
+	// lock, and what it writes has to be visible to the read below. It is taken
+	// here rather than left to the cascade because a connector with no sources
+	// yet cascades nothing, and would otherwise be deleted while its first sync
+	// is still importing.
+	if err := lockImports(ctx, tx, workspaceID); err != nil {
+		return diff.Cascade{}, err
+	}
 	keys, err := sourceKeysForConnector(ctx, tx, workspaceID, id)
 	if err != nil {
 		return diff.Cascade{}, err

@@ -42,11 +42,12 @@ func cascadeDeleteSources(ctx context.Context, tx pgx.Tx, workspaceID string, re
 		return diff.Cascade{}, nil
 	}
 
-	// Serialized against a run's import on the same lock: a build writing pages
-	// for a source this transaction is dropping would otherwise resurrect it.
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtext('kiln:import:' || $1))`, workspaceID); err != nil {
-		return diff.Cascade{}, fmt.Errorf("store: acquire import lock: %w", err)
+	// Serialized against a run's import on the same lock. The lock orders the
+	// two transactions; what keeps an import that lands afterwards from
+	// resurrecting what is deleted here is the fence it applies under the same
+	// lock (see fenceImport).
+	if err := lockImports(ctx, tx, workspaceID); err != nil {
+		return diff.Cascade{}, err
 	}
 
 	sources, err := loadSources(ctx, tx, workspaceID)

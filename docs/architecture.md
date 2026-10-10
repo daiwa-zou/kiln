@@ -556,6 +556,20 @@ Import is one transaction, serialized per workspace by a transaction-scoped
 advisory lock. Two concurrent imports would interleave read-modify-write on
 pages, links, and artifacts with last-writer-wins results.
 
+The same lock is taken by every explicit delete, but a lock only *orders* two
+transactions; it does not make the later one aware of the earlier. A run takes
+minutes and plans against a snapshot, so a document deleted mid-run would be
+written straight back by the import that follows. Under the lock, import
+therefore checks that each source's producer still exists — an uploaded
+document needs its `workspace_files` row, a source with a connector needs that
+connector — and leaves out the sources that fail, together with the pages only
+those sources wrote. Everything else in the run still lands, a page shared with
+a surviving source is kept and that source is flagged for regeneration, and the
+index and overview (built from the full page set) are left one run stale rather
+than written with links to pages that were not stored. Recording a document's
+figures takes the same lock and refuses a deleted document's pictures for the
+same reason.
+
 ```mermaid
 flowchart TD
     W["Pages written this run"] --> M["Merge with live pages<br/>minus cascade deletions"]
@@ -566,6 +580,7 @@ flowchart TD
     OV --> TX
     LG --> TX
     W --> TX["<b>One transaction</b><br/>advisory-locked per workspace"]
+    TX --> FN["Fence: drop sources whose<br/>file or connector was deleted"]
     TX --> UP["Upsert pages + links"]
     TX --> SD["Soft-delete cascade pages"]
     TX --> SR["Upsert source records"]

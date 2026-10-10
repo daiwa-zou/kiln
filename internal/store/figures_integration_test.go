@@ -21,6 +21,7 @@ func TestReplaceFiguresIsTheDocumentsCurrentSet(t *testing.T) {
 	js, ws := jobStore(t)
 	ctx := context.Background()
 	key := string(diff.DocKey(diff.UploadOrigin("report.pdf")))
+	uploadFile(t, js, ws, "report.pdf")
 
 	orphaned, err := js.ReplaceFigures(ctx, ws, key, []jobs.FigureRecord{
 		figure(key, "p1-i0", "sha-chart", "blob-chart"),
@@ -90,6 +91,8 @@ func TestReplaceFiguresKeepsBlobsTwoDocumentsShare(t *testing.T) {
 
 	a := string(diff.DocKey(diff.UploadOrigin("a.pdf")))
 	b := string(diff.DocKey(diff.UploadOrigin("b.pdf")))
+	uploadFile(t, js, ws, "a.pdf")
+	uploadFile(t, js, ws, "b.pdf")
 
 	if _, err := js.ReplaceFigures(ctx, ws, a, []jobs.FigureRecord{
 		figure(a, "p1-i0", "sha-shared", "blob-shared"),
@@ -180,6 +183,7 @@ func TestFigureIsWorkspaceScoped(t *testing.T) {
 	js, ws := jobStore(t)
 	ctx := context.Background()
 	key := string(diff.DocKey(diff.UploadOrigin("report.pdf")))
+	uploadFile(t, js, ws, "report.pdf")
 
 	if _, err := js.ReplaceFigures(ctx, ws, key, []jobs.FigureRecord{
 		figure(key, "p1-i0", "sha-chart", "blob-chart"),
