@@ -513,6 +513,34 @@ const unesc = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
 const safeURL = (u) =>
   /^(https?:\/\/|#\/)/.test(u) || (/^\/api\/v1\//.test(u) && !u.startsWith("//")) ? u : null;
 
+// imageURL is the narrower question for an <img>: may the browser FETCH this?
+// A page body is written by a model reading arbitrary sources, so an image in
+// it can name any host -- and every reader's browser would request it on
+// render, with a query string that can carry whatever the model was fed. That
+// is a zero-click channel out of the wiki, so only this origin's own files
+// (figures served from /api/v1/, which the CSP's img-src 'self' also admits)
+// are drawn. Anything off-origin is shown as a link the reader chooses to
+// follow. Resolved against the page's origin, not matched by prefix, so
+// "//host/x" and "/\host" cannot sneak through as relative paths.
+const imageURL = (u) => {
+  const url = safeURL(u);
+  if (!url || url.startsWith("#/")) return null;
+  try {
+    return new URL(unesc(url), location.href).origin === location.origin ? url : null;
+  } catch { return null; }
+};
+
+// externalImageHTML stands in for an image that is not drawn: a link whose
+// text says what it is, so nothing is silently dropped and nothing is fetched
+// until someone clicks.
+function externalImageHTML(alt, url) {
+  let host = "";
+  try { host = new URL(unesc(url)).host; } catch { /* label falls back to alt */ }
+  const label = alt || esc(host) || "image";
+  return `<a class="ext-image" href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+    + `<span class="hint"> (external image${host && alt ? ` on ${esc(host)}` : ""}, not loaded)</span>`;
+}
+
 // A very small markdown subset: enough to read a generated page without
 // shipping a parser. Everything is escaped first, so page content is data.
 // headingOffset shifts markdown headings: 0 for artifacts (whose # is the
@@ -577,7 +605,7 @@ function renderMarkdown(src, headingOffset = 1) {
     // see it well or at all.
     const standalone = raw.trim().match(/^!\[([^\]]*)\]\(([^)\s]+)\)$/);
     if (standalone) {
-      const u = safeURL(standalone[2]);
+      const u = imageURL(standalone[2]);
       if (u) {
         flushPara(); closeList();
         const alt = standalone[1];
@@ -588,8 +616,8 @@ function renderMarkdown(src, headingOffset = 1) {
         continue;
       }
       // An unresolved figure reference falls through to prose, where it
-      // renders as the literal text it is. Visible and diagnosable beats a
-      // broken image icon.
+      // renders as the literal text it is -- or, for an off-origin image, as a
+      // link to it. Visible and diagnosable beats a broken image icon.
     }
     if (/^\s*[-*]\s+/.test(raw)) {
       flushPara(); openList("ul");
@@ -646,8 +674,10 @@ function inlineText(text) {
   return text
     // Images before links, since the syntaxes nest.
     .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, url) => {
-      const u = safeURL(url);
-      return u ? `<img src="${u}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">` : m;
+      const u = imageURL(url);
+      if (u) return `<img src="${u}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`;
+      const link = safeURL(url);
+      return link && !link.startsWith("#/") ? externalImageHTML(alt, link) : m;
     })
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
       const u = safeURL(url);
