@@ -26,9 +26,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          # Latest 1.25 patch, not go.mod's literal 1.25.0 -- that release
-          # ships 22 stdlib CVEs this job would (correctly) fail on.
-          go-version: '1.25.x'
+          # Latest 1.26 patch, not go.mod's literal 1.26.0 -- a .0 release
+          # ships stdlib CVEs this job would (correctly) fail on. check-latest,
+          # because without it setup-go settles for whatever 1.26 patch the
+          # runner image cached, which lags a security release by days -- the
+          # job failed on 1.26.8 with 1.26.9 already out.
+          go-version: '1.26.x'
+          check-latest: true
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest

@@ -10,7 +10,7 @@
 # scratch image would build fine and then fail at the first PDF.
 
 # --- build ------------------------------------------------------------------
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
 
 # Dependencies resolve in their own layer so source edits do not re-download
