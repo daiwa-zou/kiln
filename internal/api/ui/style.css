@@ -1532,7 +1532,12 @@
   }
   .graph-legend::-webkit-scrollbar { display: none; }
   .graph-legend .chip-count { font-variant-numeric: tabular-nums; }
+  /* flex: none, because the row scrolls instead of squeezing. button.chip's
+     24px tap-target floor replaces the min-width: auto that would otherwise
+     keep a flex item at its content width, so without this a narrow column
+     shrank every chip to its floor and the labels spilled across each other. */
   .graph-legend .chip {
+    flex: none; white-space: nowrap;
     display: inline-flex; align-items: center; gap: 6px;
     padding: 4px 10px; background: var(--panel); cursor: pointer;
   }
