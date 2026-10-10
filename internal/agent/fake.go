@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -258,13 +259,25 @@ func unitFromPrompt(prompt string) string {
 	for line := range strings.Lines(prompt) {
 		line = strings.TrimSpace(line)
 		if after, ok := strings.CutPrefix(line, "Unit: "); ok {
-			return after
+			return unquoteValue(after)
 		}
 		if _, after, ok := strings.Cut(line, "planned for unit "); ok {
-			return strings.TrimSuffix(strings.TrimSpace(after), ".")
+			return unquoteValue(strings.TrimSuffix(strings.TrimSpace(after), "."))
 		}
 	}
 	return "unknown"
+}
+
+// unquoteValue undoes the Go quoting the jobs package applies to untrusted
+// single-line values (unit keys, titles, questions) so they cannot inject
+// prompt structure. A value that is not a quoted string is returned as it is,
+// which keeps hand-built prompts in tests working.
+func unquoteValue(s string) string {
+	s = strings.TrimSpace(s)
+	if u, err := strconv.Unquote(s); err == nil {
+		return u
+	}
+	return s
 }
 
 // questionFromPrompt reads the "Question: <q>" line a research prompt opens
@@ -272,7 +285,7 @@ func unitFromPrompt(prompt string) string {
 func questionFromPrompt(prompt string) string {
 	for line := range strings.Lines(prompt) {
 		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "Question: "); ok {
-			return after
+			return unquoteValue(after)
 		}
 	}
 	return ""
@@ -282,20 +295,26 @@ func questionFromPrompt(prompt string) string {
 func titleFromPrompt(prompt string) string {
 	for line := range strings.Lines(prompt) {
 		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "Title: "); ok {
-			return after
+			return unquoteValue(after)
 		}
 	}
 	return ""
 }
 
+// planFenceOpen matches the opening line of the plan's json fence. The fence is
+// at least three backticks and grows when the plan itself contains a run, so
+// the length is captured to find the matching close.
+var planFenceOpen = regexp.MustCompile("(?m)^(`{3,})json\n")
+
 // plannedPages recovers the analysis plan the generate prompt embeds in a
 // ```json fence.
 func plannedPages(prompt string) []AnalysisPage {
-	_, rest, ok := strings.Cut(prompt, "```json\n")
-	if !ok {
+	loc := planFenceOpen.FindStringSubmatchIndex(prompt)
+	if loc == nil {
 		return nil
 	}
-	block, _, ok := strings.Cut(rest, "\n```")
+	ticks := prompt[loc[2]:loc[3]]
+	block, _, ok := strings.Cut(prompt[loc[1]:], "\n"+ticks)
 	if !ok {
 		return nil
 	}
