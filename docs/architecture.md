@@ -336,7 +336,7 @@ flowchart LR
         Local["or a local folder"]
     end
     subgraph web["web connector"]
-        URLs["Configured URLs"] --> Fetch["Fetch via pinned dialer"]
+        URLs["Configured URLs"] --> Fetch["Fetch via netguard client<br/><i>pinned dial, public only</i>"]
     end
 
     Clone --> RM["repomap"]
@@ -403,6 +403,24 @@ naming a local path is checked against `worker.permitted_source_roots`, and an
 empty allowlist denies every local path — otherwise a connector config would be
 a local-file-inclusion primitive. The CLI, whose paths come from the operator's
 own command line, is not subject to this.
+
+**Outbound requests.** A URL in a connector config is attacker-shaped for the
+same reason, so every HTTP request kiln makes to an address a user supplied
+goes through one client, `netguard.NewClient`. Its dialer resolves the name,
+refuses the host if *any* answer is loopback, private, link-local, or in one of
+the special ranges `netguard` lists (NAT64, 6to4, Teredo and the other
+IPv4-embedding prefixes among them), and then connects to the vetted IP itself
+rather than to the name. Because that check runs on every connection, a
+redirect hop or a DNS answer that changes between requests meets the same wall
+as the first request. Refusing on any answer rather than on all is deliberate:
+a host with a public A record and a private AAAA, or a split-horizon answer
+mixing the two, is refused outright, because which address a client ends up on
+otherwise depends on dial order, and a rebinding attacker controls both. The
+client never uses a proxy from the environment, speaks https only, strips
+`Authorization` and `Cookie` on redirect, and its callers cap how much of a
+body they read. The git clone is the one exception: git opens its own
+connections, so `connector/git` checks the resolved addresses before cloning
+but cannot pin them.
 
 **Credentials.** Clone auth prefers a GitHub App installation token (short-lived
 and repo-scoped, nothing durable to leak) and falls back to a sealed PAT
