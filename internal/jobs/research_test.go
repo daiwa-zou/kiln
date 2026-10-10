@@ -190,6 +190,33 @@ func TestResearchLedgersAFailedPass(t *testing.T) {
 	}
 }
 
+func TestResearchInterruptedByCancellationRecordsNothing(t *testing.T) {
+	// A canceled context is the worker draining (or having lost the claim), not
+	// a research failure. Recording 'failed' would finish the row, and the
+	// requeue that follows is fenced to status 'running' -- so the question would
+	// never be researched. The pass must return the context's error and leave the
+	// row for the worker.
+	repo := researchRepo(t)
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.failWith = context.Canceled
+	p := testPipeline(store, runner)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := p.Research(ctx, ResearchRequest{
+		RunID: "run-research", WorkspaceID: "ws-1",
+		Source:   SourceSpec{Path: repo, Slug: "bench"},
+		Question: Question{Kind: "gap", Title: "What is the retry policy?"},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Research = %v, want the context's error", err)
+	}
+	if len(store.runs) != 0 {
+		t.Errorf("an interrupted pass recorded a terminal status: %+v", store.runs)
+	}
+}
+
 func TestResearchRejectsAnEmptyAnswer(t *testing.T) {
 	repo := researchRepo(t)
 	store := newMemStore()

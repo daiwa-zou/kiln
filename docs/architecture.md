@@ -913,8 +913,8 @@ stateDiagram-v2
     running --> partial : some clean, some failed
     running --> failed : nothing succeeded
     running --> no_changes : hash gate dropped everything
-    running --> over_budget : ledger refused a reservation
-    running --> canceled : context canceled mid-run
+    running --> over_budget : ledger refused a reservation, or window spent at claim
+    running --> canceled : context canceled mid-run (drain: continuation queued)
     running --> queued : drain / stale requeue
     succeeded --> [*]
     partial --> [*]
@@ -1054,7 +1054,7 @@ survives.
 | Validation fails | Errors are stated back to the agent and generation retries; the final attempt escalates to the fallback model. |
 | Run budget exhausted | Scheduling stops. In-flight units finish — paid-for calls are not thrown away. Remaining units stay stale. |
 | Ctrl-C / cancellation | Stops scheduling; already-generated units are still imported, on an uncancelable context. |
-| Rolling deploy | Shutdown drains: the in-flight run keeps a detached context for `worker.drain_grace` (default 15m, above one agent call). Past that it is interrupted and **requeued, not failed**. |
+| Rolling deploy | Shutdown drains: the in-flight run keeps a detached context for `worker.drain_grace` (default 15m, above one agent call). Past that it is interrupted and **never failed**. A run that had produced nothing yet (resolving sources, or a research pass) is **requeued** whole, with its review item left untouched. A build that was part-way keeps what it finished: those units are imported, the run is recorded `canceled`, and a `continuation` run is queued for the units it never reached. |
 | Worker dies mid-build | Its run sits `running` and would block the bench via the active-run index. `worker.stale_after` (default 45m) returns it to the queue once its claim has gone that long without a heartbeat; a live worker refreshes the claim every `worker.heartbeat_interval` (default 1m), so a long healthy build is never swept. Terminal and progress writes are fenced to the claiming worker, so a worker that lost its claim can neither finish nor requeue the run that replaced it, and it cancels its own build as soon as a heartbeat finds the claim gone. The pipeline is idempotent from the start. |
 | Import fails | The run is marked failed **and still ledgered**, because the agent calls are already billed. |
 | Blob missing at sync | That document is skipped and reported to the review queue; the rest of the bench builds. |

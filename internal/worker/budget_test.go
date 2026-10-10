@@ -19,10 +19,16 @@ import (
 type countingRunner struct {
 	inner agent.Runner
 	calls atomic.Int64
+	// onCall, when set, runs as call n begins and before it does any work: how a
+	// test places a drain deadline at an exact point in a run.
+	onCall func(n int64)
 }
 
 func (c *countingRunner) Run(ctx context.Context, req agent.Request) (*agent.Result, error) {
-	c.calls.Add(1)
+	n := c.calls.Add(1)
+	if c.onCall != nil {
+		c.onCall(n)
+	}
 	return c.inner.Run(ctx, req)
 }
 

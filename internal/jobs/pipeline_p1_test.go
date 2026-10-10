@@ -400,6 +400,12 @@ func TestBuildCanceledMidRunImportsCompletedWork(t *testing.T) {
 	if len(res.Summary.Items) != 1 {
 		t.Errorf("ran %d units after cancellation, want 1", len(res.Summary.Items))
 	}
+	// Every planned unit the scheduler was stopped before reaching is owed to a
+	// later run, and the result has to say so.
+	if unreached := len(res.Planned) - len(res.Summary.Items); unreached == 0 || res.Deferred != unreached {
+		t.Errorf("Deferred = %d, want the %d planned units the canceled run never reached",
+			res.Deferred, unreached)
+	}
 }
 
 func TestBuildBudgetGuardRejectsUnknownModel(t *testing.T) {

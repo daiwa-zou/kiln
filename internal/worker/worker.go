@@ -195,8 +195,11 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 // Shutdown drains: cancellation stops claiming immediately, but the run in
 // flight keeps a detached context for DrainGrace so paid-for agent work can
 // land. Only past the grace window is the build interrupted — and then it is
-// requeued, not failed: a rolling deploy must never turn an in-flight build
-// into a permanent failure plus wasted spend.
+// not failed: a rolling deploy must never turn an in-flight build into a
+// permanent failure plus wasted spend. A run that had produced nothing yet is
+// requeued whole. A build that was part-way keeps the units it finished (they
+// are imported and the run is recorded canceled) and a continuation run is
+// queued for the rest.
 func (w *Worker) Run(ctx context.Context) error {
 	log := w.logger().With("worker", w.ID)
 	log.Info("worker started", "poll", w.poll().String())
@@ -388,6 +391,19 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		log.Warn("build interrupted by shutdown; requeuing")
 		w.requeueRun(ctx, run.ID, log)
 		w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
+	case err == nil && res.Summary.Status == jobs.StatusCanceled:
+		// The drain deadline stopped the build part-way. The pipeline imported the
+		// units that finished and recorded the run canceled, so the row is
+		// terminal -- there is nothing left to requeue, and treating this as the
+		// success path below would publish a partial wiki and enqueue the
+		// continuation, both on a context that is already dead. The work the
+		// build did not reach is what the continuation is for.
+		syncErr = "interrupted by shutdown; continuation queued"
+		log.Warn("build interrupted by shutdown; continuing in a new run",
+			"unreached", res.Deferred, "cost_usd", res.Summary.CostUSD)
+		w.metrics().RunFinished(string(res.Summary.Status), time.Since(started),
+			res.Summary.CostUSD, res.Summary.Created, res.Summary.Updated, res.Summary.Deleted)
+		w.continueInterrupted(ctx, run, log)
 	case err != nil:
 		syncErr = err.Error()
 		log.Error("build failed", "error", err)
@@ -1077,6 +1093,27 @@ func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, 
 		log.Error("continuation enqueue failed", "error", err)
 	} else if created {
 		log.Info("continuation enqueued", "deferred", res.Deferred, "retry_partial", retryPartial)
+	}
+}
+
+// continueInterrupted queues the follow-up for a build the drain deadline cut
+// short. It is not enqueueContinuation, and does not share its gates: those
+// exist to stop a chain of runs that fail the same way, and an interruption is
+// not a failure of the work. Even a build that finished nothing is continued,
+// because the cause was the deploy, not the units. The chain is bounded by the
+// deploys that interrupt it.
+//
+// The enqueue is detached from ctx for the same reason the requeue is: ctx is
+// canceled by definition on this path, and a write through it would fail and
+// leave the unreached units waiting for some later trigger.
+func (w *Worker) continueInterrupted(ctx context.Context, run *store.QueuedRun, log *slog.Logger) {
+	id, created, err := w.Store.EnqueueRun(context.WithoutCancel(ctx), run.WorkspaceID, "continuation", run.ConnectorID)
+	switch {
+	case err != nil:
+		log.Error("continuation after interruption not enqueued; the unreached units wait for the next trigger",
+			"error", err)
+	case created:
+		log.Info("continuation enqueued after interruption", "continuation", id)
 	}
 }
 
