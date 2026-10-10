@@ -304,6 +304,21 @@ for it.*
    exactly the URLs it is given. Send `If-None-Match` / `If-Modified-Since`
    from the last fetch, and discover URLs from a `sitemap.xml` under an
    explicit page cap, both inside the existing SSRF posture.
+8. **A typed, component UI that still ships in the binary** — the reading
+   UI is ~6,400 lines of hand-written JavaScript, 4,900 of them in
+   `ui/app.js`, and items 2, 4, and 6 each add a view (digest settings, a
+   page diff, a plan preview). Move it to TypeScript and a small component
+   library (Preact or Svelte), bundled by Vite into content-hashed static
+   files that `embed.FS` serves exactly as today — same ETags, same
+   `script-src 'self'` CSP, no inline scripts. The built output is
+   committed, so `go build` and every Go-only CI job still need no Node;
+   a CI job rebuilds it and fails on any diff, the way `go mod tidy` is
+   checked. API response types are generated from the Go handlers' structs,
+   so contract drift fails the build rather than a page. Port view by view
+   behind the same routes, re-running the WCAG 2.2 AA checks from
+   [accessibility.md](docs/accessibility.md) on each. Lands before the
+   views it exists for; a Next.js server is ruled out (see Deferred
+   decisions).
 
 **Verification:** with `auth.default_role = "viewer"`, a fresh sign-in can
 read but every write answers 403; a review item filed after a digest's
@@ -314,13 +329,17 @@ write-scoped token creates a review item while the page body is unchanged;
 a run that regenerates one page writes exactly one revision and a no-change
 run writes none; a misspelled keyword (`kubernets`) finds its page; a dry
 run over the API creates no `runs` row and no ledger entry; a web source
-answering `304` makes no extraction and plans no unit.
+answering `304` makes no extraction and plans no unit; `go build` on a
+machine without Node produces a binary whose UI works, the UI is served
+under the unchanged CSP with no violations in the console, a changed API
+field that the UI reads fails type-checking, and every ported view passes
+the same accessibility audit in both themes.
 
 ## Deferred decisions
 
 | Item | Trigger to revisit |
 | --- | --- |
-| Framework frontend | SaaS onboarding flows (M8) making server-driven UI painful |
+| Server-rendered frontend (Next.js or similar) | Wikis meant to be public and found by search engines. Today every bench sits behind a token, so server rendering buys nothing, and a Node server breaks "one binary plus Postgres". If it comes, `next build` with `output: 'export'` keeps the embed; a Node runtime needs its own case. The framework question itself is settled by M11 item 8 |
 | `workspaces.model` / per-bench model override | First user who needs Opus on one bench and Sonnet on the rest |
 | Incremental doc/web change detection | A docs source large enough that full re-extraction is the slow step (the web half's cheap part is M11 item 7) |
 | pgvector hybrid search | The empty-search rate crossing the threshold M11 item 5 writes down. Plan in [storage-and-retrieval.md](docs/storage-and-retrieval.md), step 3 |
