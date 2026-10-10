@@ -106,7 +106,12 @@ func IsReserved(path string) bool {
 	return false
 }
 
-var slugPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+// SlugExpr is the regular-expression fragment a page slug matches, unanchored
+// so a caller can embed it in a larger pattern (the agent's path schema does).
+// It is the single definition of the slug alphabet; ValidSlug anchors it.
+const SlugExpr = `[a-z0-9]+(-[a-z0-9]+)*`
+
+var slugPattern = regexp.MustCompile(`^` + SlugExpr + `$`)
 
 // ValidSlug reports whether s is an acceptable page slug. Slugs are constrained
 // so a page path can never escape the wiki directory or collide case-wise on a
