@@ -55,6 +55,61 @@ func TestRunsCreateListAndDebounce(t *testing.T) {
 	}
 }
 
+type enqueueBody struct {
+	ID           string `json:"id"`
+	Created      bool   `json:"created"`
+	Outcome      string `json:"outcome"`
+	MergedInto   string `json:"mergedInto"`
+	QueuedBehind string `json:"queuedBehind"`
+}
+
+func TestRunsCreateSaysWhatAbsorbedTheRequest(t *testing.T) {
+	srv, js, wsID := testServer(t)
+	ctx := context.Background()
+
+	// A webhook build is waiting; the Build click joins it, and says so.
+	webhook, _, err := js.EnqueueRunOpts(ctx, wsID, "webhook", "", store.EnqueueOptions{RefTo: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var joined enqueueBody
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/runs", "",
+		map[string]any{}, &joined); code != http.StatusAccepted {
+		t.Fatalf("POST runs = %d, want 202", code)
+	}
+	if joined.Outcome != "merged" || joined.MergedInto != "webhook" || joined.Created || joined.ID != webhook {
+		t.Errorf("joined a waiting build: %+v", joined)
+	}
+}
+
+func TestRunsCreateBehindResearchIsQueuedNotJoined(t *testing.T) {
+	srv, js, wsID := testServer(t)
+	ctx := context.Background()
+
+	if err := js.FileReview(ctx, wsID, "gap", "retry-policy is missing", "two pages link to it"); err != nil {
+		t.Fatal(err)
+	}
+	var item string
+	if err := js.Pool().QueryRow(ctx, `SELECT id FROM review_items WHERE workspace_id = $1`, wsID).Scan(&item); err != nil {
+		t.Fatal(err)
+	}
+	research, err := js.RequestResearch(ctx, wsID, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The click used to be reported as "joined" the research run, which builds
+	// nothing. It is now a request that waits its turn, and the response says so.
+	var res enqueueBody
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/runs", "",
+		map[string]any{}, &res); code != http.StatusAccepted {
+		t.Fatalf("POST runs = %d, want 202", code)
+	}
+	if res.Outcome != "deferred" || res.QueuedBehind != "research" || res.Created || res.ID != research || res.MergedInto != "" {
+		t.Errorf("behind research: %+v", res)
+	}
+}
+
 func TestRunsListSurfacesDebounceDeadline(t *testing.T) {
 	srv, js, wsID := testServer(t)
 	ctx := context.Background()

@@ -21,6 +21,7 @@ type RunStore interface {
 	RunProgressFor(ctx context.Context, workspaceID string, runIDs []string) (map[string]store.RunProgress, error)
 	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (runID string, created bool, err error)
 	EnqueueRunOpts(ctx context.Context, workspaceID, trigger, connectorID string, opts store.EnqueueOptions) (runID string, created bool, err error)
+	EnqueueBuild(ctx context.Context, workspaceID, trigger, connectorID string, opts store.EnqueueOptions) (store.EnqueueResult, error)
 	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
 	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
 	FileReview(ctx context.Context, workspaceID, kind, title, detail string) error
@@ -141,9 +142,19 @@ func (s *Server) handleRunItems(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleRunCreate enqueues a build. 202 whether the run was created or
-// debounced onto an already-active one -- either way, a build is coming --
-// with "created" distinguishing the two for the UI.
+// handleRunCreate enqueues a build. 202 in every case, because in every case a
+// build is coming, and the body says which:
+//
+//   - outcome "created": a new run was queued.
+//   - outcome "merged": a build was already waiting and absorbed the request;
+//     "mergedInto" is that run's trigger (so "webhook" tells the caller a push
+//     build is the one that will run).
+//   - outcome "deferred": the bench is busy with something that cannot honor the
+//     request (a research run, or a build already underway), so the request will
+//     become a queued build when that finishes; "queuedBehind" is that run's
+//     trigger.
+//
+// "created" stays for older clients and is true only for the first.
 //
 // Refusal is reserved for the budget window: when the workspace has spent its
 // budget_usd within the rolling window, the request is rejected and a review
@@ -163,12 +174,19 @@ func (s *Server) handleRunCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runID, created, err := s.Runs.EnqueueRun(r.Context(), ws.ID, "manual", "")
+	res, err := s.Runs.EnqueueBuild(r.Context(), ws.ID, "manual", "", store.EnqueueOptions{})
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"id": runID, "created": created})
+	body := map[string]any{"id": res.RunID, "created": res.Created(), "outcome": string(res.Outcome)}
+	switch res.Outcome {
+	case store.EnqueueMerged:
+		body["mergedInto"] = res.ActiveTrigger
+	case store.EnqueueDeferred:
+		body["queuedBehind"] = res.ActiveTrigger
+	}
+	writeJSON(w, http.StatusAccepted, body)
 }
 
 // refuseOverBudget checks the rolling budget window. Returns a non-empty

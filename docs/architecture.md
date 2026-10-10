@@ -246,7 +246,7 @@ sequenceDiagram
     API->>API: check workspace budget window<br/>(a person's request: manual, upload)
     API->>DB: EnqueueRun, status queued
     note right of DB: a partial unique index allows<br/>one active run per bench
-    DB-->>API: existing run if one is active<br/>— debounced, ref_to advanced
+    DB-->>API: waiting build: merged, ref_to advanced<br/>research or running build: recorded, queued after
     end
 
     loop poll interval
@@ -266,11 +266,29 @@ sequenceDiagram
 ```
 
 **Debounce.** A partial unique index allows only one `queued`-or-`running` run
-per workspace. A second enqueue collapses onto the waiting run and *advances its
-`ref_to`* to the newest head, so a push storm's final state is what gets built.
-A run already claimed is left alone — it loses nothing, because the base of an
-incremental range always derives from the workspace's last successful build, not
-from the webhook's claim.
+per workspace, so the bench does one job at a time. What a second request does
+depends on what holds the slot, because only a queued *build* can honor a build
+request:
+
+- **A queued build is waiting:** the request *merges* into it and advances its
+  `ref_to` to the newest head, so a push storm's final state is what gets built.
+  If that build is pinned to one connector and the request names another (or
+  none, as a manual Build does), the build is *widened* to every connector, so
+  no connector's change is left out of the build that was meant to include it.
+  Widening only goes one way.
+- **A research run is queued, or a build is already running:** merging would
+  lose the request. Research reads sources to answer one question and builds
+  nothing; a running build planned its units from what it read at the start. The
+  request is recorded in `build_requests` (one row per workspace, merged the same
+  way) and the claim step turns it into a queued build as soon as the workspace
+  has no active run. Because promotion happens at claim, a request survives the
+  worker that was running the blocking job dying.
+
+`POST /runs` reports which happened: `outcome` is `created`, `merged` (with
+`mergedInto`, the absorbing run's trigger) or `deferred` (with `queuedBehind`,
+the trigger of the run it waits for). The incremental range base always derives
+from the workspace's last successful build, not from the request, so neither
+path can leave a hole in the diff.
 
 **Budget window.** The API checks the rolling workspace budget when a person
 asks for a build, so they get an immediate refusal. Webhook, poll and
