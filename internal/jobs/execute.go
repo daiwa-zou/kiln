@@ -32,9 +32,9 @@ type SourceConnectors struct {
 // For returns the connector id owning a unit key's namespace.
 func (c SourceConnectors) For(key diff.Key) string {
 	switch diff.Namespace(key) {
-	case "doc:upload":
+	case diff.NamespaceUpload:
 		return c.Upload
-	case "doc:web":
+	case diff.NamespaceWeb:
 		return c.Web
 	}
 	return c.Git
@@ -291,13 +291,13 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	// deletion review for every repo-derived source it never looked at.
 	var syncedNS []string
 	if req.Source.Path != "" {
-		syncedNS = append(syncedNS, "module", "entry", "arch", "doc")
+		syncedNS = append(syncedNS, diff.PrefixModule, diff.PrefixEntry, diff.PrefixArch, diff.PrefixDoc)
 	}
 	if req.Source.DocsDir != "" {
-		syncedNS = append(syncedNS, "doc:upload")
+		syncedNS = append(syncedNS, diff.NamespaceUpload)
 	}
 	if len(req.Source.WebURLs) > 0 {
-		syncedNS = append(syncedNS, "doc:web")
+		syncedNS = append(syncedNS, diff.NamespaceWeb)
 	}
 
 	breq := BuildRequest{

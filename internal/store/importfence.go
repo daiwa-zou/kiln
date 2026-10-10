@@ -45,7 +45,7 @@ func lockImports(ctx context.Context, tx pgx.Tx, workspaceID string) error {
 }
 
 // uploadNamespace is the key prefix of an uploaded document's source records.
-const uploadNamespace = diff.PrefixDoc + ":upload:"
+const uploadNamespace = diff.NamespaceUpload + ":"
 
 // uploadPathCandidates returns the file paths a source key could belong to, or
 // nil when the key is not an uploaded document's. A document's section units

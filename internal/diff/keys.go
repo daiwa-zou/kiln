@@ -21,6 +21,25 @@ const (
 	PrefixEntry  = "entry"
 )
 
+// Namespaces finer than a prefix, as Namespace reports them: documents split by
+// the sync source that produced them. They are not key prefixes -- a key's
+// Prefix is still "doc" -- so they are only ever compared against Namespace
+// results and never against Prefix.
+const (
+	NamespaceUpload = PrefixDoc + ":upload"
+	NamespaceWeb    = PrefixDoc + ":web"
+)
+
+// TalliedNamespaces lists the namespaces a wiki overview counts as source
+// material, in the order they are reported.
+//
+// PrefixEntry is left out on purpose: no connector or mapper emits entry units
+// today, so there is nothing to count, and PrefixArch is the synthesis unit,
+// derived from everything else rather than material in its own right. A
+// namespace added here shows up in the overview tallies once the wiki package
+// has a phrase for it.
+var TalliedNamespaces = []string{PrefixModule, PrefixDoc, NamespaceUpload, NamespaceWeb}
+
 // ArchOverview is the singleton key for the synthesis pages that describe the
 // whole workspace: architecture, data flow, dependency map.
 const ArchOverview Key = "arch:overview"
@@ -45,7 +64,7 @@ func UploadOrigin(rel string) string { return "upload:" + rel }
 func WebOrigin(url string) string { return "web:" + url }
 
 // Namespace classifies a key by the sync source that produces it: repo
-// documents are "doc", uploaded ones "doc:upload", fetched ones "doc:web",
+// documents are PrefixDoc, uploaded ones NamespaceUpload, fetched ones NamespaceWeb,
 // and everything else its plain prefix. Deletion detection needs this
 // granularity — "was this source's producer synced this run" is a question
 // about the namespace, not the prefix.
@@ -57,9 +76,9 @@ func Namespace(k Key) string {
 	id := strings.TrimPrefix(string(k), PrefixDoc+":")
 	switch {
 	case strings.HasPrefix(id, "upload:"):
-		return "doc:upload"
+		return NamespaceUpload
 	case strings.HasPrefix(id, "web:"):
-		return "doc:web"
+		return NamespaceWeb
 	}
 	return PrefixDoc
 }
