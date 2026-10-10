@@ -53,7 +53,10 @@ Every bench the token can read is served, and no others. list_benches
 enumerates them and every other tool takes a "bench" argument.
 
 --workspace narrows the server to one bench and makes the rest unreachable,
-which is worth doing only when an agent should not see them.
+which is worth doing only when an agent should not see them. Give it the bench
+id (shown by list_benches and the API), or org/slug. A bare slug also works,
+but only while exactly one bench you can see has it; slugs are unique per org,
+not across them.
 
 This subprocess is for an agent on the same machine as the config file. A
 remote client -- a Claude connector, another team's agent -- cannot spawn it,
@@ -99,7 +102,7 @@ See docs/mcp.md for connecting Claude to it.`,
 	f := cmd.Flags()
 	f.StringVar(&endpoint, "url", "http://127.0.0.1:8080", "base URL of the kiln instance to read")
 	f.StringVar(&token, "token", "", "API token with the read scope (default: $KILN_TOKEN)")
-	f.StringVar(&workspace, "workspace", "", "confine the server to one bench; omit to serve every bench the token can read")
+	f.StringVar(&workspace, "workspace", "", "confine the server to one bench (id or org/slug; a bare slug only if unambiguous); omit to serve every bench the token can read")
 
 	return cmd
 }

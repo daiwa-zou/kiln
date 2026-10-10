@@ -69,8 +69,8 @@ func fakeKiln(t *testing.T) *httptest.Server {
 
 	mux.HandleFunc("/api/v1/workspaces", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, []Workspace{
-			{Slug: "kiln", Name: "kiln", PageCount: 2},
-			{Slug: "empty", Name: "Empty", PageCount: 0},
+			{ID: "aaaaaaaa-0000-4000-8000-000000000001", Org: "acme", Slug: "kiln", Name: "kiln", PageCount: 2},
+			{ID: "aaaaaaaa-0000-4000-8000-000000000002", Org: "acme", Slug: "empty", Name: "Empty", PageCount: 0},
 		})
 	})
 	mux.HandleFunc("/api/v1/workspaces/kiln/search", func(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +116,20 @@ func fakeKiln(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/api/v1/workspaces/kiln/backlinks/orphan", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, []PageSummary{})
 	})
+	// A bare slug two visible benches share: the API refuses to pick one.
+	mux.HandleFunc("/api/v1/workspaces/docs/search", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"ambiguous","candidates":[` +
+			`{"ref":"evil-co/docs","id":"11111111-1111-4111-8111-111111111111"},` +
+			`{"ref":"good-co/docs","id":"22222222-2222-4222-8222-222222222222"}]}`))
+	})
+	// The same bench by id, and by org/slug, which crosses the wire as org~slug.
+	for _, ref := range []string{"22222222-2222-4222-8222-222222222222", "good-co~docs"} {
+		mux.HandleFunc("/api/v1/workspaces/"+ref+"/search", func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, []SearchHit{{Path: "entities/x.md", Slug: "x", Type: "entity", Title: "From good-co"}})
+		})
+	}
 	// Everything else is a 404, which is also how kiln answers for a bench the
 	// caller cannot see.
 	return httptest.NewServer(mux)
@@ -178,6 +192,11 @@ func TestToolsReadTheWiki(t *testing.T) {
 		}
 		if !strings.Contains(out, "kiln") || !strings.Contains(out, "empty") {
 			t.Errorf("benches missing from output:\n%s", out)
+		}
+		// The id is what an agent should pass back, and the org/slug is the
+		// readable name: the same slug can live in two orgs.
+		if !strings.Contains(out, "aaaaaaaa-0000-4000-8000-000000000001") || !strings.Contains(out, "acme/kiln") {
+			t.Errorf("listing omits the bench id or its org/slug:\n%s", out)
 		}
 		// A bench with no pages searches empty for reasons unrelated to the
 		// query, so the listing has to say so.
@@ -319,5 +338,29 @@ func TestUnreachableKilnSaysWhatToCheck(t *testing.T) {
 	}
 	if !strings.Contains(out, "cannot reach kiln") {
 		t.Errorf("error does not name the cause:\n%s", out)
+	}
+}
+
+func TestAmbiguousBenchTellsTheAgentToUseTheID(t *testing.T) {
+	api := fakeKiln(t)
+	defer api.Close()
+	s := NewServer(NewClient(api.URL, ""), "", "test")
+
+	out, isErr := call(t, s, "search_wiki", map[string]any{"query": "x", "bench": "docs"})
+	if !isErr {
+		t.Fatal("an ambiguous bench should report as a tool error, not guess")
+	}
+	for _, want := range []string{"ambiguous", "evil-co/docs", "good-co/docs", "22222222-2222-4222-8222-222222222222", "id"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("error is missing %q:\n%s", want, out)
+		}
+	}
+
+	// Both unambiguous forms reach the right bench.
+	for _, ref := range []string{"22222222-2222-4222-8222-222222222222", "good-co/docs"} {
+		out, isErr := call(t, s, "search_wiki", map[string]any{"query": "x", "bench": ref})
+		if isErr || !strings.Contains(out, "From good-co") {
+			t.Errorf("bench %q: isErr=%v\n%s", ref, isErr, out)
+		}
 	}
 }

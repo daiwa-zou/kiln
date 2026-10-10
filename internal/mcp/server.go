@@ -27,7 +27,8 @@ const noBenchConfigured = ""
 // Server wires kiln's read API to MCP tools.
 type Server struct {
 	client *Client
-	// bench is the default workspace slug, from --workspace. Empty means every
+	// bench is the default workspace reference, from --workspace: an id,
+	// org/slug, or a slug that is unique among the benches the token can see. Empty means every
 	// tool call must name one, which is the right default for an instance with
 	// several benches.
 	bench string
@@ -59,22 +60,22 @@ func (s *Server) benchFor(arg string) (string, error) {
 // so they say what to pass rather than restating the field name.
 
 type benchArgs struct {
-	Bench string `json:"bench,omitempty" jsonschema:"the bench (workspace) slug; omit to use the server's default"`
+	Bench string `json:"bench,omitempty" jsonschema:"the bench's id from list_benches (preferred), or org/slug; omit to use the server's default"`
 }
 
 type searchArgs struct {
 	Query string `json:"query" jsonschema:"what to look for; matched against page text, not just titles"`
-	Bench string `json:"bench,omitempty" jsonschema:"the bench (workspace) slug; omit to use the server's default"`
+	Bench string `json:"bench,omitempty" jsonschema:"the bench's id from list_benches (preferred), or org/slug; omit to use the server's default"`
 	Limit int    `json:"limit,omitempty" jsonschema:"maximum hits to return (default 10)"`
 }
 
 type readArgs struct {
 	Page  string `json:"page" jsonschema:"the page's slug or its wiki-relative path, exactly as search returned it"`
-	Bench string `json:"bench,omitempty" jsonschema:"the bench (workspace) slug; omit to use the server's default"`
+	Bench string `json:"bench,omitempty" jsonschema:"the bench's id from list_benches (preferred), or org/slug; omit to use the server's default"`
 }
 
 type listArgs struct {
-	Bench  string `json:"bench,omitempty" jsonschema:"the bench (workspace) slug; omit to use the server's default"`
+	Bench  string `json:"bench,omitempty" jsonschema:"the bench's id from list_benches (preferred), or org/slug; omit to use the server's default"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"maximum pages to return (default 100)"`
 	Offset int    `json:"offset,omitempty" jsonschema:"how many pages to skip, for paging through a large bench"`
 }
@@ -143,9 +144,10 @@ func (s *Server) listBenches(ctx context.Context, _ *mcp.CallToolRequest, _ stru
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d bench(es):\n\n", len(benches))
+	fmt.Fprintf(&b, "%d bench(es). Pass the leading id as `bench`: the same slug can exist in more than one org, "+
+		"and an id never means a different bench.\n\n", len(benches))
 	for _, w := range benches {
-		fmt.Fprintf(&b, "- %s — %s (%d pages)\n", w.Slug, w.Name, w.PageCount)
+		fmt.Fprintf(&b, "- %s — %s (%s, %d pages)\n", benchHandle(w), w.Name, benchRef(w), w.PageCount)
 		// An empty bench is worth calling out: it has been created but never
 		// built, so searching it will return nothing for reasons that have
 		// nothing to do with the query.
@@ -402,8 +404,30 @@ func toolError(err error) *mcp.CallToolResult {
 // asking: kiln answers "no such bench" and "you cannot see that bench"
 // identically, so the message must cover both.
 func benchErr(err error, bench string) error {
+	var amb *AmbiguousError
+	if errors.As(err, &amb) {
+		return fmt.Errorf("bench %q is ambiguous: it matches %s — pass the id from list_benches as `bench`",
+			bench, strings.Join(amb.Candidates, ", "))
+	}
 	if errors.Is(err, ErrNotFound) {
 		return fmt.Errorf("no bench %q, or this token cannot read it — list_benches shows what is available", bench)
 	}
 	return err
+}
+
+// benchHandle is what an agent should pass as `bench`: the id, which no other
+// bench can share. Falls back to the slug against a server too old to send one.
+func benchHandle(w Workspace) string {
+	if w.ID != "" {
+		return w.ID
+	}
+	return w.Slug
+}
+
+// benchRef is the readable org/slug name for a bench.
+func benchRef(w Workspace) string {
+	if w.Org != "" {
+		return w.Org + "/" + w.Slug
+	}
+	return w.Slug
 }

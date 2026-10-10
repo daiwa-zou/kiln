@@ -17,6 +17,17 @@ import (
 // than surfacing a transport error an agent would read as a broken server.
 var ErrNotFound = errors.New("not found")
 
+// AmbiguousError is a 409 from a bare-slug bench reference that more than one
+// visible bench carries. Candidates are "org/slug (id ...)" strings, ready to
+// show.
+type AmbiguousError struct {
+	Candidates []string
+}
+
+func (e *AmbiguousError) Error() string {
+	return "that bench name matches several benches: " + strings.Join(e.Candidates, ", ")
+}
+
 // Client reads a kiln instance over its HTTP API.
 //
 // Deliberately the API rather than the database: an agent's MCP server should
@@ -39,8 +50,12 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
-// Workspace is one bench the token can see.
+// Workspace is one bench the token can see. ID is the only reference that is
+// unambiguous everywhere; Org+Slug ("org/slug") is the readable equivalent. A
+// bare Slug is unique only within an org.
 type Workspace struct {
+	ID        string `json:"id"`
+	Org       string `json:"org"`
 	Slug      string `json:"slug"`
 	Name      string `json:"name"`
 	PageCount int    `json:"pageCount"`
@@ -158,8 +173,12 @@ func (c *Client) Gaps(ctx context.Context, bench string, limit int) ([]Gap, erro
 	return out, c.get(ctx, c.benchPath(bench, "/gaps"), q, &out)
 }
 
+// benchPath addresses a bench by id, "org/slug" or bare slug. A path segment
+// cannot carry a "/", so org/slug is sent as "org~slug", which the API reads
+// back as org/slug (slugs never contain "~").
 func (c *Client) benchPath(bench, suffix string) string {
-	return "/api/v1/workspaces/" + url.PathEscape(bench) + suffix
+	ref := strings.Replace(bench, "/", "~", 1)
+	return "/api/v1/workspaces/" + url.PathEscape(ref) + suffix
 }
 
 func (c *Client) get(ctx context.Context, path string, query url.Values, into any) error {
@@ -191,6 +210,22 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, into an
 		return ErrNotFound
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return fmt.Errorf("kiln refused the request (%s): check the token passed as --token or KILN_TOKEN", resp.Status)
+	case resp.StatusCode == http.StatusConflict:
+		var amb struct {
+			Candidates []struct {
+				Ref string `json:"ref"`
+				ID  string `json:"id"`
+			} `json:"candidates"`
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if json.Unmarshal(body, &amb) == nil && len(amb.Candidates) > 0 {
+			e := &AmbiguousError{}
+			for _, c := range amb.Candidates {
+				e.Candidates = append(e.Candidates, fmt.Sprintf("%s (id %s)", c.Ref, c.ID))
+			}
+			return e
+		}
+		return fmt.Errorf("kiln returned %s: %s", resp.Status, strings.TrimSpace(string(body[:min(len(body), 512)])))
 	case resp.StatusCode >= 300:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("kiln returned %s: %s", resp.Status, strings.TrimSpace(string(body)))

@@ -160,7 +160,7 @@ func (s *Server) handleFiguresList(w http.ResponseWriter, r *http.Request) {
 			"width": f.Width, "height": f.Height, "page": f.Page,
 			"caption": f.Caption, "size": f.SizeBytes,
 			"contentType": f.ContentType,
-			"url":         figureURL(chi.URLParam(r, "workspace"), f.ID),
+			"url":         figureURL(ws.ID, f.ID),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
