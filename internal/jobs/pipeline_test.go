@@ -63,6 +63,15 @@ func newScriptedRunner() *scriptedRunner {
 }
 
 func (s *scriptedRunner) Run(_ context.Context, req agent.Request) (*agent.Result, error) {
+	// The real contract, not a permissive stand-in for it. A double that accepts
+	// anything lets the pipeline send a request every real runner rejects --
+	// an empty WorkDir, a step one of them does not know -- and the tests pass
+	// right up until production. Rejected calls are not recorded: they never
+	// reach a runner that does any work.
+	if err := req.Validate(agent.StandInCapabilities); err != nil {
+		return nil, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

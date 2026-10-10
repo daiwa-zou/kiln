@@ -22,7 +22,7 @@ func fakeAnalyzeReq(unit, title string) Request {
 		prompt += "Title: " + title + "\n"
 	}
 	prompt += "\n## Sources\n\nsome rendered unit content\n"
-	return Request{Step: StepAnalyze, SessionID: "s-" + unit, Prompt: prompt}
+	return Request{Step: StepAnalyze, SessionID: "s-" + unit, WorkDir: "/src", Prompt: prompt}
 }
 
 // generateReq mirrors the generate prompt, optionally embedding a plan the
@@ -39,7 +39,7 @@ func fakeGenReq(t *testing.T, unit string, plan *AnalysisResult) Request {
 			string(encoded) + "\n```\n"
 	}
 	prompt += "\n## Sources\n\nsome rendered unit content\n"
-	return Request{Step: StepGenerate, SessionID: "s-" + unit, Prompt: prompt}
+	return Request{Step: StepGenerate, SessionID: "s-" + unit, WorkDir: "/src", Prompt: prompt}
 }
 
 func TestFakeAnalyzeProposesValidPage(t *testing.T) {

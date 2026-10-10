@@ -44,7 +44,7 @@ type ClaudeRunner struct {
 // Capabilities: pages arrive in the scratch directory rather than as data, and
 // the CLI reports its own spend, so nothing here is estimated.
 func (r *ClaudeRunner) Capabilities() Capabilities {
-	return Capabilities{WritesFiles: true, EstimatesCost: false}
+	return Capabilities{WritesFiles: true, ReadsSources: true, EstimatesCost: false}
 }
 
 // NewClaudeRunner constructs a runner, defaulting the binary name.
@@ -94,7 +94,7 @@ func MinimalChildEnv(apiKey, baseURL string) []string {
 
 // Run executes one request and parses the result envelope.
 func (r *ClaudeRunner) Run(ctx context.Context, req Request) (*Result, error) {
-	if err := req.validate(); err != nil {
+	if err := req.Validate(r.Capabilities()); err != nil {
 		return nil, err
 	}
 
@@ -139,20 +139,6 @@ func (r *ClaudeRunner) Run(ctx context.Context, req Request) (*Result, error) {
 		return res, fmt.Errorf("agent: %s step exited non-zero despite a success envelope: %w", req.Step, err)
 	}
 	return res, nil
-}
-
-func (req Request) validate() error {
-	switch {
-	case req.WorkDir == "":
-		return errors.New("agent: WorkDir is required")
-	case strings.TrimSpace(req.Prompt) == "":
-		return errors.New("agent: Prompt is required")
-	case req.Step == StepGenerate && req.ScratchDir == "":
-		return errors.New("agent: ScratchDir is required for the generate step")
-	case req.Step != StepAnalyze && req.Step != StepGenerate && req.Step != StepResearch:
-		return fmt.Errorf("agent: unknown step %q", req.Step)
-	}
-	return nil
 }
 
 // BuildArgs assembles the CLI arguments. Exported so tests can assert on the

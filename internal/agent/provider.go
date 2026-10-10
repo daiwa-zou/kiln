@@ -162,6 +162,10 @@ type Capabilities struct {
 	// structured data on Result.Generation. The pipeline allocates a scratch
 	// directory only for these, which is most of why the API runner exists.
 	WritesFiles bool
+	// ReadsSources is true when the agent explores the material itself, from
+	// Request.WorkDir, rather than being handed it in the prompt. Request.Validate
+	// requires a WorkDir of these and ignores it for the rest.
+	ReadsSources bool
 	// EstimatesCost is true when Result.TotalCostUSD is computed locally from
 	// a pricing table rather than reported by the provider. Budget enforcement
 	// needs to know, because an estimated zero means "unknown model", not
