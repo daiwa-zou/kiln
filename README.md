@@ -6,7 +6,7 @@
 [![security](https://github.com/daiwa-zou/kiln/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/daiwa-zou/kiln/actions/workflows/security.yml)
 [![release](https://github.com/daiwa-zou/kiln/actions/workflows/release.yml/badge.svg)](https://github.com/daiwa-zou/kiln/releases)
 [![coverage](./.github/badges/coverage.svg)](https://github.com/daiwa-zou/kiln/actions/workflows/ci.yml)
-[![go](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
+[![go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
 
 *Raw material fired into something durable, and fired again as it changes.*
 
@@ -210,7 +210,7 @@ WCAG 2.2 AA; what that means here and what was measured is in
 
 ## Development
 
-Requires Go 1.25 and Postgres 16. The `claude` CLI is only needed when
+Requires Go 1.26 and Postgres 16. The `claude` CLI is only needed when
 `agent.runner = "cli"`; the default runner calls the Anthropic API directly.
 
 `make` with no arguments (or `make help`) prints every target grouped by where

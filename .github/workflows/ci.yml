@@ -13,12 +13,14 @@ concurrency:
 permissions:
   contents: read
 
-# The latest 1.25 patch, deliberately not `go-version-file: go.mod`: setup-go
-# installs the go directive literally, and 1.25.0 ships 22 reachable stdlib
-# CVEs (fixed in 1.25.2/1.25.3) that the security workflow rightly fails on.
-# This tracks go.mod's minor line -- bump both together.
+# The latest 1.26 patch, deliberately not `go-version-file: go.mod`: setup-go
+# installs the go directive literally, and a .0 release ships stdlib CVEs
+# fixed in later patches (1.25.0 had 22 reachable ones) that the security
+# workflow rightly fails on. This tracks go.mod's minor line -- bump both
+# together, along with security.yml, release.yml and the Dockerfile. GOTOOLCHAIN
+# is local, so a go.mod that moves alone fails every job before it compiles.
 env:
-  GO_VERSION: '1.25.x'
+  GO_VERSION: '1.26.x'
 
 jobs:
   # golangci-lint subsumes the old `go vet` and `gofmt` steps: govet is in the
