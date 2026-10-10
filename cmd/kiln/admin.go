@@ -297,7 +297,24 @@ implicitly on server boot; run this as a one-shot step before starting servers.`
 				return nil
 			}
 			fmt.Fprintf(out, "applied %d migration(s): %v\n", len(applied), applied)
-			fmt.Fprintf(out, "schema now at version %d\n", applied[len(applied)-1])
+			// A migration numbered below the previous maximum was owed from an
+			// earlier out-of-order landing; say so rather than let it pass as
+			// routine, and report the true maximum (the last one applied may be
+			// a back-filled version below it).
+			var late []int
+			for _, v := range applied {
+				if v < before {
+					late = append(late, v)
+				}
+			}
+			if len(late) > 0 {
+				fmt.Fprintf(out, "back-filled %d migration(s) below the previous version %d: %v\n", len(late), before, late)
+			}
+			after, err := store.CurrentVersion(ctx, db.Pool)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "schema now at version %d\n", after)
 			return nil
 		},
 	}
