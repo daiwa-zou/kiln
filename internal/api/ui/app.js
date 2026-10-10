@@ -2158,6 +2158,34 @@ function gapDetailHTML(r) {
     <div id="review-note" class="hint" role="status"></div>`;
 }
 
+// RESEARCH_FAILED_PREFIX is how internal/worker records a pass that broke: the
+// failure is stored in the same field as findings, behind this exact prefix.
+// Without it being recognised here, an engine error is rendered as if it were
+// the answer to the question.
+const RESEARCH_FAILED_PREFIX = "Research did not complete: ";
+
+// researchBlockHTML renders what a research pass left on a review: findings,
+// or -- when the pass failed -- a plain statement that nothing was learned,
+// with the raw cause one disclosure down for whoever needs to report it.
+const researchFailed = (r) => Boolean(r.research && r.research.startsWith(RESEARCH_FAILED_PREFIX));
+
+function researchBlockHTML(r) {
+  if (!r.research) return "";
+  if (researchFailed(r)) {
+    const cause = r.research.slice(RESEARCH_FAILED_PREFIX.length);
+    return `<div class="research-findings research-failed">
+      <div class="rf-label">Research failed · ${esc(relTime(r.researched))}</div>
+      <p class="rf-headline">Research didn't finish. The question is unchanged.</p>
+      <details class="rf-cause"><summary>What went wrong</summary>
+        <div class="detail mono">${esc(cause)}</div></details>
+    </div>`;
+  }
+  return `<div class="research-findings">
+      <div class="rf-label">Research findings · ${esc(relTime(r.researched))}</div>
+      <div class="detail">${esc(r.research)}</div>
+    </div>`;
+}
+
 function reviewDetailHTML(r) {
   if (!r) return `<div class="empty">Select a review to see it here.</div>`;
   if (r.gap) return gapDetailHTML(r);
@@ -2175,10 +2203,7 @@ function reviewDetailHTML(r) {
     </div>
     <h2>${esc(r.title)}</h2>
     <div class="detail">${esc(r.detail)}</div>
-    ${r.research ? `<div class="research-findings">
-      <div class="rf-label">Research findings · ${esc(relTime(r.researched))}</div>
-      <div class="detail">${esc(r.research)}</div>
-    </div>` : ""}
+    ${researchBlockHTML(r)}
     ${r.researching ? `<p class="hint" role="status">A worker is reading the sources
       for this question. Findings appear here when it finishes.</p>` : ""}
     ${r.status !== "open" ? "" : `<div class="action-bar">
@@ -2189,7 +2214,11 @@ function reviewDetailHTML(r) {
           data-key="${esc(spec.key)}">${esc(spec.label(r))}${spec.key ? `<kbd>${esc(spec.key)}</kbd>` : ""}</button>`;
       }).join("")}
       ${r.researchable && !r.researching
-        ? `<button class="btn quiet" data-research="${esc(r.id)}">Research</button>` : ""}
+        ? (researchFailed(r)
+          ? `<button class="btn quiet" data-research="${esc(r.id)}"
+              title="Starts a new research run. Like a build, it uses the model and is billed.">Try again</button>`
+          : `<button class="btn quiet" data-research="${esc(r.id)}">Research</button>`)
+        : ""}
       <span class="action-hint">↑↓ to move · shortcuts work anywhere on this screen</span>
     </div>`}
     <div id="review-note" class="hint" role="status"></div>`;
