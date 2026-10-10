@@ -159,7 +159,13 @@ the permissive `member`-writes default (members write content; owners shape
 connectors, credentials, and membership -- the split holds, but the default
 role granted on sign-in deserves a second look).
 
-## M9 — Make Builds Parallel
+## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); 1, 2, 5 open
+
+*Items 3 and 4 shipped together: `agent.unit_concurrency` drives the bounded
+pool in `internal/jobs/fanout.go`, and the run budget is a reservation taken
+before each call. Items 1, 2, and 5 have no code yet, and they are now the
+urgent ones — raising concurrency invites adding worker pods, which is
+exactly what the pooler gates and what multiplies the per-worker timers.*
 
 *Designed 2026-07-30 from a scaling review. The roles are already split and
 already scale independently; what does not scale is one bench. A run walks
@@ -249,12 +255,78 @@ page-read latency on the reader pods; a webhook storm against one
 installation does not 429 another's; queue depth drives worker replicas up
 from zero and back down without evicting an in-flight build.
 
+## M11 — The Edges Catch Up
+
+*Designed 2026-10-10 from a codebase review. The build engine is the
+strongest part of kiln; what lags is around it — nobody is told when the
+wiki needs them, agents can read but not report, and a regenerated page
+erases its own past. Starts once M9's remaining items land (item 5 hosts
+item 2 below); it comes ahead of M10, which waits for read traffic to ask
+for it.*
+
+1. **Default sign-in role is configurable** — `auth/pg.go` inserts the
+   sign-in membership with the column default, `member`, which writes
+   content and steering. Add `auth.default_role` (`viewer` | `member`),
+   defaulting to `member` so upgrades change nothing; hosted deployments
+   set `viewer`. Closes the M8 open question without deciding it for
+   everyone.
+2. **Digests** — the `digests` table (`001_initial.sql`: channel, target,
+   cadence, enabled, last_sent_at) has had no reader or writer since M0.
+   The scheduler role sends, per enabled row, what changed since
+   `last_sent_at`: new review items, failed or partial runs, budget
+   warnings. Channels: an SMTP sender and a Slack-compatible incoming
+   webhook. Delivery targets are owner-set and pass `netguard` like any
+   other outbound URL. An outbound `run.finished` webhook rides the same
+   plumbing.
+3. **MCP write tools** — all seven tools read. Add, behind the `write`
+   scope: `request_gap` (the existing `POST …/gaps/{slug}/request`),
+   `file_question` (a review item of kind `uncertain` or `contradiction`,
+   naming a page), and `propose_correction` (files a review item carrying
+   the proposed text; a human promotes it to a pinned correction).
+   Nothing an agent sends changes a page directly — deletion and
+   correction stay questions for a human (principle 3).
+4. **Page revisions** — `WikiStore.Import` overwrites a page in place, so
+   history exists only where a publish target mirrors it to git. Write a
+   `page_revisions` row inside the same `Import` transaction (previous
+   body, run id, the run's `ref_to`), show a diff in the reader, and let
+   the GC sweep enforce a retention window. The hash gate means unchanged
+   pages write no revision.
+5. **Search, step two** — the `pg_trgm` fallback from
+   [storage-and-retrieval.md](docs/storage-and-retrieval.md) (option B) for
+   queries the OR+rank pass leaves empty, and an alert on the
+   `kiln_searches_total{outcome="empty"}` rate whose threshold is written
+   down as the pgvector trigger.
+6. **Dry run over the API** — the pipeline already plans and estimates
+   without spending (`kiln build --dry-run`). Expose it as
+   `POST …/runs?dry_run=1` and show the plan and estimate behind Build
+   now, so a large first build is never a surprise.
+7. **Web change detection, the cheap half** — the web connector fetches
+   exactly the URLs it is given. Send `If-None-Match` / `If-Modified-Since`
+   from the last fetch, and discover URLs from a `sitemap.xml` under an
+   explicit page cap, both inside the existing SSRF posture.
+
+**Verification:** with `auth.default_role = "viewer"`, a fresh sign-in can
+read but every write answers 403; a review item filed after a digest's
+`last_sent_at` appears in exactly one digest and a disabled row sends
+nothing; a digest target resolving to a private address is refused; an MCP
+`propose_correction` under a read-scoped token is refused, and under a
+write-scoped token creates a review item while the page body is unchanged;
+a run that regenerates one page writes exactly one revision and a no-change
+run writes none; a misspelled keyword (`kubernets`) finds its page; a dry
+run over the API creates no `runs` row and no ledger entry; a web source
+answering `304` makes no extraction and plans no unit.
+
 ## Deferred decisions
 
 | Item | Trigger to revisit |
 | --- | --- |
 | Framework frontend | SaaS onboarding flows (M8) making server-driven UI painful |
 | `workspaces.model` / per-bench model override | First user who needs Opus on one bench and Sonnet on the rest |
-| Incremental doc/web change detection | A docs source large enough that full re-extraction is the slow step |
+| Incremental doc/web change detection | A docs source large enough that full re-extraction is the slow step (the web half's cheap part is M11 item 7) |
+| pgvector hybrid search | The empty-search rate crossing the threshold M11 item 5 writes down. Plan in [storage-and-retrieval.md](docs/storage-and-retrieval.md), step 3 |
+| OIDC sign-in beside GitHub | A deployment whose members are not on GitHub — likely a documents-only team. Reuses the session and CSRF machinery |
+| SaaS document connectors (Confluence, Notion, Google Drive) | A named user asking for one; build that one first |
+| GitLab / Bitbucket webhooks | A git source hosted there that polling makes too stale |
+| Agent-filed `query` pages | MCP write tools (M11 item 3) in use, and a way to tell a good answer from a plausible one |
 | External broker for the run queue | Postgres queue contention that `SKIP LOCKED` and workload classes cannot absorb. Costs the transactional debounce and exactly-once claim, so the contention has to be measured first |
 | Per-domain services with their own datastores | A domain whose write volume genuinely cannot share Postgres. Costs the atomic `Import` — pages, sources, index, overview, and log in one transaction — which is what makes navigation unable to drift |
