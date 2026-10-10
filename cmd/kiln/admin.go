@@ -186,12 +186,13 @@ reading UI when prompted.`,
 			}
 			defer db.Close()
 
-			plain, err := auth.Mint(ctx, db.Pool, auth.MintRequest{
+			plain, member, err := auth.MintWithMembership(ctx, db.Pool, auth.MintRequest{
 				Login:  login,
 				Org:    org,
 				Name:   name,
 				Scopes: splitScopes(scopes),
 				Admin:  admin,
+				Role:   cfg.Auth.DefaultRole,
 				TTL:    ttl,
 			})
 			if err != nil {
@@ -201,11 +202,14 @@ reading UI when prompted.`,
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "%s\n", plain)
 			fmt.Fprintln(cmd.ErrOrStderr(), "shown once; store it now -- only its hash is kept")
+			if note := membershipNote(member); note != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), note)
+			}
 			return nil
 		},
 	}
 	create.Flags().StringVar(&login, "login", "", "user login the token belongs to (required)")
-	create.Flags().StringVar(&org, "org", "local", "org to grant membership in (empty to skip)")
+	create.Flags().StringVar(&org, "org", "local", "org to grant membership in, with the auth.default_role role; an existing membership keeps its role (empty to skip)")
 	create.Flags().StringVar(&name, "name", "default", "token name, for identification and revocation")
 	create.Flags().StringVar(&scopes, "scopes", "read", "comma-separated scopes")
 	create.Flags().BoolVar(&admin, "admin", false, "grant the user admin (visibility into every org)")
@@ -257,6 +261,20 @@ func splitScopes(s string) []string {
 		}
 	}
 	return out
+}
+
+// membershipNote tells the operator which role the token's owner holds.
+// auth.default_role only reaches a new membership, so an existing one is
+// called out: otherwise setting viewer and re-minting looks like it worked.
+func membershipNote(m auth.Membership) string {
+	switch {
+	case m.Org == "":
+		return ""
+	case m.Created:
+		return fmt.Sprintf("membership in %s as %s", m.Org, m.Role)
+	default:
+		return fmt.Sprintf("already a member of %s as %s; existing role kept (auth.default_role applies only to new memberships)", m.Org, m.Role)
+	}
 }
 
 func newMigrateCmd(g *globalFlags) *cobra.Command {

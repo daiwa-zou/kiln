@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/daiwa-zou/kiln/internal/store"
@@ -134,6 +135,102 @@ func TestMintValidation(t *testing.T) {
 
 	if _, err := Mint(context.Background(), pool, MintRequest{}); err == nil {
 		t.Error("mint without a login succeeded; a token must belong to someone")
+	}
+}
+
+// memberRole reads the role Mint left for login in org, or "" when there is
+// no membership.
+func memberRole(t *testing.T, pool *pgxpool.Pool, login, org string) string {
+	t.Helper()
+	var role string
+	err := pool.QueryRow(context.Background(), `
+		SELECT m.role FROM org_members m
+		JOIN users u ON u.id = m.user_id
+		JOIN orgs o ON o.id = m.org_id
+		WHERE u.login = $1 AND o.slug = $2`, login, org).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return role
+}
+
+// auth.default_role reaches the membership row: a viewer minted with --org
+// is a viewer, not the column default.
+func TestMintHonoursTheRequestedRole(t *testing.T) {
+	pool := pgPool(t)
+
+	_, m, err := MintWithMembership(context.Background(), pool, MintRequest{Login: "ada", Org: "acme", Role: "viewer"})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if got := memberRole(t, pool, "ada", "acme"); got != "viewer" {
+		t.Errorf("role = %q, want viewer", got)
+	}
+	// What the CLI prints must be what was written.
+	if m != (Membership{Org: "acme", Role: "viewer", Created: true}) {
+		t.Errorf("reported membership = %+v, want a new acme viewer", m)
+	}
+}
+
+func TestMintDefaultsToMember(t *testing.T) {
+	pool := pgPool(t)
+
+	if _, err := Mint(context.Background(), pool, MintRequest{Login: "ada", Org: "acme"}); err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if got := memberRole(t, pool, "ada", "acme"); got != "member" {
+		t.Errorf("role = %q with no Role set, want member", got)
+	}
+}
+
+// The one path that creates memberships without an owner granting them must
+// never create an owner, and refusing must leave nothing half-written.
+func TestMintRejectsOwner(t *testing.T) {
+	pool := pgPool(t)
+	ctx := context.Background()
+
+	if _, err := Mint(ctx, pool, MintRequest{Login: "ada", Org: "acme", Role: "owner"}); err == nil {
+		t.Fatal("Mint with role owner succeeded")
+	}
+	for _, table := range []string{"users", "orgs", "org_members", "tokens"} {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("%s has %d rows after a refused mint, want 0", table, n)
+		}
+	}
+}
+
+// Re-minting under default_role=viewer must not demote someone an owner
+// already made a member: the setting is for new memberships only.
+func TestMintDoesNotDemoteAnExistingMember(t *testing.T) {
+	pool := pgPool(t)
+	ctx := context.Background()
+
+	if _, err := Mint(ctx, pool, MintRequest{Login: "ada", Org: "acme", Role: "member"}); err != nil {
+		t.Fatalf("first Mint: %v", err)
+	}
+	_, m, err := MintWithMembership(ctx, pool, MintRequest{Login: "ada", Org: "acme", Name: "second", Role: "viewer"})
+	if err != nil {
+		t.Fatalf("second Mint: %v", err)
+	}
+	if got := memberRole(t, pool, "ada", "acme"); got != "member" {
+		t.Errorf("role = %q after a viewer re-mint, want member (unchanged)", got)
+	}
+	// The report names the role kept, not the one asked for, so the operator
+	// is not told a viewer exists when it does not.
+	if m != (Membership{Org: "acme", Role: "member", Created: false}) {
+		t.Errorf("reported membership = %+v, want the existing acme member", m)
+	}
+
+	// No org, no membership to report.
+	if _, m, err := MintWithMembership(ctx, pool, MintRequest{Login: "ada", Name: "third"}); err != nil || m != (Membership{}) {
+		t.Errorf("mint without an org reported %+v (err %v), want none", m, err)
 	}
 }
 

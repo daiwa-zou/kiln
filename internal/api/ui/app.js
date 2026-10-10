@@ -528,10 +528,16 @@ const api = async (path, opts = {}) => {
       const j = await res.json();
       if (j.error) msg = j.error;
     } catch { /* not JSON; keep the status line */ }
+    // A viewer's write refusal is policy, not a fault: say what it means and
+    // who can change it. Matched on the server's exact wording (errRoleReadOnly
+    // in write.go), so any other 403 keeps its own message.
+    const forbidden = res.status === 403 && msg === "workspace role does not permit writes";
+    if (forbidden) msg = "You have read-only access to this bench. Ask an owner to change your role.";
     // The status rides along so a caller can tell "not there" from "could
     // not ask": a missing page offers a way on, a failed fetch offers Reload.
     const err = new Error(msg);
     err.status = res.status;
+    if (forbidden) err.forbidden = true;
     throw err;
   }
 

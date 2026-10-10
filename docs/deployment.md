@@ -60,6 +60,7 @@ most `kubectl describe` output.
 | `KILN_MASTER_KEY` | yes | 32 random bytes (`openssl rand -hex 32`). Seals connector credentials. Rotate with `kiln admin rotate-key`. |
 | `KILN_ANTHROPIC_API_KEY` | yes | Spent by generation. |
 | `KILN_AUTH_MODE` | yes | `token` in any deployment. `none` makes every caller an admin and kiln refuses it on a non-loopback bind. |
+| `KILN_AUTH_DEFAULT_ROLE` | no | `member` (default) or `viewer`. The role `kiln admin token create --org` gives a membership it creates; set it where that command runs. Existing memberships keep their role, and `--admin` tokens bypass it. |
 | `KILN_STORAGE_BACKEND` | yes | `s3` or `fs`. |
 | `KILN_STORAGE_BUCKET` / `_ENDPOINT` / `_ACCESS_KEY` / `_SECRET_KEY` | for s3 | Omit the keys to use the instance role / IRSA / workload identity chain. |
 | `KILN_PUBLIC_URL` | recommended | External URL, for OAuth callbacks and links. |
