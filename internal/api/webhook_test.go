@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -252,6 +253,119 @@ func TestWebhookConfiguredBranchOverridesTheDefault(t *testing.T) {
 	}
 	if len(hooks.enqueued) != 2 || hooks.enqueued[1] != "ws-release/webhook" {
 		t.Errorf("push to release/1.x enqueued %v, want ws-release added", hooks.enqueued)
+	}
+}
+
+func repoPush(repo string) []byte {
+	return []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"` + repo + `","default_branch":"main"}}`)
+}
+
+// Behind an ingress every delivery shares one peer address. Keying the limiter
+// on it would let a few repositories starve all the others of builds, and
+// GitHub never redelivers a 429.
+func TestWebhookRateLimitIsPerRepositoryNotPerPeer(t *testing.T) {
+	hooks := newFakeHooks()
+	srv := hookServer(t, hooks, 0)
+
+	for i := range 30 {
+		repo := "acme/repo-" + strconv.Itoa(i)
+		if code := deliver(t, srv, "push", repoPush(repo), true); code != http.StatusAccepted {
+			t.Fatalf("signed delivery %d for %s = %d, want 202: one peer address must not share a bucket across repositories", i, repo, code)
+		}
+	}
+}
+
+func TestWebhookRateLimitBoundsOneRepository(t *testing.T) {
+	hooks := newFakeHooks()
+	srv := hookServer(t, hooks, 0)
+
+	var accepted, limited int
+	for range 40 {
+		switch code := deliver(t, srv, "push", repoPush("acme/noisy"), true); code {
+		case http.StatusAccepted:
+			accepted++
+		case http.StatusTooManyRequests:
+			limited++
+		default:
+			t.Fatalf("delivery = %d", code)
+		}
+	}
+	if limited == 0 || accepted > writeBurst+1 {
+		t.Errorf("accepted=%d limited=%d: one repository was not bounded to its burst", accepted, limited)
+	}
+
+	// Its neighbour on the same peer address is untouched.
+	if code := deliver(t, srv, "push", repoPush("acme/quiet"), true); code != http.StatusAccepted {
+		t.Errorf("a quiet repository was limited by its noisy neighbour: %d", code)
+	}
+	// The bucket is per repository however the name is cased.
+	if code := deliver(t, srv, "push", repoPush("ACME/Noisy"), true); code != http.StatusTooManyRequests {
+		t.Errorf("case variant of the noisy repository = %d, want 429", code)
+	}
+}
+
+func TestWebhookUnsignedFloodIsLimitedByPeerAndCannotBlockSignedPushes(t *testing.T) {
+	hooks := newFakeHooks()
+	srv := hookServer(t, hooks, 0)
+
+	post := func(sign bool, forwardedFor string) int {
+		body := repoPush("acme/repo")
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/hooks/github", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-GitHub-Event", "push")
+		// Whatever the sender writes here must not buy it a fresh bucket.
+		req.Header.Set("X-Forwarded-For", forwardedFor)
+		if sign {
+			mac := hmac.New(sha256.New, []byte(hookSecret))
+			mac.Write(body)
+			req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+
+	var unauthorized, limited int
+	for i := range 40 {
+		switch code := post(false, "203.0.113."+strconv.Itoa(i)); code {
+		case http.StatusUnauthorized:
+			unauthorized++
+		case http.StatusTooManyRequests:
+			limited++
+		default:
+			t.Fatalf("unsigned delivery = %d", code)
+		}
+	}
+	if limited == 0 || unauthorized > writeBurst+1 {
+		t.Errorf("unauthorized=%d limited=%d: an unsigned flood was not bounded", unauthorized, limited)
+	}
+
+	// With the peer's reject bucket drained, a real push from the very same
+	// address still goes through.
+	if code := post(true, "198.51.100.1"); code != http.StatusAccepted {
+		t.Errorf("signed delivery after an unsigned flood = %d, want 202", code)
+	}
+}
+
+func TestHookSubject(t *testing.T) {
+	cases := []struct {
+		event, body, want string
+	}{
+		{"push", `{"repository":{"full_name":"Acme/Repo"}}`, "repo:acme/repo"},
+		{"installation", `{"installation":{"id":901}}`, "installation:901"},
+		{"push", `{"repository":{"full_name":"a/b"},"installation":{"id":1}}`, "repo:a/b"},
+		{"ping", `{"zen":"x"}`, "event:ping"},
+		{"ping", `not json`, "event:ping"},
+	}
+	for _, tc := range cases {
+		if got := hookSubject(tc.event, []byte(tc.body)); got != tc.want {
+			t.Errorf("hookSubject(%q, %s) = %q, want %q", tc.event, tc.body, got, tc.want)
+		}
 	}
 }
 

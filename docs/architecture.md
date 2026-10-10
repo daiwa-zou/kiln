@@ -941,7 +941,12 @@ Browser sessions act with the user's full authority; scopes exist to narrow
 *automation* tokens. Sessions are server-side rows, so a stolen cookie is
 revocable.
 
-**Rate limiting** applies to write routes. **Uploads** get a 5-minute timeout
+**Rate limiting** applies to write routes. The **webhook** is limited per
+repository (or App installation), taken from the payload only *after* its HMAC
+verified, because behind an ingress every delivery shares the proxy's address
+and GitHub never redelivers a 429. Deliveries that fail verification are limited
+by peer address instead (never `X-Forwarded-For`), and signed ones never touch
+that bucket. **Uploads** get a 5-minute timeout
 instead of the API-wide 30 seconds, and accept up to 32 MiB per file — a reverse
 proxy in front of kiln needs its body limit raised to match (nginx:
 `client_max_body_size 34m`).
