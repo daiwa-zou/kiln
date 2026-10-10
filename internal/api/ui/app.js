@@ -2483,6 +2483,7 @@ async function showGraph() {
       <h1 class="sr-only">Graph</h1>
       <div id="graph-wrap">
         <div class="graph-toolbar">
+          <div class="graph-bar">
           <div class="graph-search">
             <div class="graph-search-field" id="graph-search-field">
               <svg class="graph-search-glyph" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M6.9 1.4a5.5 5.5 0 1 0 3.3 9.9l3.1 3.1 1.3-1.3-3.1-3.1a5.5 5.5 0 0 0-4.6-8.6zm0 1.9a3.6 3.6 0 1 1 0 7.2 3.6 3.6 0 0 1 0-7.2z"/></svg>
@@ -2521,11 +2522,13 @@ async function showGraph() {
             <button id="graph-reset" aria-label="Reset view" title="Reset view">${iconReset}</button>
             <button id="graph-full" aria-label="Full screen" title="Full screen">${iconMax}</button>
           </div>
+          </div>
+          <!-- Says why the canvas is dimmed once the panel is closed, so a
+               filtered graph is never a mystery. It sits under the bar, in the
+               toolbar's own flow, so a bar that wraps pushes it down. -->
+          <div class="graph-pill" id="graph-pill" hidden></div>
         </div>
         <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>
-        <!-- Says why the canvas is dimmed once the panel is closed, so a
-             filtered graph is never a mystery. -->
-        <div class="graph-pill" id="graph-pill" hidden></div>
         <!-- A query that matches nothing greys the graph rather than emptying
              it: an empty rectangle reads as a broken view, and the thing the
              reader wants back is still there behind this. -->
