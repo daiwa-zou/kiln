@@ -137,6 +137,11 @@ func (s *WikiStore) LoadPageSummaries(ctx context.Context, workspaceID string, l
 		if err := rows.Scan(&p.Path, &p.Slug, &p.Type, &p.Title, &fm); err != nil {
 			return nil, fmt.Errorf("store: scan page summary: %w", err)
 		}
+		// A summary listing is best-effort: a page whose frontmatter will not
+		// decode is still listed, just without its tags and dates. Failing here
+		// would let one bad row take down the whole page tree, and LoadPage,
+		// which the reader opens next, is where the error is surfaced. The
+		// leniency is intentional.
 		if len(fm) > 0 {
 			var meta wiki.Frontmatter
 			if err := json.Unmarshal(fm, &meta); err == nil {
@@ -151,33 +156,17 @@ func (s *WikiStore) LoadPageSummaries(ctx context.Context, workspaceID string, l
 // LoadPage returns one live page with its body, addressable by path or slug: a
 // wikilink carries a slug, the tree carries a path, and both must resolve.
 func (s *WikiStore) LoadPage(ctx context.Context, workspaceID, ref string) (wiki.Page, error) {
-	var (
-		p        wiki.Page
-		pageType string
-		fm       []byte
-	)
-	err := s.pool.QueryRow(ctx, `
+	p, err := scanPage(s.pool.QueryRow(ctx, `
 		SELECT p.path, p.slug, p.type, p.title, p.frontmatter, p.body
 		FROM pages p
 		JOIN wikis w ON w.id = p.wiki_id
 		WHERE w.workspace_id = $1 AND p.deleted_at IS NULL
 		  AND (p.path = $2 OR p.slug = $2)
-		LIMIT 1`, workspaceID, ref).
-		Scan(&p.Path, &p.Slug, &pageType, &p.Meta.Title, &fm, &p.Body)
+		LIMIT 1`, workspaceID, ref))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return wiki.Page{}, ErrNotFound
 	}
-	if err != nil {
-		return wiki.Page{}, fmt.Errorf("store: load page: %w", err)
-	}
-
-	p.Meta.Type = wiki.PageType(pageType)
-	if len(fm) > 0 {
-		if err := json.Unmarshal(fm, &p.Meta); err != nil {
-			return wiki.Page{}, fmt.Errorf("store: decode frontmatter for %s: %w", p.Path, err)
-		}
-	}
-	return p, nil
+	return p, err
 }
 
 // Search runs weighted full-text search over live pages.

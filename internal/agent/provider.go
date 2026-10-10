@@ -65,6 +65,11 @@ type Options struct {
 // Settings is untyped provider configuration with checked accessors, matching
 // connector.Config. Untyped because the set of keys is open by construction:
 // the whole point is that kiln does not know what a provider needs.
+//
+// The accessors are extension API for providers registered outside this
+// repository: kiln's own providers read their configuration from Options, so
+// some of them (String, RequireString, Bool) have no caller here. They are
+// kept, and covered by settings_test.go, for that reason.
 type Settings map[string]any
 
 // String reads a string setting.
@@ -173,9 +178,9 @@ type Capabilities struct {
 	EstimatesCost bool
 }
 
-// A CapableRunner states its own capabilities. Optional: a runner that does not
-// implement it is described by the built-in fallbacks in WritesFiles and
-// EstimatesCost, so existing runners and test fakes keep working unchanged.
+// A CapableRunner states its own capabilities. Optional: WritesFiles and
+// EstimatesCost report false for a runner that does not implement it, so test
+// fakes keep working unchanged. Both built-in runners implement it.
 type CapableRunner interface {
 	Runner
 	Capabilities() Capabilities

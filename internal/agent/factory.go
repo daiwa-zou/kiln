@@ -93,29 +93,36 @@ func settingsFrom(cfg *config.Config) Settings {
 	return s
 }
 
+// WritesFiles and EstimatesCost no longer recognise the built-ins by type, so
+// losing Capabilities on either would silently change pipeline behaviour.
+var (
+	_ CapableRunner = (*ClaudeRunner)(nil)
+	_ CapableRunner = (*APIRunner)(nil)
+)
+
 // WritesFiles reports whether a runner produces pages on disk rather than as
 // structured data. The pipeline uses this to decide whether it needs a scratch
 // directory at all -- the API runner needs none, which is most of why it exists.
 //
-// A runner that states its own capabilities is believed. The type checks below
-// are the fallback for those that do not, which keeps every existing fake in
-// the test suite working without implementing an interface to say "no".
+// A runner that states its own capabilities is believed, and both built-in
+// runners do. One that does not implement CapableRunner -- the test fakes, which
+// should not need a method to say "nothing special" -- writes no files.
 func WritesFiles(r Runner) bool {
 	if c, ok := r.(CapableRunner); ok {
 		return c.Capabilities().WritesFiles
 	}
-	_, isCLI := r.(*ClaudeRunner)
-	return isCLI
+	return false
 }
 
 // EstimatesCost reports whether a runner's TotalCostUSD comes from a local
 // pricing table rather than being reported authoritatively by the provider.
 // Budget enforcement needs to know: an estimated cost of zero means "unknown
 // model", not "free".
+//
+// A runner that does not implement CapableRunner is taken at its word on cost.
 func EstimatesCost(r Runner) bool {
 	if c, ok := r.(CapableRunner); ok {
 		return c.Capabilities().EstimatesCost
 	}
-	_, isAPI := r.(*APIRunner)
-	return isAPI
+	return false
 }

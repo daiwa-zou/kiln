@@ -35,7 +35,6 @@ type Metrics struct {
 	runDuration  *prometheus.HistogramVec
 	runCost      prometheus.Counter
 	staleRuns    prometheus.Counter
-	unitsBuilt   *prometheus.CounterVec
 	pagesWritten *prometheus.CounterVec
 	activeRuns   prometheus.Gauge
 
@@ -105,11 +104,6 @@ func NewMetrics() *Metrics {
 			Help: "Running builds returned to the queue because their worker stopped heartbeating. Anything above the occasional dead pod means workers are losing their claims, and builds are being paid for twice.",
 		}),
 
-		unitsBuilt: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kiln_units_total",
-			Help: "Units the pipeline resolved, by outcome. Units gated by the content hash are 'unchanged' and cost nothing.",
-		}, []string{"outcome"}),
-
 		pagesWritten: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kiln_pages_total",
 			Help: "Wiki pages by what happened to them.",
@@ -134,7 +128,7 @@ func NewMetrics() *Metrics {
 	reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.httpInFlight,
 		m.runsStarted, m.runsFinished, m.runDuration, m.runCost, m.staleRuns,
-		m.unitsBuilt, m.pagesWritten, m.activeRuns, m.queueDepth, m.searches,
+		m.pagesWritten, m.activeRuns, m.queueDepth, m.searches,
 		// Go runtime and process collectors: the questions "is it leaking"
 		// and "is it being throttled" are asked of every service, and
 		// answering them here costs nothing.
@@ -200,13 +194,6 @@ func (m *Metrics) StaleRequeued(n int) {
 	if n > 0 {
 		m.staleRuns.Add(float64(n))
 	}
-}
-
-// UnitObserved records one unit's outcome. "unchanged" is the interesting one:
-// it is the content-hash gate working, and the ratio of unchanged to generated
-// is what tells an operator whether incremental builds are actually paying off.
-func (m *Metrics) UnitObserved(outcome string) {
-	m.unitsBuilt.WithLabelValues(orUnknown(outcome)).Inc()
 }
 
 // SetQueueDepth publishes the sampled queue. Statuses absent from the sample

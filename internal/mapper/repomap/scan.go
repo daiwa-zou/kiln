@@ -257,7 +257,7 @@ func (s *Scanner) buildModule(root string, m manifest, files []FileRec, taken ma
 	if m.dir == "." {
 		base = RootModuleSlug
 	}
-	mod.Slug = uniqueSlug(taken, base)
+	mod.Slug = mapper.UniqueSlug(taken, base)
 
 	for _, f := range files {
 		mod.FileCount++
@@ -323,7 +323,7 @@ func (s *Scanner) subPartition(parent Module, files []FileRec, taken map[string]
 			Dir:       dir,
 			Kind:      parent.Kind,
 			Parent:    parent.Slug,
-			Slug:      uniqueSlug(taken, Slugify(dir)),
+			Slug:      mapper.UniqueSlug(taken, Slugify(dir)),
 			FileCount: len(group),
 			Hash:      hashFiles(group),
 		}

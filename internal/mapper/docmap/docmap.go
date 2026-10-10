@@ -128,7 +128,7 @@ func (m *Mapper) unitsFor(root string, doc Doc, taken map[string]bool) ([]mapper
 	whole := mapper.Unit{
 		Key:    doc.Key,
 		Kind:   "doc",
-		Slug:   uniqueSlug(taken, slugify(strings.TrimSuffix(doc.Path, path.Ext(doc.Path)))),
+		Slug:   mapper.UniqueSlug(taken, slugify(strings.TrimSuffix(doc.Path, path.Ext(doc.Path)))),
 		Title:  title,
 		Inputs: []string{doc.Path},
 		Hash:   doc.Hash,
@@ -149,7 +149,7 @@ func (m *Mapper) unitsFor(root string, doc Doc, taken map[string]bool) ([]mapper
 		units = append(units, mapper.Unit{
 			Key:   doc.Key + "#" + slugify(s.Title),
 			Kind:  "doc-section",
-			Slug:  uniqueSlug(taken, slugify(title+"-"+s.Title)),
+			Slug:  mapper.UniqueSlug(taken, slugify(title+"-"+s.Title)),
 			Title: s.Title,
 			// The section's own text, not its parent document. Prompt assembly
 			// reads inputs from the top and stops at a per-file cap, so
@@ -264,34 +264,11 @@ func (m *Mapper) now() time.Time {
 	return time.Now().UTC()
 }
 
-var (
-	nonSlug      = regexp.MustCompile(`[^a-z0-9]+`)
-	dashCollapse = regexp.MustCompile(`-{2,}`)
-)
-
+// slugify is mapper.Slugify with docmap's fallback: a document whose name has
+// no ASCII letters or digits still needs a slug. The algorithm is shared so the
+// mappers cannot drift on page identity.
 func slugify(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = nonSlug.ReplaceAllString(s, "-")
-	s = dashCollapse.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		return "document"
-	}
-	return s
-}
-
-func uniqueSlug(taken map[string]bool, base string) string {
-	if !taken[base] {
-		taken[base] = true
-		return base
-	}
-	for i := 2; ; i++ {
-		candidate := fmt.Sprintf("%s-%d", base, i)
-		if !taken[candidate] {
-			taken[candidate] = true
-			return candidate
-		}
-	}
+	return mapper.Slugify(s, "document")
 }
 
 // fileSlug is slugify bounded for use in a file name: a heading can be a whole

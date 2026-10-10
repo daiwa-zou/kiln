@@ -129,9 +129,8 @@ func TestUnknownLabelsAreNamed(t *testing.T) {
 	// the dashboard rather than a gap in the data.
 	m := NewMetrics()
 	m.RunStarted("")
-	m.UnitObserved("")
 	body := scrape(t, m)
-	if !strings.Contains(body, `trigger="unknown"`) || !strings.Contains(body, `outcome="unknown"`) {
+	if !strings.Contains(body, `trigger="unknown"`) {
 		t.Error("empty labels were not normalized to unknown")
 	}
 }

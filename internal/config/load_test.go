@@ -122,6 +122,27 @@ func TestLoadFileOverriddenByEnv(t *testing.T) {
 	}
 }
 
+// github.app_slug was removed because nothing read it. Configs written while
+// it existed must keep loading, from the file and from the environment.
+func TestLoadIgnoresRetiredAppSlug(t *testing.T) {
+	isolateEnv(t)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "[github]\napp_id = 42\napp_slug = \"my-app\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KILN_GITHUB_APP_SLUG", "my-app")
+
+	cfg, err := Load(Options{File: path})
+	if err != nil {
+		t.Fatalf("Load with retired app_slug: %v", err)
+	}
+	if cfg.GitHub.AppID != 42 {
+		t.Errorf("AppID = %d, want 42", cfg.GitHub.AppID)
+	}
+}
+
 func TestLoadExplicitMissingFileIsAnError(t *testing.T) {
 	isolateEnv(t)
 

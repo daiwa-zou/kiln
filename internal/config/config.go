@@ -67,8 +67,6 @@ type GitHub struct {
 	ClientID string `mapstructure:"client_id"`
 	// AppID is the numeric App id, for installation tokens.
 	AppID int64 `mapstructure:"app_id"`
-	// AppSlug names the App's public install page.
-	AppSlug string `mapstructure:"app_slug"`
 	// BaseURL and APIBaseURL override github.com, for GitHub Enterprise and
 	// for tests.
 	BaseURL    string `mapstructure:"base_url"`
@@ -197,9 +195,10 @@ const (
 // Agent holds settings for reaching the model.
 type Agent struct {
 	// Runner names the registered provider. Defaults to the API. Not an
-	// exhaustive enum: the constants below are the providers kiln ships, and
-	// validation checks membership in the registry so a fork that registers
-	// its own needs no change here.
+	// exhaustive enum: the constants above are the providers kiln ships, and
+	// validation deliberately does not check membership in the registry (this
+	// package cannot import it), so a fork that registers its own needs no
+	// change here. An unknown name fails when the runner is built, at startup.
 	Runner AgentRunner `mapstructure:"runner"`
 	// Settings is provider-specific configuration, passed through untouched to
 	// whichever provider Runner selects. It exists so that adding a provider

@@ -127,10 +127,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: KILN_GITHUB_APP_ID
   value: {{ . | quote }}
 {{- end }}
-{{- with .Values.config.github.appSlug }}
-- name: KILN_GITHUB_APP_SLUG
-  value: {{ . | quote }}
-{{- end }}
 {{- end -}}
 
 {{/* Secrets are referenced, never inlined into the pod spec: optional: true

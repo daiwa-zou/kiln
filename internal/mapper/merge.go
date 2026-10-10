@@ -49,8 +49,8 @@ func Merge(root string, maps ...*WorkspaceMap) (*WorkspaceMap, error) {
 		if m.Kind != "" && !slices.Contains(kinds, m.Kind) {
 			kinds = append(kinds, m.Kind)
 		}
-		// The newest generation time wins, so a merged map is never reported as
-		// fresher than its stalest half.
+		// The newest generation time wins: the merged map is as fresh as its
+		// freshest part.
 		if m.GeneratedAt.After(out.GeneratedAt) {
 			out.GeneratedAt = m.GeneratedAt
 		}
