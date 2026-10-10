@@ -87,8 +87,16 @@ func TestEnsureRefFetchesACommitDeepeningCannotReach(t *testing.T) {
 	}
 
 	// A 7-character abbreviation is exactly what runs used to store: no server
-	// resolves one, so it cannot be fetched.
-	if EnsureRef(ctx, clone, "", side[:7]+"0") {
+	// resolves one, so it cannot be fetched. The eighth character is chosen to
+	// differ from side's: appending a fixed "0" was a real prefix of side
+	// whenever its eighth character happened to be 0 (1 commit in 16, and
+	// every rerun within the same second, since those commit identical
+	// content at an identical time), and side is local by now.
+	unknown := side[:7] + "0"
+	if side[7] == '0' {
+		unknown = side[:7] + "1"
+	}
+	if EnsureRef(ctx, clone, "", unknown) {
 		t.Error("an abbreviated, unknown SHA was reported resolvable")
 	}
 }
