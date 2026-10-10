@@ -171,7 +171,7 @@ The knobs worth knowing before anything else:
 | `agent.max_pages_per_run` | `12` | Caps one run; the remainder is deferred to a follow-up. |
 | `agent.unit_concurrency` | `1` | Raise it to build a large bench in minutes rather than hours. |
 | `agent.runner` | `api` | Names a registered model provider; `fake` runs the whole pipeline with zero spend. Adding one is a registration, not a fork — see [docs/architecture.md](docs/architecture.md). |
-| `auth.mode` | `token` | `none` is refused on any non-loopback bind. |
+| `auth.mode` | `token` | `none` is refused on any non-loopback bind. With `none`, the API also refuses a `Host` that is not loopback or the `public_url` host, and any `POST` not sent as `application/json`. |
 | `worker.permitted_source_roots` | *(empty)* | Allowlist for local-path sources. Empty denies every one. |
 
 Every key, with defaults, is in
@@ -332,7 +332,8 @@ the API:
 curl -X POST localhost:8080/api/v1/workspaces/kiln/connectors \
   -H 'Content-Type: application/json' \
   -d '{"kind":"git","name":"local","config":{"path":"'$PWD'"}}'
-curl -X POST localhost:8080/api/v1/workspaces/kiln/runs
+curl -X POST localhost:8080/api/v1/workspaces/kiln/runs \
+  -H 'Content-Type: application/json' -d '{}'
 ```
 
 then watch it on the Runs view, which reports the plan as it executes — how many

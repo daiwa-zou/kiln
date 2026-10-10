@@ -100,6 +100,7 @@ func upload(t *testing.T, srv *httptest.Server, workspace, token, relPath, fileN
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-Requested-With", "kiln-ui")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -187,6 +188,7 @@ func TestFileUploadValidation(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/workspaces/demo/files",
 		strings.NewReader("--x--"))
 	req.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	req.Header.Set("X-Requested-With", "kiln-ui")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

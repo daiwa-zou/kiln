@@ -192,6 +192,11 @@ func (s *Server) Router() http.Handler {
 		// that panicked as a success.
 		r.Use(metricsMiddleware(s.Metrics))
 	}
+	if s.Auth == nil {
+		// Nothing else stands between a web page the operator visits and an
+		// admin-capable API on loopback; see localGuard.
+		r.Use(s.localGuard)
+	}
 	if len(s.CORSOrigins) > 0 {
 		r.Use(corsMiddleware(s.CORSOrigins))
 	}
