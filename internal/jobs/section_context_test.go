@@ -59,7 +59,7 @@ func TestSplitDocumentSectionsRenderTheirOwnText(t *testing.T) {
 		sections++
 		// A repo root with nothing in it: the unit must resolve through its own
 		// recorded root, as it does in a merged map.
-		got := renderUnitContext(t.TempDir(), u)
+		got := renderUnitContext(t.TempDir(), u, buildBudget)
 		total += len(got)
 
 		heading, _ := u.Meta["heading"].(string)
