@@ -90,6 +90,54 @@ func (s *WikiStore) SyncUserInstallations(ctx context.Context, userID string, in
 	return tx.Commit(ctx)
 }
 
+// UserHasInstallation reports whether the user can reach a GitHub App
+// installation, going by the mirror SyncUserInstallations keeps. This is the
+// ownership check behind connector configs: an installation id is a small
+// integer anyone can guess, and naming one in a connector makes the worker
+// mint a token for it, so the id is only honored for someone GitHub itself
+// says can use it.
+func (s *WikiStore) UserHasInstallation(ctx context.Context, userID string, installationID int64) (bool, error) {
+	var ok bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM user_installations ui
+			JOIN github_installations gi ON gi.id = ui.installation_id
+			WHERE ui.user_id = $1 AND gi.installation_id = $2
+		)`, userID, installationID).Scan(&ok); err != nil {
+		return false, fmt.Errorf("store: check user installation: %w", err)
+	}
+	return ok, nil
+}
+
+// InstallationServesWorkspace reports whether an installation is linked to a
+// user who currently stands behind the workspace: a member of its org, or an
+// instance admin (who bypass org membership everywhere else). It is the
+// run-time twin of UserHasInstallation: the API checks who is writing the
+// connector, this checks that someone who still belongs there vouches for the
+// installation when the clone actually happens. Removing the member who
+// configured it, or revoking their access on GitHub and having them sign in
+// again, therefore stops the connector minting tokens.
+func (s *WikiStore) InstallationServesWorkspace(ctx context.Context, workspaceID string, installationID int64) (bool, error) {
+	var ok bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM github_installations gi
+			JOIN user_installations ui ON ui.installation_id = gi.id
+			JOIN users u ON u.id = ui.user_id
+			WHERE gi.installation_id = $2
+			  AND (u.is_admin OR EXISTS (
+			        SELECT 1
+			        FROM org_members m
+			        JOIN workspaces w ON w.org_id = m.org_id
+			        WHERE w.id = $1 AND m.user_id = u.id))
+		)`, workspaceID, installationID).Scan(&ok); err != nil {
+		return false, fmt.Errorf("store: check workspace installation: %w", err)
+	}
+	return ok, nil
+}
+
 // UserProfile is what /api/v1/me returns: enough for the UI to show who is
 // signed in.
 type UserProfile struct {
