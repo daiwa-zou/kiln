@@ -1814,10 +1814,19 @@ let logFilter = "all";
 // says what a build DID ("Imported 6 pages"), where a live feed says what is
 // happening to it now ("Ingesting — 4 of 9 units done").
 function logTitle(r) {
-  if (r.status === "running") return "Firing";
+  if (r.status === "running") return r.trigger === "research" ? "Researching" : "Firing";
   if (r.status === "queued") return "Queued";
+  // A research run answers a review question; it never imports pages, so it
+  // must not be described in the build's terms.
+  if (r.trigger === "research") {
+    if (r.status === "failed") return "Research failed";
+    if (r.status === "canceled") return "Research canceled";
+    if (r.status === "over_budget") return "Research stopped at the budget cap";
+    return "Researched a review question";
+  }
   if (r.status === "failed") return "Failed";
   if (r.status === "over_budget") return "Stopped at the budget cap";
+  if (r.status === "canceled") return "Canceled";
   const n = (r.pagesCreated || 0) + (r.pagesUpdated || 0) + (r.pagesDeleted || 0);
   if (!n) return "Nothing changed";
   return `Imported ${n} page${n === 1 ? "" : "s"}`;
@@ -1833,15 +1842,29 @@ function logSummary(r) {
     return `${total} unit${total === 1 ? "" : "s"} planned; ${done} written so far.`;
   }
   if (r.status === "queued") return "Waiting for a worker to claim it.";
+  if (r.trigger === "research") {
+    if (r.status === "failed") return r.error ? String(r.error).split("\n")[0] : "The research pass did not finish.";
+    if (r.status === "canceled") return "The research pass was canceled before it finished.";
+    if (r.status === "over_budget") return "The run reached its budget cap and stopped before finishing.";
+    return "Read the sources to answer a question filed under Reviews. The findings are on that review item; no pages were written.";
+  }
   if (r.status === "failed") return r.error ? String(r.error).split("\n")[0] : "The build did not finish.";
   if (r.status === "over_budget") return "The run reached its budget cap and stopped before finishing.";
+  if (r.status === "canceled") return "The build was canceled before it finished.";
   const parts = [];
   if (r.pagesCreated) parts.push(`${r.pagesCreated} created`);
   if (r.pagesUpdated) parts.push(`${r.pagesUpdated} updated`);
   if (r.pagesDeleted) parts.push(`${r.pagesDeleted} removed`);
-  if (!parts.length) return "Every unit matched its cached content hash. No model calls were made.";
+  if (!parts.length) {
+    if (r.status === "partial") return "Some units failed and no pages changed; they keep their stale hash and retry next run.";
+    // The cached-hash sentence claims no model calls, which only a free run can say.
+    return Number(r.costUsd) > 0
+      ? "No pages were created, updated or removed, but the run used the model."
+      : "Every unit matched its cached content hash. No model calls were made.";
+  }
   const n = (r.pagesCreated || 0) + (r.pagesUpdated || 0) + (r.pagesDeleted || 0);
-  return `${n === 1 ? "One page" : `${n} pages`} changed: ${parts.join(", ")}.`;
+  const lead = r.status === "partial" ? "Some units failed and will retry next run. " : "";
+  return `${lead}${n === 1 ? "One page" : `${n} pages`} changed: ${parts.join(", ")}.`;
 }
 
 // The footer's three facts. Units read "N planned · M written" -- how many the
@@ -2158,6 +2181,34 @@ function gapDetailHTML(r) {
     <div id="review-note" class="hint" role="status"></div>`;
 }
 
+// RESEARCH_FAILED_PREFIX is how internal/worker records a pass that broke: the
+// failure is stored in the same field as findings, behind this exact prefix.
+// Without it being recognised here, an engine error is rendered as if it were
+// the answer to the question.
+const RESEARCH_FAILED_PREFIX = "Research did not complete: ";
+
+// researchBlockHTML renders what a research pass left on a review: findings,
+// or -- when the pass failed -- a plain statement that nothing was learned,
+// with the raw cause one disclosure down for whoever needs to report it.
+const researchFailed = (r) => Boolean(r.research && r.research.startsWith(RESEARCH_FAILED_PREFIX));
+
+function researchBlockHTML(r) {
+  if (!r.research) return "";
+  if (researchFailed(r)) {
+    const cause = r.research.slice(RESEARCH_FAILED_PREFIX.length);
+    return `<div class="research-findings research-failed">
+      <div class="rf-label">Research failed · ${esc(relTime(r.researched))}</div>
+      <p class="rf-headline">Research didn't finish. The question is unchanged.</p>
+      <details class="rf-cause"><summary>What went wrong</summary>
+        <div class="detail mono">${esc(cause)}</div></details>
+    </div>`;
+  }
+  return `<div class="research-findings">
+      <div class="rf-label">Research findings · ${esc(relTime(r.researched))}</div>
+      <div class="detail">${esc(r.research)}</div>
+    </div>`;
+}
+
 function reviewDetailHTML(r) {
   if (!r) return `<div class="empty">Select a review to see it here.</div>`;
   if (r.gap) return gapDetailHTML(r);
@@ -2175,10 +2226,7 @@ function reviewDetailHTML(r) {
     </div>
     <h2>${esc(r.title)}</h2>
     <div class="detail">${esc(r.detail)}</div>
-    ${r.research ? `<div class="research-findings">
-      <div class="rf-label">Research findings · ${esc(relTime(r.researched))}</div>
-      <div class="detail">${esc(r.research)}</div>
-    </div>` : ""}
+    ${researchBlockHTML(r)}
     ${r.researching ? `<p class="hint" role="status">A worker is reading the sources
       for this question. Findings appear here when it finishes.</p>` : ""}
     ${r.status !== "open" ? "" : `<div class="action-bar">
@@ -2189,7 +2237,11 @@ function reviewDetailHTML(r) {
           data-key="${esc(spec.key)}">${esc(spec.label(r))}${spec.key ? `<kbd>${esc(spec.key)}</kbd>` : ""}</button>`;
       }).join("")}
       ${r.researchable && !r.researching
-        ? `<button class="btn quiet" data-research="${esc(r.id)}">Research</button>` : ""}
+        ? (researchFailed(r)
+          ? `<button class="btn quiet" data-research="${esc(r.id)}"
+              title="Starts a new research run. Like a build, it uses the model and is billed.">Try again</button>`
+          : `<button class="btn quiet" data-research="${esc(r.id)}">Research</button>`)
+        : ""}
       <span class="action-hint">↑↓ to move · shortcuts work anywhere on this screen</span>
     </div>`}
     <div id="review-note" class="hint" role="status"></div>`;
@@ -2313,6 +2365,10 @@ function wireInbox(view) {
     // one) would otherwise fall through to the action lookup.
     const key = e.key.toUpperCase();
     if (key.length !== 1 || !"AKX".includes(key)) return;
+    // A held key must not walk the queue: auto-repeat would arm a deletion
+    // and confirm it a few milliseconds later, or resolve item after item.
+    // (Placed after the arrows, which are meant to repeat.)
+    if (e.repeat) return;
     const btn = document.querySelector(`#inbox-detail [data-key="${key}"]`);
     if (btn) { e.preventDefault(); btn.click(); }
   };
@@ -4027,7 +4083,10 @@ async function ingestNow() {
 let closePalette = null, palRows = [], palSelection = 0;
 
 // paletteGroups returns [{label, items}]; items carry the flat order the
-// keyboard walks, so a group header can never be landed on.
+// keyboard walks, so a group header can never be landed on. A row marked
+// `spends` starts paid work rather than navigating; renderPalette never
+// pre-selects one, so Enter on a freshly opened or freshly typed palette
+// cannot queue a build.
 function paletteGroups(q) {
   const groups = [];
   const pageRow = (p, html) => ({
@@ -4041,7 +4100,7 @@ function paletteGroups(q) {
       .map((s) => pageRow(bySlug.get(s)));
     if (recent.length) groups.push({ label: "Recent", items: recent });
     groups.push({ label: "Actions", items: [
-      { html: "Ingest now", hint: "queue a build", dot: "t-action", act: ingestNow },
+      { html: "Ingest now", hint: "queue a build", dot: "t-action", act: ingestNow, spends: true },
       ...PALETTE_DESTINATIONS.map((v) =>
         ({ html: esc(v.title), hint: "go to", dot: "t-action", hash: v.hash })),
     ] });
@@ -4064,13 +4123,16 @@ function paletteGroups(q) {
   const actions = [];
   const ingest = fuzzy(q, "Ingest now");
   if (ingest) actions.push({ html: fuzzyHi("Ingest now", ingest.idx), hint: "queue a build",
-    dot: "t-action", act: ingestNow, score: ingest.score });
+    dot: "t-action", act: ingestNow, spends: true, score: ingest.score });
   for (const v of PALETTE_DESTINATIONS) {
     const m = fuzzy(q, v.title);
     if (m) actions.push({ html: fuzzyHi(v.title, m.idx), hint: "go to", dot: "t-action",
       hash: v.hash, score: m.score });
   }
-  actions.sort((a, b) => (b.score || 0) - (a.score || 0));
+  // On equal scores the row that goes somewhere outranks the one that spends:
+  // "ingest" matches the Ingest view and "Ingest now" alike, and the build must
+  // never be the one that wins the tie.
+  actions.sort((a, b) => (b.score || 0) - (a.score || 0) || Boolean(a.spends) - Boolean(b.spends));
   actions.push({
     html: `Search full text for “${esc(q)}”`, hint: "every page", dot: "t-action",
     hash: `#/search/${encodeURIComponent(q)}`,
@@ -4082,25 +4144,33 @@ function paletteGroups(q) {
 function renderPalette(q) {
   const groups = paletteGroups(q.trim());
   palRows = groups.flatMap((g) => g.items);
-  palSelection = 0;
+  // The first row that is safe to fire. Spending rows stay in the list and
+  // are reached by arrow keys or a click -- an explicit choice -- never by
+  // simply pressing Enter.
+  // -1 when every row spends: nothing is selected and Enter does nothing
+  // until an arrow key picks a row.
+  palSelection = palRows.findIndex((r) => !r.spends);
   let i = 0;
   const html = groups.map((g) => `<li class="pal-group" role="presentation">${esc(g.label)}</li>` +
     g.items.map((r) => {
       const idx = i++;
-      return `<li id="pal-opt-${idx}" role="option" aria-selected="${idx === 0}"${
-        idx === 0 ? ' class="active"' : ""}>
+      return `<li id="pal-opt-${idx}" role="option" aria-selected="${idx === palSelection}"${
+        idx === palSelection ? ' class="active"' : ""}>
         <span class="dot dot-6 ${r.dot}" aria-hidden="true"></span>
         <span class="pal-label">${r.html}</span>
         <span class="kind">${esc(r.hint)}</span></li>`;
     }).join("")).join("");
   $("palette-list").innerHTML = palRows.length ? html
     : `<li class="pal-empty" role="presentation">Nothing matched.</li>`;
-  $("palette-input").setAttribute("aria-activedescendant", palRows.length ? "pal-opt-0" : "");
+  $("palette-input").setAttribute("aria-activedescendant",
+    palSelection >= 0 ? `pal-opt-${palSelection}` : "");
 }
 
 function movePaletteSelection(delta) {
   if (!palRows.length) return;
-  palSelection = (palSelection + delta + palRows.length) % palRows.length;
+  // From no selection, down lands on the first row and up on the last.
+  const from = palSelection < 0 ? (delta > 0 ? -1 : 0) : palSelection;
+  palSelection = (from + delta + palRows.length) % palRows.length;
   for (const li of $("palette-list").querySelectorAll("li[role=option]")) {
     const on = li.id === `pal-opt-${palSelection}`;
     li.classList.toggle("active", on);

@@ -984,6 +984,13 @@
   .research-findings .detail {
     margin: 0; font-size: 14.5px; line-height: 1.6; color: var(--ink-dim); white-space: pre-wrap;
   }
+  /* A pass that broke is not an answer: oxide instead of ember, and the raw
+     engine message kept one disclosure down. */
+  .research-findings.research-failed { border-left-color: var(--oxide); }
+  .research-failed .rf-label { color: var(--oxide); }
+  .research-failed .rf-headline { margin: 0 0 6px; font-size: 14.5px; line-height: 1.6; color: var(--ink); }
+  .rf-cause summary { cursor: pointer; color: var(--ink-dim); font-size: 12.5px; min-height: 24px; }
+  .rf-cause .detail.mono { font-size: 12.5px; overflow-wrap: anywhere; }
   .action-bar {
     display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
     max-width: 860px; padding-top: 18px; border-top: 1px solid var(--border-soft);
