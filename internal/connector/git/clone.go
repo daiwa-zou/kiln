@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/daiwa-zou/kiln/internal/childproc"
+	"github.com/daiwa-zou/kiln/internal/netguard"
 )
 
 // Remote-clone policy. Connector configs are API-writable data, so the URL a
@@ -71,20 +72,11 @@ func ValidateRemoteURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("connector/git: resolve %s: %w", host, err)
 	}
 	for _, ip := range ips {
-		if isForbiddenAddress(ip) {
+		if netguard.Forbidden(ip) {
 			return nil, fmt.Errorf("connector/git: %s resolves to %s, which is not a public address", host, ip)
 		}
 	}
 	return u, nil
-}
-
-func isForbiddenAddress(ip net.IP) bool {
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || // includes 169.254.169.254 cloud metadata
-		ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() ||
-		ip.IsMulticast()
 }
 
 // CloneShallow materializes a depth-1 clone of a validated https remote.

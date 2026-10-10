@@ -29,6 +29,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/extract"
 	"github.com/daiwa-zou/kiln/internal/mapper/docmap"
+	"github.com/daiwa-zou/kiln/internal/netguard"
 )
 
 // Fetch limits.
@@ -265,7 +266,7 @@ func (c *Connector) client() *http.Client {
 				return nil, err
 			}
 			for _, ip := range ips {
-				if c.allowPrivate || !isForbiddenAddress(ip) {
+				if c.allowPrivate || !netguard.Forbidden(ip) {
 					return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 				}
 			}
@@ -290,15 +291,6 @@ func (c *Connector) client() *http.Client {
 			return nil
 		},
 	}
-}
-
-func isForbiddenAddress(ip net.IP) bool {
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || // includes 169.254.169.254 cloud metadata
-		ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() ||
-		ip.IsMulticast()
 }
 
 // stagedName maps a URL to a stable filesystem-safe relative name.
