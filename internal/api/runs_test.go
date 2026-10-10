@@ -80,6 +80,19 @@ func TestRunsListSurfacesDebounceDeadline(t *testing.T) {
 	}
 }
 
+func TestShortRefAbbreviatesFullSHAsForDisplay(t *testing.T) {
+	// Runs store the full SHA so a later build can fetch it; the dashboard keeps
+	// showing seven characters.
+	if got := shortRef("0123456789abcdef0123456789abcdef01234567"); got != "0123456" {
+		t.Errorf("shortRef(full) = %q, want 0123456", got)
+	}
+	for _, in := range []string{"", "abc1234", "abc"} {
+		if got := shortRef(in); got != in {
+			t.Errorf("shortRef(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}
+
 func TestVersionCarriesPollInterval(t *testing.T) {
 	srv := httptest.NewServer((&Server{SourcePollInterval: 10 * time.Minute}).Router())
 	defer srv.Close()
