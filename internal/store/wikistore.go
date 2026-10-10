@@ -174,26 +174,38 @@ func (s *WikiStore) queryPages(ctx context.Context, sql string, args ...any) ([]
 
 	var out []wiki.Page
 	for rows.Next() {
-		var (
-			p        wiki.Page
-			pageType string
-			fm       []byte
-		)
-		if err := rows.Scan(&p.Path, &p.Slug, &pageType, &p.Meta.Title, &fm, &p.Body); err != nil {
-			return nil, fmt.Errorf("store: scan page: %w", err)
-		}
-		p.Meta.Type = wiki.PageType(pageType)
-
-		// Frontmatter round-trips through jsonb so tags, related, and sources
-		// survive without a second schema to keep in step.
-		if len(fm) > 0 {
-			if err := json.Unmarshal(fm, &p.Meta); err != nil {
-				return nil, fmt.Errorf("store: decode frontmatter for %s: %w", p.Path, err)
-			}
+		p, err := scanPage(rows)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// scanPage decodes one row of the six-column page shape (path, slug, type,
+// title, frontmatter, body) shared by every full page loader. A scan error is
+// returned wrapped, so a caller reading a single row can still match
+// pgx.ErrNoRows with errors.Is.
+func scanPage(row pgx.Row) (wiki.Page, error) {
+	var (
+		p        wiki.Page
+		pageType string
+		fm       []byte
+	)
+	if err := row.Scan(&p.Path, &p.Slug, &pageType, &p.Meta.Title, &fm, &p.Body); err != nil {
+		return wiki.Page{}, fmt.Errorf("store: scan page: %w", err)
+	}
+	p.Meta.Type = wiki.PageType(pageType)
+
+	// Frontmatter round-trips through jsonb so tags, related, and sources
+	// survive without a second schema to keep in step.
+	if len(fm) > 0 {
+		if err := json.Unmarshal(fm, &p.Meta); err != nil {
+			return wiki.Page{}, fmt.Errorf("store: decode frontmatter for %s: %w", p.Path, err)
+		}
+	}
+	return p, nil
 }
 
 // LoadSteering returns the workspace's purpose and schema documents plus any
