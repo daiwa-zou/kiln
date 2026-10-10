@@ -108,8 +108,9 @@ volume via the fs backend); document uploads accept up to 32 MiB per file, so a
 reverse proxy in front of kiln needs its body limit raised to match (nginx:
 `client_max_body_size 34m`).
 
-A framework frontend is deferred until onboarding flows make the server-driven UI painful; see
-[ROADMAP.md](ROADMAP.md#deferred-decisions).
+The reading UI is planned to move to TypeScript components built into static files that stay
+embedded in the binary, so the deployment shape does not change; see
+[ROADMAP.md](ROADMAP.md#m11--the-edges-catch-up), item 8.
 
 ## Agents can read it
 
