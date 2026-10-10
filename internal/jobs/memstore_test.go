@@ -44,6 +44,9 @@ type memStore struct {
 	// semantics, like the real one: what a document currently contains is
 	// what is recorded for it.
 	figures map[string][]FigureRecord
+	// replaceFigureCalls counts ReplaceFigures calls, each of which is a
+	// transaction in the real store.
+	replaceFigureCalls int
 
 	// trailingUnitCost is what TrailingUnitCost reports; zero means no history.
 	trailingUnitCost float64
@@ -72,6 +75,7 @@ func (m *memStore) ReplaceFigures(_ context.Context, _, sourceKey string, figs [
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.replaceFigureCalls++
 	keep := map[string]bool{}
 	for _, f := range figs {
 		keep[f.SHA256] = true
