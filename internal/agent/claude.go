@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/daiwa-zou/kiln/internal/childproc"
 )
 
 // Tool sets. Bash is disallowed outright: Read/Grep/Glob/Write/Edit is enough
@@ -110,6 +112,7 @@ func (r *ClaudeRunner) Run(ctx context.Context, req Request) (*Result, error) {
 	// There is no --cwd flag on the installed CLI; the working directory is
 	// how the agent is pointed at the materialized sources.
 	cmd.Dir = req.WorkDir
+	cmd.WaitDelay = childproc.WaitDelay
 	if r.Env != nil {
 		cmd.Env = r.Env
 	}

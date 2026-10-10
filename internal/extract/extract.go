@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/daiwa-zou/kiln/internal/childproc"
 )
 
 // Format is the shape of an input document.
@@ -270,6 +272,10 @@ func (p *PandocExtractor) Extract(ctx context.Context, path string) (string, err
 	return runTool(ctx, p.binary(), p.Timeout, "--sandbox", "-t", "gfm", "--wrap=none", path)
 }
 
+// toolWaitDelay is childproc.WaitDelay, held in a variable so a test can shrink
+// it instead of sleeping through the real value.
+var toolWaitDelay = childproc.WaitDelay
+
 func runTool(ctx context.Context, binary string, timeout time.Duration, args ...string) (string, error) {
 	if timeout == 0 {
 		timeout = defaultTimeout
@@ -279,6 +285,7 @@ func runTool(ctx context.Context, binary string, timeout time.Duration, args ...
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.WaitDelay = toolWaitDelay
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

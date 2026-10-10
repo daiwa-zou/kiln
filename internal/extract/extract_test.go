@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeFile(t *testing.T, name, content string) string {
@@ -246,4 +247,35 @@ func containsFormat(haystack []Format, needle Format) bool {
 		}
 	}
 	return false
+}
+
+// exec.CommandContext kills only the direct child. A converter that forks a
+// helper which inherits stdout leaves Wait blocked on the pipe until the
+// helper exits, so the timeout bounded nothing. WaitDelay is what makes it a
+// wall-clock bound.
+func TestToolTimeoutBoundsWallClockWhenAGrandchildHoldsStdout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script")
+	}
+	old := toolWaitDelay
+	toolWaitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { toolWaitDelay = old })
+
+	// The backgrounded sleeper inherits stdout and outlives the converter.
+	path := filepath.Join(t.TempDir(), "forking-converter")
+	script := "#!/bin/sh\nsleep 20 &\nexec sleep 20\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, err := runTool(context.Background(), path, 200*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want a timeout", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("runTool took %s; the timeout plus WaitDelay should have bounded it well under that", elapsed)
+	}
 }

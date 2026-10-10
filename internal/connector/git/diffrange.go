@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daiwa-zou/kiln/internal/childproc"
 	"github.com/daiwa-zou/kiln/internal/diff"
 )
 
@@ -98,6 +99,7 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.WaitDelay = childproc.WaitDelay
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)

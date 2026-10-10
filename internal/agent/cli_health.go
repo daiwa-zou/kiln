@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/daiwa-zou/kiln/internal/childproc"
 )
 
 // CLIHealth is what can be learned about the claude CLI without spending
@@ -179,6 +181,7 @@ func runCLI(ctx context.Context, path string, env []string, args ...string) (str
 
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = env
+	cmd.WaitDelay = childproc.WaitDelay
 
 	out, err := cmd.Output()
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daiwa-zou/kiln/internal/childproc"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 )
 
@@ -287,6 +288,7 @@ func runGit(ctx context.Context, dir string, env []string, author gitAuthor, arg
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
 	cmd.Env = env
+	cmd.WaitDelay = childproc.WaitDelay
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

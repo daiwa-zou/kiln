@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/daiwa-zou/kiln/internal/childproc"
 )
 
 // Remote-clone policy. Connector configs are API-writable data, so the URL a
@@ -131,6 +133,8 @@ func CloneShallow(ctx context.Context, opts CloneOptions) error {
 			"KILN_GIT_TOKEN="+opts.Token,
 		)
 	}
+
+	cmd.WaitDelay = childproc.WaitDelay
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if ctx.Err() != nil {
