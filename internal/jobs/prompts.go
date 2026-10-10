@@ -11,13 +11,6 @@ import (
 	"github.com/daiwa-zou/kiln/internal/wiki"
 )
 
-// AnalysisSchema constrains the analyze step's output so the plan can be
-// validated before any money is spent on generation, and so parsing needs no
-// heuristics. Single-sourced from the agent package: the CLI and API runners
-// must enforce the same contract, and two hand-maintained copies had already
-// drifted once.
-var AnalysisSchema = agent.AnalysisSchemaText()
-
 // untrustedFraming is prepended to every system prompt.
 //
 // On a multi-user platform the material being read belongs to someone else, and

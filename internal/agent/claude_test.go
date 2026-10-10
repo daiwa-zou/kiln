@@ -67,7 +67,7 @@ func analyzeReq(dir string) Request {
 func TestBuildArgsAnalyze(t *testing.T) {
 	args := BuildArgs(Request{
 		Step: StepAnalyze, WorkDir: "/src", SessionID: "abc",
-		Model: "sonnet", BudgetUSD: 0.4, JSONSchema: `{"type":"object"}`,
+		Model: "sonnet", BudgetUSD: 0.4,
 		SystemPrompt: "be careful", Prompt: "go",
 	})
 
@@ -103,6 +103,31 @@ func TestBuildArgsAnalyze(t *testing.T) {
 	}
 	if args[len(args)-1] != "go" {
 		t.Errorf("prompt must be the final argument, got %q", args[len(args)-1])
+	}
+}
+
+// The CLI's --json-schema is chosen by the step alone, as the API runner's
+// schema is: a caller cannot forget it, and a step cannot run unconstrained on
+// one transport while the other enforces it.
+func TestBuildArgsJSONSchemaFollowsStep(t *testing.T) {
+	for _, tc := range []struct {
+		step Step
+		want string // "" means the flag must be absent
+	}{
+		{StepAnalyze, AnalysisSchemaText()},
+		{StepResearch, ResearchSchemaText()},
+		{StepGenerate, ""},
+	} {
+		args := BuildArgs(Request{Step: tc.step, WorkDir: "/src", ScratchDir: "/scratch", Prompt: "go"})
+		if tc.want == "" {
+			if containsArg(args, "--json-schema") {
+				t.Errorf("%s: --json-schema must be absent, got %q", tc.step, flagVal(args, "--json-schema"))
+			}
+			continue
+		}
+		if got := flagVal(args, "--json-schema"); got != tc.want {
+			t.Errorf("%s: --json-schema = %q, want %q", tc.step, got, tc.want)
+		}
 	}
 }
 
@@ -179,7 +204,7 @@ func TestBuildArgsNeverUsesBypassPermissions(t *testing.T) {
 func TestBuildArgsOmitsUnsetOptionals(t *testing.T) {
 	args := BuildArgs(Request{Step: StepAnalyze, WorkDir: "/src", Prompt: "x"})
 
-	for _, absent := range []string{"--model", "--max-budget-usd", "--append-system-prompt", "--json-schema", "--session-id"} {
+	for _, absent := range []string{"--model", "--max-budget-usd", "--append-system-prompt", "--session-id"} {
 		if containsArg(args, absent) {
 			t.Errorf("%s should be omitted when unset: %v", absent, args)
 		}

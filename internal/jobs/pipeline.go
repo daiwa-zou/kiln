@@ -661,7 +661,6 @@ func (p *Pipeline) generateUnit(
 		// so it rides a second breakpoint (API runner only; empty otherwise).
 		CacheableUnit: cacheableUnit,
 		Prompt:        analyzePrompt(key, unit, analyzeSrc, sc.steering, 0, nil),
-		JSONSchema:    AnalysisSchema,
 	})
 	sc.ledger.settle(want, costOf(analyzeRes))
 	p.account(&res, key, analyzeRes)
