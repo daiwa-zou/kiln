@@ -120,7 +120,7 @@ a small production one.
 
 ## Observability
 
-Prometheus metrics are served on a separate port (`:9090` by default) by both
+Prometheus metrics are served on a separate port (`127.0.0.1:9090` by default; set `metrics_addr` to `:9090` so Prometheus can reach it from another pod or host, as the Helm chart does) by both
 the API and every worker: request traffic, queue depth, build outcomes, and
 model spend. See [observability.md](observability.md) for the metric reference,
 alert rules, and scraping queue depth to autoscale workers.

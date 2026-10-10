@@ -75,7 +75,18 @@ func (s *Server) guardWrite(w http.ResponseWriter, r *http.Request, maxBytes int
 // decodeBody parses a JSON body into dst, translating oversize and malformed
 // bodies into a 400 the caller can act on. Returns false after writing the
 // response.
+//
+// The body must be declared application/json. Refusing anything else is what
+// keeps a cross-site HTML form or fetch() with a text/plain body -- both
+// "simple requests" a browser sends without a preflight -- from being parsed
+// as JSON and acted on; with a JSON content type the browser has to preflight,
+// and CORS refuses. This holds regardless of auth mode.
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if !jsonContentType(r) {
+		writeJSON(w, http.StatusUnsupportedMediaType,
+			map[string]string{"error": "Content-Type must be application/json"})
+		return false
+	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

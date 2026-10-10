@@ -393,11 +393,19 @@ const api = async (path, opts = {}) => {
 
   let body;
   if (opts.body instanceof FormData) {
-    // Multipart uploads: the browser sets Content-Type with its boundary.
+    // Multipart uploads: the browser sets Content-Type with its boundary. The
+    // custom header is what a cross-site form cannot add without a CORS
+    // preflight; a server with auth disabled requires it on uploads.
+    headers["X-Requested-With"] = "kiln-ui";
     body = opts.body;
   } else if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(opts.body);
+  } else if (method === "POST") {
+    // A body-less POST (restore, review research) still declares JSON: a
+    // server with auth disabled refuses any POST that a cross-site form could
+    // have sent without a preflight, and an absent type looks like one.
+    headers["Content-Type"] = "application/json";
   }
   const cached = method === "GET" ? etagCache.get(path) : null;
   if (cached) headers["If-None-Match"] = cached.etag;
@@ -4527,7 +4535,8 @@ async function boot() {
         if (csrfToken()) {
           try {
             await fetch("/auth/logout", {
-              method: "POST", headers: { "X-CSRF-Token": csrfToken() },
+              method: "POST",
+              headers: { "X-CSRF-Token": csrfToken(), "Content-Type": "application/json" },
             });
           } catch { /* the reload lands on the sign-in form either way */ }
         }

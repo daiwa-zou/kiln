@@ -28,6 +28,11 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTPAddr != ":8080" {
 		t.Errorf("HTTPAddr = %q, want :8080", cfg.HTTPAddr)
 	}
+	// The metrics endpoint is unauthenticated, so it must not listen on every
+	// interface unless a deployment says so.
+	if cfg.MetricsAddr != "127.0.0.1:9090" {
+		t.Errorf("MetricsAddr = %q, want 127.0.0.1:9090 (loopback only by default)", cfg.MetricsAddr)
+	}
 	if cfg.Database.SSLMode != "require" {
 		t.Errorf("sslmode = %q, want require (TLS should be opt-out, not opt-in)", cfg.Database.SSLMode)
 	}
@@ -36,6 +41,20 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Agent.Timeout != 12*time.Minute {
 		t.Errorf("agent timeout = %v, want 12m", cfg.Agent.Timeout)
+	}
+}
+
+// A deployment that scrapes from another pod or host must be able to opt back
+// in to all interfaces.
+func TestLoadMetricsAddrOverride(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("KILN_METRICS_ADDR", ":9090")
+	cfg, err := Load(Options{Role: RoleServer})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MetricsAddr != ":9090" {
+		t.Errorf("MetricsAddr = %q, want :9090", cfg.MetricsAddr)
 	}
 }
 

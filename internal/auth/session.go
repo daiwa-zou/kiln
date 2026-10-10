@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -95,12 +97,31 @@ func DeleteSession(ctx context.Context, pool *pgxpool.Pool, sessionPlain string)
 	return nil
 }
 
+// CookieSecure decides the Secure attribute for cookies this server sets.
+//
+// When public_url is configured its scheme is the answer: the operator has
+// stated how browsers reach this instance, and that cannot be changed by
+// whoever sends the request. Deriving it from X-Forwarded-Proto instead lets
+// a client (or a hop that does not strip the header) switch Secure off on a
+// production deployment. Only when public_url is unset -- local development,
+// where there is no stated origin -- does it fall back to what the request
+// itself shows, so http://localhost still works.
+func CookieSecure(r *http.Request, publicURL string) bool {
+	if publicURL = strings.TrimSpace(publicURL); publicURL != "" {
+		if u, err := url.Parse(publicURL); err == nil && u.Scheme != "" {
+			return strings.EqualFold(u.Scheme, "https")
+		}
+	}
+	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
 // SetSessionCookies writes the pair of cookies a fresh session needs.
-// Secure is set from the request's TLS state so localhost development works;
-// SameSite=Lax is the baseline CSRF posture, with the double-submit header
-// as the enforced layer on top.
-func SetSessionCookies(w http.ResponseWriter, r *http.Request, session, csrf string, ttl time.Duration) {
-	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+// Secure comes from CookieSecure so localhost development works without
+// trusting a client-supplied header in production; SameSite=Lax is the
+// baseline CSRF posture, with the double-submit header as the enforced layer
+// on top.
+func SetSessionCookies(w http.ResponseWriter, r *http.Request, publicURL, session, csrf string, ttl time.Duration) {
+	secure := CookieSecure(r, publicURL)
 	http.SetCookie(w, &http.Cookie{
 		Name: SessionCookie, Value: session, Path: "/",
 		MaxAge: int(ttl.Seconds()), HttpOnly: true, Secure: secure,

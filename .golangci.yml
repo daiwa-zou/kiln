@@ -10,6 +10,7 @@ linters:
     - bodyclose # unclosed HTTP response bodies (connector, agent/api)
     - copyloopvar
     - errorlint # %w and errors.Is/As correctness
+    - gosec # security checks; stands in for CodeQL (header comment above)
     - misspell
     - nilerr # `return nil` after a non-nil error
     - revive
@@ -59,6 +60,67 @@ linters:
       # Golden/fixture helpers read paths built from testdata.
       - path: _test\.go$
         text: "G304" # file inclusion via variable
+      # --- gosec triage -------------------------------------------------
+      # Each rule below is excluded only at the listed sites, for the reason
+      # given. Anything new that trips one of these rules elsewhere is a real
+      # finding to look at, not noise to add a path for.
+      #
+      # G204: every one is exec.Command with an argv slice (no shell). The
+      # binary is either the literal "git" or an operator-configured tool path
+      # (agent CLI, extractor binaries); URLs and refs are validated before they
+      # reach the argument list.
+      - path: (internal/agent/claude\.go|internal/agent/cli_health\.go|internal/connector/git/clone\.go|internal/connector/git/diffrange\.go|internal/extract/extract\.go|internal/publish/git\.go)$
+        text: "G204"
+        linters:
+          - gosec
+      # G304/G703 on operator-supplied paths: KILN_*_FILE names a mounted
+      # secret (Docker/Kubernetes convention), read by design. G703 is the
+      # taint-analysis restatement of the same finding (env var -> ReadFile).
+      - path: (cmd/kiln/admin\.go|internal/config/secrets\.go)$
+        text: "G304|G703"
+        linters:
+          - gosec
+      # G304 on pipeline-internal paths: files the extractor staged in its own
+      # temp dir, source files the repo scanner enumerated (the clone has
+      # core.symlinks=false), and the unit inputs derived from that scan. None
+      # is taken from a request.
+      - path: (internal/extract/extract\.go|internal/extract/figures\.go|internal/jobs/context\.go|internal/mapper/repomap/scan\.go|internal/mapper/repomap/walk\.go)$
+        text: "G304"
+        linters:
+          - gosec
+      # G301/G306 on per-run staging: every root is os.MkdirTemp (0700), so the
+      # modes of what lies beneath cannot widen access. The publish mirror's
+      # file modes are not recorded by the VCS beyond the exec bit. The askpass
+      # script must be executable, which G306's 0600 ceiling cannot express.
+      - path: (internal/connector/upload/upload\.go|internal/connector/web/web\.go|internal/jobs/pipeline\.go|internal/publish/git\.go|internal/connector/git/clone\.go)$
+        text: "G301|G306"
+        linters:
+          - gosec
+      # G703 on the per-unit scratch directory: its path is the run's own
+      # os.MkdirTemp root joined with sanitize(key), which replaces every path
+      # separator and dot, so taint from the unit key cannot climb out of it.
+      # collectPages walks that same directory.
+      - path: (internal/jobs/pipeline\.go|internal/jobs/collect\.go)$
+        text: "G703"
+        linters:
+          - gosec
+      # G122: collectPages runs after the agent process has exited, so nothing
+      # is writing to the scratch dir between the EvalSymlinks containment
+      # check and the read. The check also reports an escaping symlink as a
+      # violation, which os.Root would turn into an opaque error.
+      - path: internal/jobs/collect\.go$
+        text: "G122"
+        linters:
+          - gosec
+      # G124: Secure comes from auth.CookieSecure (public_url's scheme), which
+      # must be false for http://localhost development, so it cannot be the
+      # literal true gosec wants. The CSRF cookie is deliberately not HttpOnly
+      # (double-submit: the page's script reads it back), and the clearing
+      # cookies carry no value.
+      - path: (internal/auth/session\.go|internal/api/oauth\.go)$
+        text: "G124"
+        linters:
+          - gosec
       # filepath.WalkDir callbacks return nil to mean "skip this entry, keep
       # walking" -- an unreadable file must not abort the scan. nilerr reads
       # every one of those as a swallowed error.

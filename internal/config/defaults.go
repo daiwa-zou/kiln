@@ -13,10 +13,12 @@ const (
 
 func applyDefaults(v setter, role Role) {
 	v.SetDefault("http_addr", ":8080")
-	// A conventional, non-public port. It is not reachable through the API's
-	// ingress, so serving it by default costs nothing and means a scrape
-	// works without a configuration round trip.
-	v.SetDefault("metrics_addr", ":9090")
+	// Loopback by default. The endpoint is unauthenticated and reports queue
+	// depth and spend, so a bare ":9090" would hand that to every host that can
+	// reach the machine. A deployment that needs Prometheus to scrape from
+	// another host or pod opts in with metrics_addr = ":9090" (the Helm chart,
+	// local-k8s manifests and docker-compose do).
+	v.SetDefault("metrics_addr", "127.0.0.1:9090")
 	v.SetDefault("log_level", "info")
 
 	v.SetDefault("database.host", "localhost")

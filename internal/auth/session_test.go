@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // fakeSessions maps one known session hash to an identity + CSRF token.
@@ -129,5 +131,76 @@ func TestTokenOnlyMiddlewareIgnoresCookies(t *testing.T) {
 	m := &Middleware{Source: fakeTokens{}}
 	if rec := do(m, http.MethodGet, "kiln_whatever00000000000000000000000000000", ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("cookie on token-only middleware = %d, want 401", rec.Code)
+	}
+}
+
+// TestCookieSecure pins where the Secure attribute comes from. A configured
+// public_url is authoritative: a client-supplied X-Forwarded-Proto must be
+// able neither to switch Secure off behind an https origin nor to switch it
+// on for a plain-http one. Only an unconfigured deployment falls back to the
+// request.
+func TestCookieSecure(t *testing.T) {
+	tests := []struct {
+		name      string
+		publicURL string
+		forwarded string
+		want      bool
+	}{
+		{"https origin ignores a forwarded http claim", "https://kiln.example.com", "http", true},
+		{"https origin with no header", "https://kiln.example.com", "", true},
+		{"https scheme is case-insensitive", "HTTPS://kiln.example.com", "", true},
+		{"http loopback origin ignores a forwarded https claim", "http://localhost:8080", "https", false},
+		{"unconfigured follows forwarded https", "", "https", true},
+		{"unconfigured, no header", "", "", false},
+		{"blank is unconfigured", "  ", "https", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			if tt.forwarded != "" {
+				r.Header.Set("X-Forwarded-Proto", tt.forwarded)
+			}
+			if got := CookieSecure(r, tt.publicURL); got != tt.want {
+				t.Errorf("CookieSecure(public_url=%q, X-Forwarded-Proto=%q) = %v, want %v",
+					tt.publicURL, tt.forwarded, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCookieSecureFromTLS(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "https://kiln.example.com/", nil)
+	r.TLS = &tls.ConnectionState{}
+	if !CookieSecure(r, "") {
+		t.Error("an unconfigured deployment serving TLS itself must set Secure")
+	}
+	if CookieSecure(r, "http://127.0.0.1:8080") {
+		t.Error("a configured http origin must win over the connection state")
+	}
+}
+
+func TestSetSessionCookiesSecureFollowsPublicURL(t *testing.T) {
+	for _, tt := range []struct {
+		publicURL string
+		forwarded string
+		want      bool
+	}{
+		{"https://kiln.example.com", "http", true},
+		{"http://localhost:8080", "https", false},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("X-Forwarded-Proto", tt.forwarded)
+		w := httptest.NewRecorder()
+		SetSessionCookies(w, r, tt.publicURL, "sess", "csrf", time.Hour)
+		cookies := w.Result().Cookies()
+		if len(cookies) != 2 {
+			t.Fatalf("want session and csrf cookies, got %d", len(cookies))
+		}
+		for _, c := range cookies {
+			if c.Secure != tt.want {
+				t.Errorf("public_url=%q forwarded=%q: cookie %s Secure=%v, want %v",
+					tt.publicURL, tt.forwarded, c.Name, c.Secure, tt.want)
+			}
+		}
 	}
 }

@@ -25,7 +25,10 @@ func openFS(dir string) (*fsStore, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("blob: fs backend needs storage.path")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// Uploaded documents live here for good, unlike the per-run temp dirs, so
+	// the tree is closed to other local users. Group read/traverse stays for a
+	// volume shared through fsGroup.
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("blob: create storage root: %w", err)
 	}
 	root, err := os.OpenRoot(dir)
@@ -43,7 +46,7 @@ func (s *fsStore) Put(ctx context.Context, key string, r io.Reader, size int64) 
 		return err
 	}
 	if dir := path.Dir(key); dir != "." {
-		if err := s.root.MkdirAll(dir, 0o755); err != nil {
+		if err := s.root.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("blob: put %s: %w", key, err)
 		}
 	}
