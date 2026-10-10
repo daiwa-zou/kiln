@@ -2582,6 +2582,11 @@ async function showGraph() {
       svg.appendChild(el);
       return el;
     });
+    // position() runs every frame for every node, and used to find each node's
+    // circles and label with querySelector -- three lookups a node, ~1,800 a
+    // frame at 600 nodes. The elements are fixed at creation, so they are kept:
+    // the dot and the label for good, the halo while its node is selected.
+    const dotEls = [], haloEls = [], textEls = [];
     const nodeEls = nodes.map((n, i) => {
       const g = mk("g", { class: "graph-node", "data-i": i, tabindex: "0" });
       g.setAttribute("aria-label", `${n.title || n.slug} (${n.type})`);
@@ -2591,10 +2596,14 @@ async function showGraph() {
       title.textContent = `${n.title || n.slug} (${n.type}, ${n.links} inbound)`;
       c.appendChild(title);
       g.appendChild(c);
+      dotEls[i] = c;
+      haloEls[i] = null;
+      textEls[i] = null;
       if (n.links >= 2 || nodes.length <= 30) {
         const t = mk("text", { "font-size": "11.5", fill: "var(--ink-dim)" });
         t.textContent = n.slug;
         g.appendChild(t);
+        textEls[i] = t;
       }
       svg.appendChild(g);
       return g;
@@ -2607,21 +2616,21 @@ async function showGraph() {
         el.setAttribute("x2", pts[el._b].x.toFixed(1));
         el.setAttribute("y2", pts[el._b].y.toFixed(1));
       }
-      nodeEls.forEach((g, i) => {
-        const halo = g.querySelector("circle.graph-halo");
-        const c = g.querySelector("circle.graph-dot");
-        c.setAttribute("cx", pts[i].x.toFixed(1));
-        c.setAttribute("cy", pts[i].y.toFixed(1));
+      for (let i = 0; i < pts.length; i++) {
+        const x = pts[i].x.toFixed(1), y = pts[i].y.toFixed(1);
+        dotEls[i].setAttribute("cx", x);
+        dotEls[i].setAttribute("cy", y);
+        const halo = haloEls[i];
         if (halo) {
-          halo.setAttribute("cx", pts[i].x.toFixed(1));
-          halo.setAttribute("cy", pts[i].y.toFixed(1));
+          halo.setAttribute("cx", x);
+          halo.setAttribute("cy", y);
         }
-        const t = g.querySelector("text");
+        const t = textEls[i];
         if (t) {
           t.setAttribute("x", (pts[i].x + radiusOf(i) + 6).toFixed(1));
           t.setAttribute("y", (pts[i].y + 4).toFixed(1));
         }
-      });
+      }
     };
 
     // ---- selection --------------------------------------------------------
@@ -2636,15 +2645,19 @@ async function showGraph() {
         const on = i === selected;
         const near = selected < 0 || on || neighbors[selected].has(i);
         g.classList.toggle("graph-dim", !near);
-        g.querySelector("circle.graph-dot").setAttribute("r", radiusOf(i));
-        let halo = g.querySelector("circle.graph-halo");
+        dotEls[i].setAttribute("r", radiusOf(i));
+        let halo = haloEls[i];
         if (on && !halo) {
           halo = mk("circle", { class: "graph-halo",
             fill: hue[nodes[i].type] || "var(--ink-dim)", opacity: "0.14" });
           g.insertBefore(halo, g.firstChild);
-        } else if (!on && halo) halo.remove();
+          haloEls[i] = halo;
+        } else if (!on && halo) {
+          halo.remove();
+          haloEls[i] = halo = null;
+        }
         if (halo) halo.setAttribute("r", radiusOf(i) + 7);
-        const t = g.querySelector("text");
+        const t = textEls[i];
         if (t) {
           t.setAttribute("font-size", on ? "13" : "11.5");
           t.setAttribute("font-weight", on ? "600" : "400");
@@ -2724,7 +2737,10 @@ async function showGraph() {
     // visibly untangles itself. Afterwards three is the budget: enough to
     // converge in about half a second, few enough that an O(n^2) repulsion pass
     // over a 300-node graph does not eat the frame the drag is being drawn in.
-    let stepsPerFrame = 10;
+    // A frame's budget is the repulsion pass, O(n^2) a step, so the first run
+    // takes fewer steps a frame on a big graph rather than hold the main thread:
+    // ten up to ~385 nodes, four at 600.
+    let stepsPerFrame = Math.max(3, Math.min(10, Math.floor(1500000 / (nodes.length * nodes.length))));
     // Reduced motion: the layout is not animated at all. Every settle runs to
     // rest in one synchronous burst, so the graph is drawn once, already
     // arranged, and a drag or a reset moves things by one jump instead of a
