@@ -940,7 +940,7 @@ instead of the API-wide 30 seconds, and accept up to 32 MiB per file — a rever
 proxy in front of kiln needs its body limit raised to match (nginx:
 `client_max_body_size 34m`).
 
-**Metrics are on a separate listener** (`:9090` by default). They describe the
+**Metrics are on a separate listener** (`127.0.0.1:9090` by default; deployments that scrape from outside the process set `:9090`). They describe the
 deployment, not a tenant; putting them on the public router would mean either
 publishing queue depth and spend to every reader or inventing an auth scheme
 Prometheus does not want to use.
@@ -1054,7 +1054,7 @@ deliver them.
 | Key | Default | Notes |
 | --- | --- | --- |
 | `http_addr` | `:8080` | API, UI, and `/mcp` listener. |
-| `metrics_addr` | `:9090` | Separate Prometheus listener. Empty disables. |
+| `metrics_addr` | `127.0.0.1:9090` | Separate Prometheus listener. Empty disables. |
 | `public_url` | — | External URL, for OAuth callbacks and links. Also what the MCP discovery documents advertise, so behind a TLS-terminating proxy it is the only place the real scheme is known. Must be `https` unless it is a loopback address. |
 | `tls_cert` / `tls_key` | — | Serve HTTPS directly, for a deployment with no proxy in front. Set together. |
 | `mcp_authorization_server` | — | Issuer URL of an OAuth authorization server that mints tokens for `/mcp`. Empty omits `authorization_servers` from the protected-resource metadata. |

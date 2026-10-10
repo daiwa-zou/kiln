@@ -29,7 +29,8 @@ config:
 
   # Prometheus metrics on their own listener, never behind the API's ingress:
   # queue depth and spend describe the deployment, not a tenant. Empty
-  # disables the listener entirely.
+  # disables the listener entirely. Stated explicitly because kiln's own default
+  # is loopback-only, which Prometheus could not scrape from another pod.
   metricsAddr: ":9090"
 
   database:

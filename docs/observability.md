@@ -1,7 +1,10 @@
 # Observability
 
 kiln exposes Prometheus metrics on a **separate listener** from the API,
-`:9090` by default (`metrics_addr` / `KILN_METRICS_ADDR`; empty disables it).
+`127.0.0.1:9090` by default (`metrics_addr` / `KILN_METRICS_ADDR`; empty
+disables it). The endpoint is unauthenticated, so the default is loopback only;
+set `metrics_addr` to `:9090` where Prometheus scrapes from another host or pod
+(the Helm chart and the compose file already do).
 
 The separation is deliberate. Metrics describe the deployment — queue depth,
 build outcomes, model spend — not any one tenant's content. Putting them on the

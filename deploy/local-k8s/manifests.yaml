@@ -44,6 +44,7 @@ data:
   # bind with auth disabled -- there the pod boundary, not the listen address,
   # is what limits reach, and the process cannot tell the two apart.
   KILN_AUTH_MODE: "token"
+  # kiln defaults to loopback-only; a scrape from another pod needs all interfaces.
   KILN_METRICS_ADDR: ":9090"
   KILN_STORAGE_BACKEND: "fs"
   KILN_STORAGE_PATH: "/var/lib/kiln/blobs"

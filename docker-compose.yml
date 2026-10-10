@@ -47,7 +47,9 @@ x-kiln-env: &kiln-env
   KILN_AGENT_BUDGET_WINDOW: ${KILN_AGENT_BUDGET_WINDOW:-}
   # Prometheus metrics on a second listener, deliberately not published to the
   # host: scrape it from inside the compose network, or publish it yourself
-  # once you know who can reach it.
+  # once you know who can reach it. kiln's own default is loopback-only, which
+  # inside a container would be unreachable even from the compose network, so
+  # the wide bind is stated here where the network is the boundary.
   KILN_METRICS_ADDR: ${KILN_METRICS_ADDR:-:9090}
 
 services:
