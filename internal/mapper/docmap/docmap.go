@@ -188,10 +188,10 @@ func (m *Mapper) sectionInput(root string, doc Doc, i int, s section) (string, e
 	}
 
 	full := filepath.Join(root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
 		return "", fmt.Errorf("docmap: stage section %q of %s: %w", s.Title, doc.Path, err)
 	}
-	if err := os.WriteFile(full, []byte(s.Body), 0o644); err != nil {
+	if err := os.WriteFile(full, []byte(s.Body), 0o600); err != nil {
 		return "", fmt.Errorf("docmap: stage section %q of %s: %w", s.Title, doc.Path, err)
 	}
 	return rel, nil
