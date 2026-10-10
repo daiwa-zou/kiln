@@ -27,6 +27,11 @@
     --ink: #221e1a;       --ink-dim: #6b6055;   --ink-faint: #756a5e;
     --ember: #b4530a;     --ember-soft: #f0dcc4; --ember-tint: #fbf1e6;
     --on-ember: #fff;
+    /* Text on a solid --oxide fill (the armed danger button), and ember used
+       as TEXT. The light --ember is 4.39:1 on --surface, which is where every
+       chip sits, so chip text takes the darker --ember-text (5.10:1); the
+       chip's border stays --ember. */
+    --on-oxide: #fff;     --ember-text: #a34c09;
     --ash: #5f656c;       --oxide: #a3341f;
     --moss: #3f7d5d;      --iris: #7c5cbf;
 
@@ -71,6 +76,8 @@
       --ink: #ece5db;     --ink-dim: #b0a294;   --ink-faint: #948779;
       --ember: #e0872f;   --ember-soft: #4a3320; --ember-tint: #2a1d12;
       --on-ember: #1a1715;
+      /* #fff on the dark --oxide was 3.54:1; the page background reads 5.04. */
+      --on-oxide: #1a1715;  --ember-text: #e0872f;
       --ash: #8b9198;     --oxide: #d4694f;
       --moss: #6aa987;    --iris: #a288d6;
 
@@ -357,8 +364,9 @@
   .nav a[aria-current="page"] .nav-count { color: var(--bg); }
   /* Views that cannot hold anything until the first ingest. Dimmed, not
      disabled: they still explain themselves when clicked. */
-  .nav a.nav-waiting { opacity: 0.5; }
-  .nav a.nav-waiting:hover { opacity: 1; }
+  .nav a.nav-waiting { color: var(--ink-faint); }
+  .nav a.nav-waiting:hover { color: var(--ink); }
+  .nav a.nav-waiting[aria-current="page"] { color: var(--bg); }
   .nav-count { font-size: 11px; color: var(--ink-faint); flex: none; }
   .nav-count[hidden], .nav-live[hidden] { display: none; }
   .nav-live { width: 6px; height: 6px; border-radius: 50%; background: var(--ember); flex: none; }
@@ -387,7 +395,7 @@
     margin: 0; padding: 5px 9px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 7px; font-size: 12.5px;
   }
-  .rail-filter input:focus { outline: 2px solid var(--ember-soft); outline-offset: -1px; }
+  .rail-filter input:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
 
   /* The tree takes the rail's slack and scrolls inside it. */
   .tree { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-bottom: 8px; }
@@ -545,9 +553,9 @@
     display: inline-flex; align-items: center; justify-content: center;
     cursor: pointer; font-family: var(--sans); color: var(--ink-dim);
   }
-  .chip.run-running, .chip.run-queued { border-color: var(--ember); color: var(--ember); }
+  .chip.run-running, .chip.run-queued { border-color: var(--ember); color: var(--ember-text); }
   .chip.run-failed, .chip.run-over_budget { border-color: var(--oxide); color: var(--oxide); }
-  .chip.kind-git { border-color: var(--ember); color: var(--ember); }
+  .chip.kind-git { border-color: var(--ember); color: var(--ember-text); }
   .chip.kind-web { border-color: var(--ash); color: var(--ash); }
   .chip.kind-upload { border-color: var(--ember-soft); }
   /* A chip carrying a glyph instead of a word. */
@@ -690,7 +698,7 @@
     background: var(--panel); border-color: var(--border); color: var(--ink); font-weight: 400;
   }
   .btn.quiet:hover { border-color: var(--ember); color: var(--ember); }
-  .btn.danger { background: var(--oxide); border-color: var(--oxide); color: #fff; }
+  .btn.danger { background: var(--oxide); border-color: var(--oxide); color: var(--on-oxide); }
 
   /* Deleting a page is the one destructive control in the reading rail, so it
      is set apart rather than styled like the correction form above it: a

@@ -65,6 +65,21 @@ Six more defects were found and fixed:
   is their content: one long page title pushed the document past 375px and the
   whole page scrolled sideways. Every track is `minmax(0, 1fr)`.
 
+### Follow-up pass
+
+Four more pairs failed once the UI had real data in it, and are fixed with
+tokens rather than one-off colours:
+
+| Element | Before | After |
+| --- | --- | --- |
+| Armed danger button, `#fff` on dark `--oxide` | 3.54:1 | 5.04:1 (`--on-oxide: #1a1715`) |
+| Ember chips (`run-running`, `run-queued`, `kind-git`) in light, on `--surface` | 4.39:1 | 5.10:1 (`--ember-text: #a34c09`) |
+| Rail nav entries for views with nothing in them yet (were `opacity: .5`) | 2.10 light / 2.76 dark | 4.94 / 5.10 (`--ink-faint`) |
+| Rail filter focus ring (`--ember-soft`) | 1.31:1 | 4.70:1 light / 6.52:1 dark (`--ember`) |
+
+"Delete page" is also quiet until it is armed, as the comment on
+`.danger-panel` always said.
+
 ## Deliberate exceptions
 
 **Dead wikilinks** are drawn at low contrast *with a dashed underline*. Color

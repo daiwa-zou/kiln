@@ -1485,7 +1485,7 @@ function deletePanel(p) {
       <label class="sr-only" for="page-delete-reason">Why are you deleting this page?</label>
       <input id="page-delete-reason" placeholder="why (optional — the wiki is told)"
              autocomplete="off">
-      <button class="btn danger" id="page-delete">Delete page</button>
+      <button class="btn quiet" id="page-delete">Delete page</button>
       <div id="page-delete-note" class="hint" role="status"></div>
     </div>`;
 }
