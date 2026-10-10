@@ -316,9 +316,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		}
 		if ctx.Err() != nil {
 			// Interrupted while resolving, not misconfigured: requeue.
-			log.Warn("resolution interrupted by shutdown; requeuing")
-			w.requeueRun(ctx, run.ID, log)
-			w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
+			w.requeueInterrupted(ctx, run.ID, log, started, "resolution interrupted by shutdown; requeuing")
 			return
 		}
 		log.Error("run not executable", "error", err)
@@ -392,9 +390,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		// Interrupted by the drain deadline, not broken: back to the queue,
 		// where this or another worker picks it up cleanly.
 		syncErr = "interrupted by shutdown; requeued"
-		log.Warn("build interrupted by shutdown; requeuing")
-		w.requeueRun(ctx, run.ID, log)
-		w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
+		w.requeueInterrupted(ctx, run.ID, log, started, "build interrupted by shutdown; requeuing")
 	case err == nil && res.Summary.Status == jobs.StatusCanceled:
 		// The drain deadline stopped the build part-way. The pipeline imported the
 		// units that finished and recorded the run canceled, so the row is
@@ -558,9 +554,7 @@ func (w *Worker) research(ctx context.Context, run *store.QueuedRun, spec jobs.S
 			// Interrupted by the drain deadline, not broken: back to the
 			// queue, and the item is left untouched because the answer is
 			// still coming -- from whichever worker picks this up next.
-			log.Warn("research interrupted by shutdown; requeuing")
-			w.requeueRun(ctx, run.ID, log)
-			w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
+			w.requeueInterrupted(ctx, run.ID, log, started, "research interrupted by shutdown; requeuing")
 			return
 		}
 		log.Error("research failed", "error", err)
@@ -981,12 +975,17 @@ func (w *Worker) failRun(ctx context.Context, runID string, cause error, log *sl
 	}
 }
 
-// requeueRun hands this worker's interrupted run back to the queue. The write
-// is fenced: if the run is no longer ours -- it went stale and was claimed
-// again while we were draining -- requeueing would pull the new owner's live
-// build out from under it, so the store refuses, and the refusal is logged as
-// what it is rather than as a database failure.
-func (w *Worker) requeueRun(ctx context.Context, runID string, log *slog.Logger) {
+// requeueInterrupted is the end of a run the drain deadline stopped: it logs
+// msg, hands the run back to the queue and records the outcome as "requeued".
+// Callers have already ruled out a lost claim (lostClaim), which is answered
+// with abandon instead.
+//
+// The queue write is fenced: if the run is no longer ours -- it went stale and
+// was claimed again while we were draining -- requeueing would pull the new
+// owner's live build out from under it, so the store refuses, and the refusal
+// is logged as what it is rather than as a database failure.
+func (w *Worker) requeueInterrupted(ctx context.Context, runID string, log *slog.Logger, started time.Time, msg string) {
+	log.Warn(msg)
 	err := w.Store.RequeueRun(context.WithoutCancel(ctx), runID, w.ID)
 	switch {
 	case errors.Is(err, store.ErrClaimLost):
@@ -994,6 +993,7 @@ func (w *Worker) requeueRun(ctx context.Context, runID string, log *slog.Logger)
 	case err != nil:
 		log.Error("requeue after interruption failed", "error", err)
 	}
+	w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
 }
 
 // lostClaim reports whether the run's context was canceled because the
