@@ -72,9 +72,6 @@ func TestResearchAnswersAQuestionAndLedgersTheRun(t *testing.T) {
 	if runner.calls[0].Step != agent.StepResearch {
 		t.Errorf("step = %q, want %q", runner.calls[0].Step, agent.StepResearch)
 	}
-	if runner.calls[0].JSONSchema == "" {
-		t.Error("research must be schema-constrained like analyze")
-	}
 
 	// The run has to reach the ledger, or the spend window undercounts every
 	// question anyone ever asks.

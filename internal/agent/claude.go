@@ -194,9 +194,7 @@ func BuildArgs(req Request) []string {
 			"--tools", strings.Join(readOnlyTools, ","),
 			"--permission-mode", "dontAsk",
 		)
-		if req.JSONSchema != "" {
-			args = append(args, "--json-schema", req.JSONSchema)
-		}
+		args = append(args, "--json-schema", schemaTextFor(req.Step))
 		if req.SessionID != "" {
 			args = append(args, "--session-id", SessionUUID(req.SessionID))
 		}
@@ -211,9 +209,7 @@ func BuildArgs(req Request) []string {
 			"--disallowedTools", strings.Join(deniedTools, ","),
 			"--permission-mode", "dontAsk",
 		)
-		if req.JSONSchema != "" {
-			args = append(args, "--json-schema", req.JSONSchema)
-		}
+		args = append(args, "--json-schema", schemaTextFor(req.Step))
 
 	case StepGenerate:
 		args = append(args,

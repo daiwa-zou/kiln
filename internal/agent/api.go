@@ -34,8 +34,6 @@ type APIRunner struct {
 	Model string
 	// Effort tunes thinking depth and overall spend.
 	Effort anthropic.OutputConfigEffort
-	// FallbackModel survives an overload without failing the run.
-	FallbackModel string
 }
 
 // CachesUnit: the unit's source material goes in Request.CacheableUnit, ahead
@@ -194,6 +192,22 @@ func schemaFor(req Request) map[string]any {
 		return ResearchSchemaJSON()
 	}
 	return GenerationSchemaJSON()
+}
+
+// schemaTextFor is the schema for step serialized for the CLI's --json-schema
+// flag, or "" where the step is not constrained. Both runners choose a schema
+// from the step alone, so neither can run a step schemaless while the other
+// enforces it. The CLI leaves generate unconstrained -- its pages are written
+// to disk by the agent rather than returned -- which is why this is not simply
+// schemaFor marshaled.
+func schemaTextFor(step Step) string {
+	switch step {
+	case StepAnalyze:
+		return AnalysisSchemaText()
+	case StepResearch:
+		return ResearchSchemaText()
+	}
+	return ""
 }
 
 // send streams when the output ceiling is high enough that a non-streaming

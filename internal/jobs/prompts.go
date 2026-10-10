@@ -11,13 +11,6 @@ import (
 	"github.com/daiwa-zou/kiln/internal/wiki"
 )
 
-// AnalysisSchema constrains the analyze step's output so the plan can be
-// validated before any money is spent on generation, and so parsing needs no
-// heuristics. Single-sourced from the agent package: the CLI and API runners
-// must enforce the same contract, and two hand-maintained copies had already
-// drifted once.
-var AnalysisSchema = agent.AnalysisSchemaText()
-
 // untrustedFraming is prepended to every system prompt.
 //
 // On a multi-user platform the material being read belongs to someone else, and
@@ -192,7 +185,7 @@ func buildSources(r agent.Runner, root string, unit mapper.Unit) (analyze, gener
 	return inline, inline, ""
 }
 
-func analyzePrompt(key diff.Key, unit mapper.Unit, src unitSource, s Steering, attempt int, prior []wiki.Violation) string {
+func analyzePrompt(key diff.Key, unit mapper.Unit, src unitSource, s Steering) string {
 	var b strings.Builder
 
 	// The rules lead the task text. They were the analyze system prompt, and
@@ -222,7 +215,6 @@ func analyzePrompt(key diff.Key, unit mapper.Unit, src unitSource, s Steering, a
 
 	appendSuppressions(&b, s)
 	appendCorrections(&b, s, unit.Slug)
-	appendRetryContext(&b, attempt, prior)
 	return b.String()
 }
 

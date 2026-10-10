@@ -13,10 +13,6 @@ import (
 	"github.com/daiwa-zou/kiln/internal/wiki"
 )
 
-// ResearchSchema constrains the research step's output, single-sourced from the
-// agent package for the same reason AnalysisSchema is.
-var ResearchSchema = agent.ResearchSchemaText()
-
 // Question is one review item, as the thing being researched rather than as a
 // database row.
 type Question struct {
@@ -114,7 +110,6 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 		SystemPrompt:     researchSystemPrompt(steering),
 		CacheableContext: mat.Map.Summary,
 		Prompt:           researchPrompt(req.Question, req.Source.Path, units, pages),
-		JSONSchema:       ResearchSchema,
 	})
 
 	// Charged whether or not the call succeeded: a failed research pass that

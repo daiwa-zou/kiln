@@ -254,6 +254,32 @@ func truncatePreservingArch(dirty []diff.Key, limit int) []diff.Key {
 	return append(out, diff.ArchOverview)
 }
 
+// finalizeStatus decides the run's closing status and error from its summary.
+//
+// A status already set stays: Build leaves StatusRunning in place until here
+// and only the fan-out's halt (canceled, over_budget) replaces it, so a halted
+// run must not be re-derived from its items -- the units that did finish would
+// read as success. A run that is still running takes runStatus of its items.
+//
+// An error already on the summary stays too. Otherwise any status short of
+// succeeded or no_changes -- including a halt -- gets the first failed item's
+// error, so the run record says why and not only that it failed.
+func finalizeStatus(s RunSummary) (status, errMsg string) {
+	status, errMsg = s.Status, s.Err
+	if status == StatusRunning {
+		status = runStatus(s.Items)
+	}
+	if errMsg == "" && status != StatusSucceeded && status != StatusNoChanges {
+		for _, it := range s.Items {
+			if it.Err != "" {
+				errMsg = fmt.Sprintf("%s: %s", it.Key, it.Err)
+				break
+			}
+		}
+	}
+	return status, errMsg
+}
+
 // runStatus summarizes item outcomes into a single run status.
 func runStatus(items []ItemSummary) string {
 	if len(items) == 0 {

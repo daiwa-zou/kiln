@@ -1,6 +1,11 @@
 package agent
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/daiwa-zou/kiln/internal/wiki"
+)
 
 // GeneratedPage is one page returned by the model.
 //
@@ -51,13 +56,27 @@ type AnalysisResult struct {
 }
 
 // pageTypes are the six agent-writable page types. Overview is excluded: it is
-// derived from frontmatter, never authored.
-var pageTypes = []any{"entity", "concept", "source", "query", "comparison", "synthesis"}
+// derived from frontmatter, never authored. Derived from wiki.GeneratedTypes so
+// the schema the model is held to cannot drift from the types the wiki accepts.
+var pageTypes = func() []any {
+	out := make([]any, 0, len(wiki.GeneratedTypes))
+	for _, t := range wiki.GeneratedTypes {
+		out = append(out, string(t))
+	}
+	return out
+}()
 
 // pagePathPattern constrains a path to one level inside a known type directory.
 // Enforced in the schema so a malformed path costs nothing to reject, and again
-// in Go because a schema is not a security boundary.
-const pagePathPattern = `^(entities|concepts|sources|queries|comparisons|synthesis)/[a-z0-9]+(-[a-z0-9]+)*\.md$`
+// in Go because a schema is not a security boundary. Built from the wiki's own
+// type directories and slug alphabet for the same reason as pageTypes.
+var pagePathPattern = func() string {
+	dirs := make([]string, 0, len(wiki.GeneratedTypes))
+	for _, t := range wiki.GeneratedTypes {
+		dirs = append(dirs, t.Dir())
+	}
+	return "^(" + strings.Join(dirs, "|") + ")/" + wiki.SlugExpr + `\.md$`
+}()
 
 func stringArray() map[string]any {
 	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}

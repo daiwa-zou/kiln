@@ -73,9 +73,6 @@ type Request struct {
 
 	SystemPrompt string
 	Prompt       string
-	// JSONSchema, when set, forces structured output. Used for analyze so the
-	// plan needs no parsing heroics.
-	JSONSchema string
 	// CacheableContext is prompt content identical across every unit in a run --
 	// the rendered map and the steering documents. APIRunner puts a cache
 	// breakpoint after it, so all but the first unit reads it at a tenth of the
