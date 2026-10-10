@@ -169,13 +169,20 @@ func TestCLIRunnerReceivesAUsableInvocation(t *testing.T) {
 		t.Errorf("--resume = %q, which the CLI rejects as not a UUID", resume)
 	}
 
-	// And the working directory must exist and be the unit's sources. Empty is
-	// what a documents-only bench used to produce, and the runner refuses it.
+	// And the working directory must exist and be the unit's scratch directory,
+	// not its sources. Empty is what a documents-only bench used to produce, and
+	// the runner refuses it.
 	if rec.Cwd == "" {
 		t.Fatal("the CLI was given no working directory")
 	}
 	if fi, err := os.Stat(rec.Cwd); err != nil || !fi.IsDir() {
 		t.Errorf("working directory %q is not a directory: %v", rec.Cwd, err)
+	}
+	if sameDir(t, rec.Cwd, req.SourceDir) {
+		t.Errorf("the agent starts in the sources %q, where acceptEdits would let it write", req.SourceDir)
+	}
+	if dirs := flagValues(rec.Args, "--add-dir"); len(dirs) != 1 || !sameDir(t, dirs[0], req.SourceDir) {
+		t.Errorf("--add-dir = %v, want the sources %q granted read-only", dirs, req.SourceDir)
 	}
 }
 
@@ -218,7 +225,8 @@ func TestCLIRunnerBuildsADocumentsOnlyBench(t *testing.T) {
 	}
 
 	var rec struct {
-		Cwd string `json:"cwd"`
+		Args []string `json:"args"`
+		Cwd  string   `json:"cwd"`
 	}
 	raw, err := os.ReadFile(argvLog)
 	if err != nil {
@@ -227,12 +235,20 @@ func TestCLIRunnerBuildsADocumentsOnlyBench(t *testing.T) {
 	if err := json.Unmarshal(raw, &rec); err != nil {
 		t.Fatal(err)
 	}
+	// The unit's own root is the one the agent is granted to read, not the run's
+	// (which is empty on this bench) and not the working directory: the agent
+	// starts in its scratch directory and the sources are read-only beside it.
+	//
 	// Compared through EvalSymlinks: the child reports its working directory
 	// via getwd, which resolves symlinks, and on macOS every t.TempDir() sits
 	// under /var -> /private/var. Comparing the raw strings would fail on the
 	// platform this is most often run on, for no reason anyone cares about.
-	if !sameDir(t, rec.Cwd, staging) {
-		t.Errorf("cwd = %q, want the document's staged root %q", rec.Cwd, staging)
+	dirs := flagValues(rec.Args, "--add-dir")
+	if len(dirs) != 1 || !sameDir(t, dirs[0], staging) {
+		t.Errorf("--add-dir = %v, want the document's staged root %q", dirs, staging)
+	}
+	if sameDir(t, rec.Cwd, staging) {
+		t.Errorf("cwd is the staged root %q; the agent could write into the document's sources", staging)
 	}
 }
 

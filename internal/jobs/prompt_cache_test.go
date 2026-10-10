@@ -49,6 +49,7 @@ func cacheTestRequest(t *testing.T) BuildRequest {
 
 type cliCall struct {
 	Args []string `json:"args"`
+	Cwd  string   `json:"cwd"`
 }
 
 func (c cliCall) prompt() string { return c.Args[len(c.Args)-1] }
@@ -172,19 +173,38 @@ func TestCLIRunnerResumesWithoutBreakingOrRepeatingTheCachedContext(t *testing.T
 	}
 }
 
-// TestCLIRunnerStillGrantsTheScratchDirOnEveryForkedAttempt: --add-dir belongs
-// to the invocation, not the session, so a fork does not inherit the grant. A
-// retry that lost it would write into a directory it cannot, or nowhere.
-func TestCLIRunnerStillGrantsTheScratchDirOnEveryForkedAttempt(t *testing.T) {
+// TestCLIRunnerStartsEveryCallInTheSameScratchDir: the working directory and
+// --add-dir belong to the invocation, not the session, so a fork does not
+// inherit them. Every call about a unit, analyze included, must start in the
+// unit's scratch directory: a CLI session is stored under its working
+// directory, so generate's --resume finds the analyze session only if both
+// started in the same place, and the pages are collected from there. The
+// sources are granted read-only on every call, and the prompt names both.
+func TestCLIRunnerStartsEveryCallInTheSameScratchDir(t *testing.T) {
 	calls := runCLIUnitWithRetries(t)
+	if len(calls) < 2 {
+		t.Fatalf("got %d calls", len(calls))
+	}
+	cwd := calls[0].Cwd
+	if cwd == "" {
+		t.Fatal("analyze reported no working directory")
+	}
+	for i, c := range calls {
+		if c.Cwd != cwd {
+			t.Errorf("call %d started in %q, analyze in %q: the generate session would not be found", i, c.Cwd, cwd)
+		}
+		dirs := flagValues(c.Args, "--add-dir")
+		if len(dirs) != 1 || sameDir(t, dirs[0], c.Cwd) {
+			t.Errorf("call %d: --add-dir = %v, want only the sources (not the working directory %q)", i, dirs, c.Cwd)
+		}
+	}
 	for i, g := range calls[1:] {
-		dir := flagValue(g.Args, "--add-dir")
-		if dir == "" {
-			t.Fatalf("generate attempt %d was granted no scratch directory", i)
+		if !strings.Contains(g.prompt(), "your working directory") || !strings.Contains(g.prompt(), flagValues(g.Args, "--add-dir")[0]) {
+			t.Errorf("generate attempt %d does not tell the agent where its output and the sources are:\n%s", i, g.prompt())
 		}
-		if !strings.Contains(g.prompt(), dir) {
-			t.Errorf("generate attempt %d does not name its scratch directory %q in the prompt", i, dir)
-		}
+	}
+	if !strings.Contains(calls[0].prompt(), "give Read, Grep and Glob absolute paths") {
+		t.Errorf("analyze does not say the relative input paths are not under its working directory:\n%s", calls[0].prompt())
 	}
 }
 

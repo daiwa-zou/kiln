@@ -43,6 +43,13 @@ func collectPages(scratchDir string) ([]*wiki.Page, []wiki.Violation, error) {
 		if err != nil {
 			return err
 		}
+		// The scratch directory is the CLI's working directory, and a tool may
+		// leave its own state in a dot directory there (.claude/ and the like).
+		// No page lives in one: pages are entities/, concepts/ and the other
+		// type directories, so what is under a dot directory is not output.
+		if d.IsDir() && path != root && strings.HasPrefix(d.Name(), ".") {
+			return filepath.SkipDir
+		}
 		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
 			return nil
 		}

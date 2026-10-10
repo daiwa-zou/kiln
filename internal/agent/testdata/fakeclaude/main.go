@@ -13,7 +13,9 @@
 //	  "sleep_ms": 0,
 //	  "envelope": { ...Result fields... },
 //	  "write_files": { "relative/path.md": "contents" },
-//	  "write_dir": "/abs/path to write into, defaults to --add-dir",
+//	  "write_dir": "/abs/path to write into, defaults to the working directory",
+//	  "write_files_abs": { "/abs/path.md": "contents" },
+//	  "write_on": "generate | analyze | research; empty writes on every step",
 //	  "record_args_to": "/abs/path to dump argv as JSON (last call wins)",
 //	  "append_args_to": "/abs/path to append one JSON line of argv per call"
 //	}
@@ -24,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -35,6 +38,8 @@ type script struct {
 	Envelope     map[string]any    `json:"envelope"`
 	WriteFiles   map[string]string `json:"write_files"`
 	WriteDir     string            `json:"write_dir"`
+	WriteAbs     map[string]string `json:"write_files_abs"`
+	WriteOn      string            `json:"write_on"`
 	RecordArgsTo string            `json:"record_args_to"`
 	AppendArgsTo string            `json:"append_args_to"`
 }
@@ -72,23 +77,22 @@ func main() {
 		time.Sleep(time.Duration(s.SleepMS) * time.Millisecond)
 	}
 
-	if len(s.WriteFiles) > 0 {
+	if s.WriteOn == "" || s.WriteOn == stepOf(args) {
+		// The real agent writes relative to its working directory, which the
+		// runner sets to the scratch directory, so that is the default.
 		dir := s.WriteDir
 		if dir == "" {
-			dir = flagValue(args, "--add-dir")
+			dir = mustGetwd()
 		}
 		for rel, content := range s.WriteFiles {
 			// Deliberately not sanitized: some tests script an escape attempt
 			// to prove the validator catches it.
-			full := filepath.Join(dir, rel)
-			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-				fmt.Fprintf(os.Stderr, "fakeclaude: mkdir: %v\n", err)
-				os.Exit(3)
-			}
-			if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-				fmt.Fprintf(os.Stderr, "fakeclaude: write: %v\n", err)
-				os.Exit(3)
-			}
+			writeFile(filepath.Join(dir, rel), content)
+		}
+		// Absolute paths ignore the working directory entirely: how a test
+		// scripts an agent writing somewhere it was told it may not.
+		for full, content := range s.WriteAbs {
+			writeFile(full, content)
 		}
 	}
 
@@ -103,6 +107,31 @@ func main() {
 
 	fmt.Println(string(envelopeJSON(s.Envelope, args)))
 	os.Exit(s.ExitCode)
+}
+
+func writeFile(full, content string) {
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "fakeclaude: mkdir: %v\n", err)
+		os.Exit(3)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "fakeclaude: write: %v\n", err)
+		os.Exit(3)
+	}
+}
+
+// stepOf infers which pipeline step an argv belongs to from the flags that
+// differ between them, since the CLI is not told the step by name: only
+// generate is given Write, and of the other two only analyze opens a session
+// (research, like a sessionless analyze, is reported as "research").
+func stepOf(args []string) string {
+	switch {
+	case strings.Contains(flagValue(args, "--tools"), "Write"):
+		return "generate"
+	case flagValue(args, "--session-id") != "":
+		return "analyze"
+	}
+	return "research"
 }
 
 // envelopeJSON builds a realistic success envelope, overlaid with whatever the

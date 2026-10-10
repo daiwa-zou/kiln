@@ -641,7 +641,11 @@ func (p *Pipeline) generateUnit(
 
 	analyzeRes, aerr := p.Runner.Run(ctx, agent.Request{
 		Step: agent.StepAnalyze, SessionID: sessionID,
-		WorkDir: workDir, Model: p.AnalyzeModel,
+		// The same scratch directory generate gets, though analyze writes
+		// nothing: it is the CLI's working directory, and the session analyze
+		// opens is stored per working directory, so generate's --resume finds
+		// it only if both steps start in the same one.
+		WorkDir: workDir, ScratchDir: scratch, Model: p.AnalyzeModel,
 		BudgetUSD: p.Budget.AnalyzeUSD, Timeout: p.Timeout,
 		SystemPrompt: system,
 		// The rendered map is identical for every unit in the run, so it

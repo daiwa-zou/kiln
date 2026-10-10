@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -105,9 +106,11 @@ func (r *ClaudeRunner) Run(ctx context.Context, req Request) (*Result, error) {
 	args := BuildArgs(req)
 
 	cmd := exec.CommandContext(ctx, r.Binary, args...)
-	// There is no --cwd flag on the installed CLI; the working directory is
-	// how the agent is pointed at the materialized sources.
-	cmd.Dir = req.WorkDir
+	// There is no --cwd flag on the installed CLI; the working directory is set
+	// on the command. It is the scratch directory when there is one, never the
+	// sources: the sources are granted read-only through --add-dir (see
+	// Request.CWD).
+	cmd.Dir = req.CWD()
 	cmd.WaitDelay = childproc.WaitDelay
 	if r.Env != nil {
 		cmd.Env = r.Env
@@ -165,6 +168,14 @@ func BuildArgs(req Request) []string {
 		// decides where they may go. Needs CLI >= 2.1.248, and an older CLI
 		// fails loudly on the unknown flag rather than running unconfined.
 		"--restricted",
+		// The process working directory differs per unit (it is the unit's
+		// scratch directory, see Request.CWD), and the CLI states it, the git
+		// status and the auto-memory path in the system prompt unless told to
+		// put them in the first user message. A system prompt that embeds a
+		// per-unit path is a different prefix for every unit, so the map in
+		// --append-system-prompt would be re-cached for each one instead of
+		// read back at a tenth of the input rate.
+		"--exclude-dynamic-system-prompt-sections",
 	}
 
 	// Daemon runs should not pollute the operator's resume history -- but a
@@ -197,6 +208,9 @@ func BuildArgs(req Request) []string {
 		args = append(args, "--append-system-prompt", system)
 	}
 
+	// The sources, and anything else the step may read but never write.
+	readDirs := readOnlyDirs(req)
+
 	switch req.Step {
 	case StepAnalyze:
 		args = append(args,
@@ -206,7 +220,7 @@ func BuildArgs(req Request) []string {
 			// deny list the other steps carry.
 			"--disallowedTools", strings.Join(deniedTools, ","),
 		)
-		args = append(args, addDirArgs(req.ExtraDirs...)...)
+		args = append(args, addDirArgs(readDirs...)...)
 		args = append(args, "--permission-mode", "dontAsk")
 		args = append(args, "--json-schema", schemaTextFor(req.Step))
 		if req.SessionID != "" {
@@ -224,17 +238,26 @@ func BuildArgs(req Request) []string {
 		)
 		// Under --restricted the file tools stop at the working directory, so
 		// every other directory the question's units live in is granted here.
-		args = append(args, addDirArgs(req.ExtraDirs...)...)
+		args = append(args, addDirArgs(readDirs...)...)
 		args = append(args, "--permission-mode", "dontAsk")
 		args = append(args, "--json-schema", schemaTextFor(req.Step))
 
 	case StepGenerate:
+		// The working directory is the scratch directory, so the pages land
+		// where relative paths point and the sources are a directory the agent
+		// merely may read. That alone is not trusted to keep them unwritten:
+		// --add-dir makes a directory a working directory, and acceptEdits
+		// auto-approves edits in every working directory. The explicit deny
+		// rules below are checked before the mode (deny, then ask, then allow),
+		// so they hold whatever the mode would have approved. The rules are
+		// additional values of --disallowedTools, not part of the comma list, so
+		// a path containing a comma cannot split one.
 		args = append(args,
 			"--tools", strings.Join(generateTools, ","),
 			"--disallowedTools", strings.Join(deniedTools, ","),
 		)
-		// Grants the scratch directory while cwd stays the sources.
-		args = append(args, addDirArgs(req.ScratchDir)...)
+		args = append(args, editDenyRules(readDirs)...)
+		args = append(args, addDirArgs(readDirs...)...)
 		args = append(args, "--permission-mode", "acceptEdits")
 		if req.FallbackModel != "" {
 			args = append(args, "--fallback-model", req.FallbackModel)
@@ -258,6 +281,81 @@ func BuildArgs(req Request) []string {
 	}
 
 	return append(args, req.Prompt)
+}
+
+// readOnlyDirs are the directories a step may read that are not its working
+// directory: the sources, when the working directory is the scratch directory,
+// and any ExtraDirs. They are made absolute because --add-dir and a path rule
+// resolve a relative path against the working directory, which is not where
+// the caller meant.
+func readOnlyDirs(req Request) []string {
+	cwd := absPath(req.CWD())
+	var dirs []string
+	for _, d := range append([]string{req.WorkDir}, req.ExtraDirs...) {
+		if d = absPath(d); d != "" && d != cwd {
+			dirs = append(dirs, d)
+		}
+	}
+	return dirs
+}
+
+func absPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return filepath.Clean(p)
+}
+
+// editDenyRules renders one permission rule per directory that refuses every
+// edit beneath it, as further --disallowedTools values.
+//
+// Syntax, from the CLI's permissions documentation: Read and Edit rules are
+// gitignore patterns, and a path that starts with "//" is absolute from the
+// filesystem root (a single leading "/" is relative to the settings source, a
+// trap that would silently guard the wrong tree). Edit is the rule name for
+// every tool that edits files, Write included; a Write(path) rule is accepted
+// and never consulted, so it is deliberately not used. A deny rule outranks any
+// permission mode.
+//
+// A directory is also named by its real path when that differs, because the
+// rule is matched against the path the tool resolves to and macOS temp
+// directories sit behind a symlink (/var -> /private/var). Newer CLIs match
+// both ways; this does not depend on that.
+func editDenyRules(dirs []string) []string {
+	var rules []string
+	seen := map[string]bool{}
+	add := func(dir string) {
+		rule := "Edit(/" + gitignoreEscape(dir) + "/**)"
+		if !seen[rule] {
+			seen[rule] = true
+			rules = append(rules, rule)
+		}
+	}
+	for _, dir := range dirs {
+		add(dir)
+		if real, err := filepath.EvalSymlinks(dir); err == nil && real != dir {
+			add(real)
+		}
+	}
+	return rules
+}
+
+// gitignoreEscape escapes the characters a gitignore pattern would otherwise
+// read as syntax, so a directory named "[2024] notes*" guards that directory
+// and not a family of lookalikes.
+func gitignoreEscape(p string) string {
+	var b strings.Builder
+	for _, r := range p {
+		switch r {
+		case '\\', '*', '?', '[', ']':
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // addDirArgs renders --add-dir for the non-empty, distinct directories given,
