@@ -2723,6 +2723,19 @@ async function showGraph() {
     // converge in about half a second, few enough that an O(n^2) repulsion pass
     // over a 300-node graph does not eat the frame the drag is being drawn in.
     let stepsPerFrame = 10;
+    // Reduced motion: the layout is not animated at all. Every settle runs to
+    // rest in one synchronous burst, so the graph is drawn once, already
+    // arranged, and a drag or a reset moves things by one jump instead of a
+    // second of drifting. The cost is the same ticks the animation would run,
+    // spent before the next paint instead of across the next sixty.
+    const relax = () => {
+      while (alpha > ALPHA_MIN) { tick(alpha); alpha *= ALPHA_DECAY; }
+    };
+    const rested = () => {
+      settling = false;
+      stepsPerFrame = 3;
+      if (!autoFitted) { autoFitted = true; fitView(); }
+    };
     const settle = () => {
       if (!view.current()) { settling = false; return; }
       for (let i = 0; i < stepsPerFrame && alpha > ALPHA_MIN; i++) {
@@ -2730,19 +2743,19 @@ async function showGraph() {
         alpha *= ALPHA_DECAY;
       }
       position();
-      if (alpha <= ALPHA_MIN) {
-        settling = false;
-        stepsPerFrame = 3;
-        if (!autoFitted) { autoFitted = true; fitView(); }
-        return;
-      }
+      if (alpha <= ALPHA_MIN) { rested(); return; }
       requestAnimationFrame(settle);
     };
     const reheat = (target) => {
       alpha = Math.max(alpha, target);
+      if (REDUCED.matches) {
+        relax();
+        position();
+        if (!settling) rested();
+        return;
+      }
       if (!settling) { settling = true; requestAnimationFrame(settle); }
     };
-    reheat(ALPHA_START);
 
     // --- pan & zoom -------------------------------------------------------
     const vb = { x: 0, y: 0, w: W, h: H };
@@ -2826,6 +2839,9 @@ async function showGraph() {
         springLen *= grow;
         gravity /= grow;
       }
+      // Reduced motion relaxes now, so the camera below frames the final layout
+      // rather than the one the rescale left behind.
+      if (REDUCED.matches) { alpha = Math.max(alpha, ALPHA_RESCALE); relax(); }
       position();
       m = bounds();
       const bx = m.x0 - 20, by = m.y0 - 20;
@@ -2842,8 +2858,11 @@ async function showGraph() {
       applyVB();
       // Uniform rescaling magnifies the old layout's irregularities: let
       // the simulation relax into even spacing at the new scale.
-      reheat(ALPHA_RESCALE);
+      if (!REDUCED.matches) reheat(ALPHA_RESCALE);
     };
+    // Last, because with reduced motion this runs the whole layout and then
+    // fitView before returning, and both need everything above.
+    reheat(ALPHA_START);
     const toSVG = (e) => {
       const rect = svg.getBoundingClientRect();
       return {
@@ -2967,7 +2986,9 @@ async function showGraph() {
         // below the temperature a release re-arms: letting go should visibly
         // hand the node back to the layout, not continue what was already
         // happening.
-        reheat(ALPHA_DRAG);
+        // Reduced motion skips this: the neighbours would have to jump to a new
+        // rest on every pointer event. They settle once, when the node is let go.
+        if (!REDUCED.matches) reheat(ALPHA_DRAG);
       } else {
         const rect = svg.getBoundingClientRect();
         vb.x = drag.pan.x - ((e.clientX - drag.from.cx) / rect.width) * vb.w;
@@ -2985,8 +3006,9 @@ async function showGraph() {
         // moment instead of stopping the instant the finger lifts. Capped at
         // the same per-tick travel the integrator allows, so a violent flick
         // cannot launch a node across the canvas.
-        p.vx = Math.max(-8, Math.min(8, drag.vx));
-        p.vy = Math.max(-8, Math.min(8, drag.vy));
+        // Reduced motion carries nothing: the node stops where it was let go.
+        p.vx = REDUCED.matches ? 0 : Math.max(-8, Math.min(8, drag.vx));
+        p.vy = REDUCED.matches ? 0 : Math.max(-8, Math.min(8, drag.vy));
         // The release is what needs the heat: until now nothing re-armed the
         // simulation here, so a node let go simply stayed where it was dropped
         // and the graph around it never re-settled.
