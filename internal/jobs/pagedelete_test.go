@@ -86,7 +86,7 @@ func TestGeneratePromptNamesDeletedPages(t *testing.T) {
 	if !strings.Contains(prompt, "duplicate of the dispatcher page") {
 		t.Error("the human's reason was not passed on")
 	}
-	if !strings.Contains(prompt, "`unwanted`") {
+	if !strings.Contains(prompt, `Page "unwanted"`) {
 		t.Error("a deletion with no reason was omitted entirely")
 	}
 
