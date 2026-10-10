@@ -28,6 +28,12 @@ type fakeStore struct {
 	// whose review item is gone; recorded captures the write-back.
 	question *store.ResearchQuestion
 	recorded []string
+
+	// installOK/installErr script the run-time installation ownership check;
+	// installChecked records which ids it was asked about.
+	installOK      bool
+	installErr     error
+	installChecked []int64
 }
 
 func (f *fakeStore) ClaimNextRun(context.Context, string) (*store.QueuedRun, error) {
@@ -48,6 +54,10 @@ func (f *fakeStore) ConnectorByID(_ context.Context, id string) (*store.Connecto
 }
 func (f *fakeStore) LoadSealedCredential(_ context.Context, id string) (*store.SealedCredential, error) {
 	return nil, store.ErrNotFound
+}
+func (f *fakeStore) InstallationServesWorkspace(_ context.Context, _ string, id int64) (bool, error) {
+	f.installChecked = append(f.installChecked, id)
+	return f.installOK, f.installErr
 }
 func (f *fakeStore) PollDueConnectors(context.Context, time.Duration) ([]store.ConnectorRow, error) {
 	return nil, nil
