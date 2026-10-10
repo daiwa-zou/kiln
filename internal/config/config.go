@@ -67,8 +67,6 @@ type GitHub struct {
 	ClientID string `mapstructure:"client_id"`
 	// AppID is the numeric App id, for installation tokens.
 	AppID int64 `mapstructure:"app_id"`
-	// AppSlug names the App's public install page.
-	AppSlug string `mapstructure:"app_slug"`
 	// BaseURL and APIBaseURL override github.com, for GitHub Enterprise and
 	// for tests.
 	BaseURL    string `mapstructure:"base_url"`

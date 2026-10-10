@@ -1200,7 +1200,7 @@ deliver them.
 | --- | --- | --- |
 | `auth.mode` | `token` | `none` refused on a non-loopback bind. |
 | `github.client_id` | — | Empty disables sign-in. |
-| `github.app_id` / `.app_slug` | — | For installation tokens and the install page. |
+| `github.app_id` | — | For installation tokens. |
 | `github.base_url` / `.api_base_url` | github.com | For GitHub Enterprise. |
 | `github.session_ttl` | `720h` (30d) | Sessions are revocable rows regardless. |
 | `github.webhook_cooldown` | `1m` | At most one rebuild per bench per minute. Zero disables. |

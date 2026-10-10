@@ -12,7 +12,6 @@ import (
 type globalFlags struct {
 	configFile string
 	logLevel   string
-	jsonOutput bool
 }
 
 func newRootCmd() *cobra.Command {
@@ -35,7 +34,13 @@ run over unchanged sources costs nothing.`,
 	pf := cmd.PersistentFlags()
 	pf.StringVar(&g.configFile, "config", "", "path to config file (default: $XDG_CONFIG_HOME/kiln/config.toml)")
 	pf.StringVar(&g.logLevel, "log-level", "", "log level: debug, info, warn, error")
-	pf.BoolVar(&g.jsonOutput, "json", false, "emit machine-readable output")
+	// --json was once advertised as "emit machine-readable output" but no
+	// command ever read it. It stays registered, hidden, as an accepted no-op
+	// so existing scripts that pass it do not fail with "unknown flag".
+	pf.Bool("json", false, "accepted and ignored; kept for compatibility")
+	if err := pf.MarkHidden("json"); err != nil {
+		panic(err) // the flag was registered on the line above
+	}
 
 	cmd.AddCommand(
 		newVersionCmd(),

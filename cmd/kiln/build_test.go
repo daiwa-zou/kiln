@@ -122,3 +122,20 @@ func TestVersionCommandPrints(t *testing.T) {
 		t.Error("version printed nothing")
 	}
 }
+
+// --json used to be advertised and never read. It stays accepted so scripts
+// that pass it keep working, but must not appear in --help.
+func TestJSONFlagIsAcceptedButHidden(t *testing.T) {
+	root := newRootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetArgs([]string{"--json", "version"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("--json must still parse: %v", err)
+	}
+
+	f := root.PersistentFlags().Lookup("json")
+	if f == nil || !f.Hidden {
+		t.Errorf("--json = %+v, want a registered, hidden flag", f)
+	}
+}
