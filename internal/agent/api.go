@@ -179,6 +179,10 @@ func (r *APIRunner) send(ctx context.Context, params anthropic.MessageNewParams,
 
 	const streamAttempts = 3
 	var lastErr error
+	// wasted is the usage of attempts that died mid-stream. Those tokens were
+	// billed even though their output was discarded, so they belong in the
+	// cost of the call that eventually succeeds.
+	var wasted anthropic.Usage
 	for attempt := range streamAttempts {
 		if attempt > 0 {
 			select {
@@ -188,30 +192,45 @@ func (r *APIRunner) send(ctx context.Context, params anthropic.MessageNewParams,
 			}
 		}
 
-		stream := r.client.Messages.NewStreaming(ctx, params)
-		msg := anthropic.Message{}
-		accumulated := true
-		for stream.Next() {
-			if err := msg.Accumulate(stream.Current()); err != nil {
-				lastErr = fmt.Errorf("accumulate stream: %w", err)
-				accumulated = false
-				break
-			}
-		}
-		if !accumulated {
-			continue
-		}
-		if err := stream.Err(); err != nil {
+		msg, err := r.streamOnce(ctx, params)
+		if err != nil {
 			if ctx.Err() != nil {
 				// Cancellation and timeouts are not transient; stop retrying.
 				return nil, err
 			}
 			lastErr = err
+			addUsage(&wasted, msg.Usage)
 			continue
 		}
+		addUsage(&msg.Usage, wasted)
 		return &msg, nil
 	}
 	return nil, fmt.Errorf("stream failed after %d attempts: %w", streamAttempts, lastErr)
+}
+
+// streamOnce runs a single streaming attempt. The stream is closed on every
+// path: an attempt abandoned with its body still open leaks the connection and
+// the goroutines behind it, once per retry. The partial message is returned
+// alongside any error so the caller can account for the usage it carries.
+func (r *APIRunner) streamOnce(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error) {
+	stream := r.client.Messages.NewStreaming(ctx, params)
+	defer func() { _ = stream.Close() }()
+
+	msg := anthropic.Message{}
+	for stream.Next() {
+		if err := msg.Accumulate(stream.Current()); err != nil {
+			return msg, fmt.Errorf("accumulate stream: %w", err)
+		}
+	}
+	return msg, stream.Err()
+}
+
+// addUsage folds src's token counts into dst.
+func addUsage(dst *anthropic.Usage, src anthropic.Usage) {
+	dst.InputTokens += src.InputTokens
+	dst.OutputTokens += src.OutputTokens
+	dst.CacheCreationInputTokens += src.CacheCreationInputTokens
+	dst.CacheReadInputTokens += src.CacheReadInputTokens
 }
 
 func (r *APIRunner) buildResult(req Request, msg *anthropic.Message, model string, start time.Time) (*Result, error) {
