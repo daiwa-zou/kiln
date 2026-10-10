@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -17,7 +20,10 @@ var ErrNotFound = errors.New("store: not found")
 
 // WorkspaceRow is a workspace as the read API sees it.
 type WorkspaceRow struct {
-	ID        string
+	ID string
+	// Org is the owning org's slug. Workspace slugs are unique only within an
+	// org, so Org/Slug names one workspace and the bare Slug does not.
+	Org       string
 	Slug      string
 	Name      string
 	PageCount int
@@ -63,14 +69,15 @@ type Gap struct {
 // belongs to.
 func (s *WikiStore) ListWorkspaces(ctx context.Context, userID string, admin bool) ([]WorkspaceRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT ws.id, ws.slug, ws.name,
+		SELECT ws.id, o.slug, ws.slug, ws.name,
 		       coalesce(wk.page_count, 0), coalesce(wk.revision, 0)
 		FROM workspaces ws
+		JOIN orgs o ON o.id = ws.org_id
 		LEFT JOIN wikis wk ON wk.workspace_id = ws.id
 		WHERE $1 OR EXISTS (
 		    SELECT 1 FROM org_members m
 		    WHERE m.org_id = ws.org_id AND m.user_id = $2::uuid)
-		ORDER BY ws.slug`, admin, nullable(userID))
+		ORDER BY ws.slug, o.slug`, admin, nullable(userID))
 	if err != nil {
 		return nil, fmt.Errorf("store: list workspaces: %w", err)
 	}
@@ -79,7 +86,7 @@ func (s *WikiStore) ListWorkspaces(ctx context.Context, userID string, admin boo
 	out := []WorkspaceRow{}
 	for rows.Next() {
 		var ws WorkspaceRow
-		if err := rows.Scan(&ws.ID, &ws.Slug, &ws.Name, &ws.PageCount, &ws.Revision); err != nil {
+		if err := rows.Scan(&ws.ID, &ws.Org, &ws.Slug, &ws.Name, &ws.PageCount, &ws.Revision); err != nil {
 			return nil, fmt.Errorf("store: scan workspace: %w", err)
 		}
 		out = append(out, ws)
@@ -87,31 +94,129 @@ func (s *WikiStore) ListWorkspaces(ctx context.Context, userID string, admin boo
 	return out, rows.Err()
 }
 
-// ResolveWorkspace turns a slug or UUID into a workspace row, bounded to what
-// the caller can see. Slugs are only unique per org, so the visibility bound
-// is also the correctness bound; ORDER BY makes the residual ambiguity (one
-// user in two orgs reusing a slug) deterministic.
+// WorkspaceCandidate names one workspace a bare slug could have meant.
+type WorkspaceCandidate struct {
+	ID   string
+	Org  string
+	Slug string
+}
+
+// Ref is the unambiguous "org/slug" form of the workspace.
+func (c WorkspaceCandidate) Ref() string { return c.Org + "/" + c.Slug }
+
+// AmbiguousWorkspaceError reports that a bare slug matched more than one
+// workspace the caller can see. Slugs are unique only per org, and a user can
+// belong to several orgs (an owner can add any user to theirs), so a slug alone
+// must never silently pick the oldest match: that would let whoever created a
+// common slug first capture the traffic of everyone they later add.
+//
+// Candidates come only from workspaces the caller can already see, so listing
+// them discloses nothing.
+type AmbiguousWorkspaceError struct {
+	Ref        string
+	Candidates []WorkspaceCandidate
+}
+
+func (e *AmbiguousWorkspaceError) Error() string {
+	refs := make([]string, len(e.Candidates))
+	for i, c := range e.Candidates {
+		refs[i] = c.Ref()
+	}
+	return fmt.Sprintf("store: workspace %q is ambiguous: matches %s", e.Ref, strings.Join(refs, ", "))
+}
+
+// ErrAmbiguousWorkspace is what an *AmbiguousWorkspaceError matches under
+// errors.Is; errors.As recovers the candidates.
+var ErrAmbiguousWorkspace = errors.New("store: ambiguous workspace")
+
+// Is reports membership in the ErrAmbiguousWorkspace class.
+func (e *AmbiguousWorkspaceError) Is(target error) bool { return target == ErrAmbiguousWorkspace }
+
+// maxAmbiguityCandidates bounds the candidate list. Two matches already make a
+// reference ambiguous; the rest only helps the caller choose.
+const maxAmbiguityCandidates = 20
+
+// uuidPattern matches the canonical text form of a workspace id. Matching up
+// front keeps a malformed value out of the ::uuid cast, which would otherwise
+// fail the whole query.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// ResolveWorkspace turns a workspace reference into a workspace row, bounded
+// to what the caller can see. An id from an org the caller is not in is
+// ErrNotFound, the same answer as a reference that matches nothing, so
+// existence cannot be probed across orgs. ref is one of:
+//
+//   - a workspace id (UUID), resolved exactly. A UUID-shaped ref is never
+//     looked up as a slug, so a slug chosen to look like someone else's id
+//     cannot shadow it.
+//   - "org/slug", which names exactly one workspace: org slugs are globally
+//     unique and workspace slugs are unique within an org.
+//   - a bare slug, which resolves only when exactly one visible workspace has
+//     it; otherwise the error is an *AmbiguousWorkspaceError. Instance admins
+//     get no exemption: they see every org, so for them ambiguity is the norm.
 func (s *WikiStore) ResolveWorkspace(ctx context.Context, ref, userID string, admin bool) (WorkspaceRow, error) {
-	var ws WorkspaceRow
-	err := s.pool.QueryRow(ctx, `
-		SELECT ws.id, ws.slug, ws.name,
+	const base = `
+		SELECT ws.id, o.slug, ws.slug, ws.name,
 		       coalesce(wk.page_count, 0), coalesce(wk.revision, 0)
 		FROM workspaces ws
+		JOIN orgs o ON o.id = ws.org_id
 		LEFT JOIN wikis wk ON wk.workspace_id = ws.id
-		WHERE (ws.slug = $1 OR ws.id::text = $1)
-		  AND ($2 OR EXISTS (
+		WHERE ($1 OR EXISTS (
 		      SELECT 1 FROM org_members m
-		      WHERE m.org_id = ws.org_id AND m.user_id = $3::uuid))
-		ORDER BY ws.created_at
-		LIMIT 1`, ref, admin, nullable(userID)).
-		Scan(&ws.ID, &ws.Slug, &ws.Name, &ws.PageCount, &ws.Revision)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return WorkspaceRow{}, ErrNotFound
+		      WHERE m.org_id = ws.org_id AND m.user_id = $2::uuid))
+		  AND `
+
+	var (
+		cond string
+		args = []any{admin, nullable(userID)}
+	)
+	switch {
+	case uuidPattern.MatchString(ref):
+		cond = `ws.id = $3::uuid`
+		args = append(args, ref)
+	case strings.Contains(ref, "/"):
+		orgSlug, wsSlug, _ := strings.Cut(ref, "/")
+		if orgSlug == "" || wsSlug == "" || strings.Contains(wsSlug, "/") {
+			return WorkspaceRow{}, ErrNotFound
+		}
+		cond = `o.slug = $3 AND ws.slug = $4`
+		args = append(args, orgSlug, wsSlug)
+	default:
+		cond = `ws.slug = $3`
+		args = append(args, ref)
 	}
+
+	rows, err := s.pool.Query(ctx, base+cond+`
+		ORDER BY o.slug, ws.created_at
+		LIMIT `+strconv.Itoa(maxAmbiguityCandidates), args...)
 	if err != nil {
 		return WorkspaceRow{}, fmt.Errorf("store: resolve workspace: %w", err)
 	}
-	return ws, nil
+	defer rows.Close()
+
+	var found []WorkspaceRow
+	for rows.Next() {
+		var ws WorkspaceRow
+		if err := rows.Scan(&ws.ID, &ws.Org, &ws.Slug, &ws.Name, &ws.PageCount, &ws.Revision); err != nil {
+			return WorkspaceRow{}, fmt.Errorf("store: scan workspace: %w", err)
+		}
+		found = append(found, ws)
+	}
+	if err := rows.Err(); err != nil {
+		return WorkspaceRow{}, fmt.Errorf("store: resolve workspace: %w", err)
+	}
+
+	switch len(found) {
+	case 0:
+		return WorkspaceRow{}, ErrNotFound
+	case 1:
+		return found[0], nil
+	}
+	amb := &AmbiguousWorkspaceError{Ref: ref}
+	for _, ws := range found {
+		amb.Candidates = append(amb.Candidates, WorkspaceCandidate{ID: ws.ID, Org: ws.Org, Slug: ws.Slug})
+	}
+	return WorkspaceRow{}, amb
 }
 
 // LoadPageSummaries lists live pages without their bodies.

@@ -9,7 +9,44 @@ const state = {
 };
 
 const TOKEN_KEY = "kiln.token";
+// WORKSPACE_KEY remembers the open bench by its *id*. Slugs are unique only
+// within an org, and a user can belong to several orgs that each own a "docs":
+// routing by slug would silently pick one of them. Every API URL the UI builds
+// from state.workspace is therefore an id, which names exactly one bench.
 const WORKSPACE_KEY = "kiln.workspace";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// currentBench is the list entry for the open bench (state.workspace is its id).
+const currentBench = () => state.benches.find((b) => b.id === state.workspace);
+// benchRef is the readable, unambiguous name of a bench: org/slug.
+const benchRef = (b) => (b.org ? `${b.org}/${b.slug}` : b.slug);
+// benchLabel is what the switcher shows. Names are free text and slugs repeat
+// across orgs, so a bench that shares its slug with another visible one is
+// shown with its org, which is the only thing telling the two apart.
+const benchLabel = (b) =>
+  state.benches.filter((o) => o.slug === b.slug).length > 1
+    ? `${b.name} · ${benchRef(b)}`
+    : b.name;
+
+// pickInitialBench chooses the bench to open on load. A stored id wins. A
+// stored value that is not an id is a slug from before benches were routed by
+// id: it migrates only when exactly one bench has that slug, because guessing
+// between two is the bug this exists to prevent. Anything else falls back to
+// the first bench that actually has pages, rather than the first alphabetically:
+// landing on an empty bench shows the first-run screen and its dead controls to
+// someone whose instance is fully built, which reads as "my wiki is gone".
+function pickInitialBench(benches, stored) {
+  if (stored) {
+    if (UUID_RE.test(stored)) {
+      const hit = benches.find((b) => b.id === stored);
+      if (hit) return hit.id;
+    } else {
+      const hits = benches.filter((b) => b.slug === stored);
+      if (hits.length === 1) return hits[0].id;
+    }
+  }
+  return (benches.find((b) => b.pageCount > 0) ?? benches[0]).id;
+}
 
 // Conditional-request cache: the server ETags most reads off the wiki
 // revision, which only moves on import, so a 304 saves the whole body.
@@ -1670,7 +1707,7 @@ async function showOverview() {
     ]);
     if (!view.current()) return;
 
-    const bench = state.benches.find((b) => b.slug === state.workspace);
+    const bench = currentBench();
     const total = state.pages.length;
     const fresh = state.pages.filter((p) => freshnessOf(p).key === "fired").length;
     const cooling = state.pages.filter((p) => freshnessOf(p).key === "cooling").length;
@@ -1702,7 +1739,7 @@ async function showOverview() {
     const derived = splitOverview(artifact.body);
 
     if (!view.done(`
-      <h1>${esc(bench?.name || state.workspace)}</h1>
+      <h1>${esc(bench?.name || "Overview")}</h1>
       <p class="overview-deck">A compiled wiki, kept current as its sources change.</p>
       <div class="stats ${known ? "n3" : "n2"}">
         ${stat("Pages", String(total), `across ${clusters.length} type${clusters.length === 1 ? "" : "s"}`)}
@@ -3651,7 +3688,11 @@ async function showGraph() {
 // deleting from beats hunting for it in the picker.
 async function showBench() {
   const view = beginView("Bench configuration", "bench");
-  const bench = state.benches.find((b) => b.slug === state.workspace);
+  const bench = currentBench();
+  // Deletion asks for the slug typed back, and the server compares it with the
+  // bench's own slug, so that is what this page needs -- not the id the UI
+  // routes by.
+  const benchSlug = bench?.slug ?? "";
   const pages = state.pages.length;
   try {
     // Owner-gated on the server, so a 403 here is expected for an editor and
@@ -3662,12 +3703,12 @@ async function showBench() {
       <div class="stats n3">
         <div class="stat">
           <div class="stat-label">Name</div>
-          <div class="stat-value stat-text">${esc(bench?.name || state.workspace)}</div>
+          <div class="stat-value stat-text">${esc(bench?.name || "This bench")}</div>
         </div>
         <div class="stat">
           <div class="stat-label">Slug</div>
-          <div class="stat-value stat-text mono">${esc(state.workspace)}</div>
-          <div class="stat-note">what URLs and agents call it</div>
+          <div class="stat-value stat-text mono">${esc(bench ? benchRef(bench) : "")}</div>
+          <div class="stat-note">org/slug; its id is what URLs and agents use</div>
         </div>
         <div class="stat">
           <div class="stat-label">Pages</div>
@@ -3679,12 +3720,12 @@ async function showBench() {
       ${publishPanel(publish)}
 
       <div class="sec-head"><div class="group-label">Delete this bench</div></div>
-      <p class="hint">Removes <strong>${esc(bench?.name || state.workspace)}</strong> and
+      <p class="hint">Removes <strong>${esc(bench?.name || "this bench")}</strong> and
         everything in it — every page, run, review, connector and uploaded document.
         Deleting a single source removes the pages it produced but keeps them
         recoverable for a while; this removes the bench itself, and there is no undo.</p>
       <div class="row">
-        <input id="bench-delete-slug" placeholder="type ${esc(state.workspace)} to confirm"
+        <input id="bench-delete-slug" placeholder="type ${esc(benchSlug)} to confirm"
                aria-label="Repeat the bench slug to confirm deletion"
                autocomplete="off" spellcheck="false">
         <button class="btn danger" id="bench-delete" disabled>Delete bench</button>
@@ -3706,7 +3747,7 @@ async function showBench() {
       if (n) { n.textContent = msg || ""; n.classList.toggle("error", Boolean(isError)); }
     };
     delSlug.addEventListener("input", () => {
-      delBtn.disabled = delSlug.value.trim() !== state.workspace;
+      delBtn.disabled = !benchSlug || delSlug.value.trim() !== benchSlug;
     });
     delBtn.addEventListener("click", async () => {
       if (delBtn.disabled) return;
@@ -3861,7 +3902,9 @@ async function showMCP() {
       }
     }
 
-    const ws = state.workspace || "your-bench";
+    // The id, not the slug: the same slug can exist in two orgs, and an id never
+    // means a different bench.
+    const ws = state.workspace || "your-bench-id";
     const origin = location.origin;
     const endpoint = `${origin}/mcp`;
     // The key is a placeholder in every snippet on this page. Substituting a
@@ -3923,7 +3966,7 @@ async function showMCP() {
         </div>
         <p class="hint"><span class="mono">kiln</span> must be on your
           <span class="mono">PATH</span>, or give an absolute path. Add
-          <span class="mono">"--workspace", "${esc(ws)}"</span> to the args only to
+          <span class="mono">"--workspace", "${esc(ws)}"</span> (this bench's id) to the args only to
           confine the agent to this bench — without it, it reaches every bench the
           key allows.</p>`,
       "claude-web": `
@@ -4305,24 +4348,24 @@ const onSearchView = () => location.hash.startsWith("#/search/") || location.has
 // loadAllPages pages through the summaries endpoint until it runs dry. The
 // server caps a single response; stopping at one page silently truncated the
 // sidebar and -- worse -- made links to pages beyond the cap render as dead.
-async function loadAllPages(slug) {
+async function loadAllPages(id) {
   const limit = 1000;
   const all = [];
   for (let offset = 0; ; offset += limit) {
-    const batch = await api(`/workspaces/${encodeURIComponent(slug)}/pages?limit=${limit}&offset=${offset}`);
+    const batch = await api(`/workspaces/${encodeURIComponent(id)}/pages?limit=${limit}&offset=${offset}`);
     all.push(...batch);
     if (batch.length < limit) return all;
   }
 }
 
-async function loadWorkspace(slug) {
-  state.workspace = slug;
-  localStorage.setItem(WORKSPACE_KEY, slug);
-  const meta = state.benches.find((w) => w.slug === slug);
-  if (meta) $("bench-label").textContent = meta.name;
-  $("bench-name").title = meta ? `${meta.name} — ${meta.pageCount} pages` : slug;
+async function loadWorkspace(id) {
+  state.workspace = id;
+  localStorage.setItem(WORKSPACE_KEY, id);
+  const meta = currentBench();
+  if (meta) $("bench-label").textContent = benchLabel(meta);
+  $("bench-name").title = meta ? `${meta.name} (${benchRef(meta)}) — ${meta.pageCount} pages` : "";
   for (const b of $("bench-list").querySelectorAll("button"))
-    b.setAttribute("aria-current", String(b.dataset.slug === slug));
+    b.setAttribute("aria-current", String(b.dataset.id === id));
   $("bench").open = false;
   // A filter is about the bench that was open, not the one being opened.
   treeFilter = "";
@@ -4331,11 +4374,11 @@ async function loadWorkspace(slug) {
   // The run feed comes first: every freshness dot in the tree is measured
   // against the refs it publishes, so loading it after the pages would paint
   // the whole rail grey and then repaint it.
-  state.connectors = await api(`/workspaces/${encodeURIComponent(slug)}/connectors`)
+  state.connectors = await api(`/workspaces/${encodeURIComponent(id)}/connectors`)
     .catch(() => []); // owner-gated; a 403 only costs the next-build sentence
   await refreshRunState();
-  if (state.workspace !== slug) return; // raced a bench switch
-  state.pages = await loadAllPages(slug);
+  if (state.workspace !== id) return; // raced a bench switch
+  state.pages = await loadAllPages(id);
   state.slugs = new Set(state.pages.map((p) => p.slug));
   route();
   armRunPoll();
@@ -4650,13 +4693,13 @@ function wireBenchCreate(nameID, buttonID, noteID, onDone) {
     const slug = slugify(name);
     if (!slug) { note("give the bench a name"); return; }
     try {
-      await api("/workspaces", { method: "POST", body: { slug, name } });
+      const created = await api("/workspaces", { method: "POST", body: { slug, name } });
       toast(`Created ${name}`);
       onDone?.();
       // Land *in* the bench that was just created, not back in whichever one
       // was open before: creating a bench is a statement of where you want
-      // to be. The stored slug is what boot() restores after the reload.
-      localStorage.setItem(WORKSPACE_KEY, slug);
+      // to be. The stored id is what boot() restores after the reload.
+      localStorage.setItem(WORKSPACE_KEY, created.id);
       // Reload rather than patch state: a first bench changes the whole
       // shell, and a fresh boot is simpler than reconciling it in place.
       // It lands on Get started, which is the next thing to do.
@@ -4830,7 +4873,7 @@ async function boot() {
     }
     state.benches = workspaces;
     $("bench-list").innerHTML = workspaces
-      .map((w) => `<button type="button" data-slug="${esc(w.slug)}">${esc(w.name)} (${esc(w.pageCount)})</button>`)
+      .map((w) => `<button type="button" data-id="${esc(w.id)}">${esc(benchLabel(w))} (${esc(w.pageCount)})</button>`)
       .join("") + `<button type="button" class="bench-new" id="bench-new">+ New bench</button>`;
 
     $("bench-list").addEventListener("click", (e) => {
@@ -4839,13 +4882,13 @@ async function boot() {
         openBenchCreator();
         return;
       }
-      const b = e.target.closest("button[data-slug]");
+      const b = e.target.closest("button[data-id]");
       if (!b) return;
-      if (b.dataset.slug === state.workspace) { $("bench").open = false; return; }
+      if (b.dataset.id === state.workspace) { $("bench").open = false; return; }
       // A new workspace starts at its overview: carrying the previous page's
       // hash across would greet it with "page not found".
       location.hash = "#/overview";
-      loadWorkspace(b.dataset.slug);
+      loadWorkspace(b.dataset.id);
     });
     window.addEventListener("hashchange", route);
     wireFilterBox();
@@ -4875,16 +4918,9 @@ async function boot() {
       });
     }
 
-    // The workspace choice survives a reload. A remembered slug that no longer
-    // exists falls back to the first bench that actually has pages, rather
-    // than the first alphabetically: landing on an empty bench shows the
-    // first-run screen and its dead controls to someone whose instance is
-    // fully built, which reads as "my wiki is gone".
-    const stored = localStorage.getItem(WORKSPACE_KEY);
-    const initial = workspaces.some((w) => w.slug === stored)
-      ? stored
-      : (workspaces.find((w) => w.pageCount > 0) ?? workspaces[0]).slug;
-    await loadWorkspace(initial);
+    // The workspace choice survives a reload; see pickInitialBench for how a
+    // stored id, a legacy slug and a vanished bench are each handled.
+    await loadWorkspace(pickInitialBench(workspaces, localStorage.getItem(WORKSPACE_KEY)));
   } catch (err) {
     if (err.handled) return;
     $("main").classList.remove("bleed");

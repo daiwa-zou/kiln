@@ -134,7 +134,10 @@ Then add it as a source in the **Sources** view with path
 
 ```bash
 TOKEN=$(cat .dev/k8s/token)
-curl -X POST localhost:8080/api/v1/workspaces/my-project/connectors \
+# By id: a bare slug works only while no other bench you can see shares it.
+BENCH=$(curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/api/v1/workspaces \
+  | jq -r '.[] | select(.slug=="my-project") | .id')
+curl -X POST localhost:8080/api/v1/workspaces/$BENCH/connectors \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"kind":"git","name":"local","config":{"path":"/sources/my-project"}}'
 ```

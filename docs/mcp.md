@@ -31,9 +31,17 @@ enumerates them, and every other tool takes a `bench` argument. A token sees
 exactly what its owner sees: naming a bench the token cannot read answers
 identically to naming one that does not exist.
 
-Neither form pins a bench by default. `kiln mcp --workspace <slug>` narrows the
+Neither form pins a bench by default. `kiln mcp --workspace <id>` narrows the
 subprocess to one, which is worth doing only when the agent should not see the
 rest — it makes the other benches unreachable rather than merely un-defaulted.
+
+**Name a bench by its id.** `list_benches` prints each bench's id first, with
+its `org/slug` beside it, and the id is what to pass back as `bench` (or to
+`--workspace`). Slugs are unique only within an org, so a user in two orgs that
+each own a `docs` bench could otherwise be answered from the wrong one. `org/slug`
+is unambiguous too. A bare slug is still accepted, but only while exactly one
+bench the key can read has it; otherwise the tool reports the candidates and
+asks for the id.
 
 ## HTTPS
 
@@ -105,7 +113,7 @@ Windows):
 ```
 
 Restart the app afterwards. `kiln` must be on your `PATH`, or give an absolute
-path. Add `"--workspace", "<slug>"` to the args only if you want the agent
+path. Add `"--workspace", "<bench id>"` to the args only if you want the agent
 confined to one bench; without it, it can reach every bench the key allows and
 `list_benches` shows them.
 

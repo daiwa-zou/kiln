@@ -156,7 +156,7 @@ Either way an agent reads over the HTTP API rather than the database, so it
 needs no Postgres credentials and the token decides which benches it can see.
 Both serve every bench the key can read and no others, so `list_benches` is
 where an agent starts and every other tool takes a `bench` argument. Pass
-`--workspace <slug>` to confine a subprocess to one bench.
+`--workspace <id>` (or `org/slug`) to confine a subprocess to one bench.
 
 ## Configuring it
 
@@ -333,12 +333,22 @@ add the repo as a source (path `$PWD`), and hit Build now — or do the same ove
 the API:
 
 ```bash
-curl -X POST localhost:8080/api/v1/workspaces/kiln/connectors \
+# Address the bench by its id: slugs are unique only within an org.
+BENCH=$(curl -s localhost:8080/api/v1/workspaces | jq -r '.[] | select(.slug=="kiln") | .id')
+curl -X POST localhost:8080/api/v1/workspaces/$BENCH/connectors \
   -H 'Content-Type: application/json' \
   -d '{"kind":"git","name":"local","config":{"path":"'$PWD'"}}'
-curl -X POST localhost:8080/api/v1/workspaces/kiln/runs \
+curl -X POST localhost:8080/api/v1/workspaces/$BENCH/runs \
   -H 'Content-Type: application/json' -d '{}'
 ```
+
+`/api/v1/workspaces/{workspace}` takes a bench **id** (the `id` from
+`GET /api/v1/workspaces`), or `org~slug` (the `~` stands in for the `/` of
+`org/slug`, which a path segment cannot carry). A bare slug such as `kiln` still
+works, but only while exactly one bench you can see has it: slugs are unique per
+org, not across them, so when you belong to two orgs that each own a `docs` the
+bare form answers `409 Conflict` with the candidates as `org/slug` and id
+rather than picking one for you.
 
 then watch it on the Runs view, which reports the plan as it executes — how many
 units are done, which one is being written now, and what is still queued behind

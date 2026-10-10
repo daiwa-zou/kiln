@@ -142,7 +142,7 @@ func TestPageBodyResolvesFigureReferences(t *testing.T) {
 	}
 	got, _ := page["body"].(string)
 
-	want := "![Revenue by quarter](/api/v1/workspaces/demo/figures/" + id + ")"
+	want := "![Revenue by quarter](/api/v1/workspaces/" + wsID + "/figures/" + id + ")"
 	if !strings.Contains(got, want) {
 		t.Errorf("body did not resolve the known figure:\n%s", got)
 	}
@@ -171,7 +171,7 @@ func TestFiguresListReportsWhatDocumentsContributed(t *testing.T) {
 	if listed[0]["caption"] != "Figure 1: revenue by quarter" {
 		t.Errorf("caption = %v", listed[0]["caption"])
 	}
-	if listed[0]["url"] != "/api/v1/workspaces/demo/figures/"+id {
+	if listed[0]["url"] != "/api/v1/workspaces/"+wsID+"/figures/"+id {
 		t.Errorf("url = %v", listed[0]["url"])
 	}
 	if listed[0]["source"] != sourceKey {

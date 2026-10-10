@@ -1000,11 +1000,24 @@ neither is a thing an editor role should shape.
 Org membership is resolved per query rather than snapshotted into the identity,
 so a revoked membership takes effect immediately.
 
+**Workspace references.** `{ws}` in every route is a workspace reference: an id
+(a UUID, resolved exactly), `org~slug` (`org/slug`, with `~` standing in for the
+`/` a path segment cannot hold; slugs are lowercase letters, digits and dashes,
+so the mapping is lossless), or a bare slug. Slugs are unique only per org and
+an org owner can add any existing user to their org, so a bare slug resolves
+only when exactly one workspace *the caller can see* carries it; with two or
+more it is `409 Conflict` with a `candidates` list of `{ref: "org/slug", id}`.
+Silently preferring the oldest match would let whoever claimed a common slug
+first capture the traffic of everyone they later add. Instance admins follow the
+same rule. Visibility bounds every form: an id or `org/slug` outside the
+caller's orgs is `404`, identical to a reference that matches nothing. The UI and
+the MCP tools address benches by id.
+
 | Group | Routes |
 | --- | --- |
 | Health | `GET /healthz`, `GET /readyz` |
 | Identity | `GET /auth/github/login`, `/callback`, `POST /auth/logout`, `GET /me` |
-| Reading | `GET /workspaces`, `/workspaces/{ws}`, `/pages`, `/pages/*`, `/index`, `/overview`, `/log`, `/search`, `/gaps`, `/graph`, `/backlinks/{slug}` |
+| Reading | `GET /workspaces`, `/workspaces/{ws}` (id, `org~slug`, or an unambiguous bare slug), `/pages`, `/pages/*`, `/index`, `/overview`, `/log`, `/search`, `/gaps`, `/graph`, `/backlinks/{slug}` |
 | Runs | `GET /runs`, `GET /runs/{id}/items`, `POST /runs` |
 | Sources *(admin)* | `GET`/`POST /connectors`, `PATCH`/`DELETE /connectors/{id}`, `GET`/`POST /credentials`, `DELETE /credentials/{id}` |
 | Files | `GET /files`, `POST` upload, `PATCH`/`DELETE /files/{id}` |

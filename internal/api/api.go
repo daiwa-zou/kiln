@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -502,6 +503,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 // WorkspaceSummary is a workspace as the list endpoint returns it.
 type WorkspaceSummary struct {
 	ID        string `json:"id"`
+	Org       string `json:"org"`
 	Slug      string `json:"slug"`
 	Name      string `json:"name"`
 	PageCount int    `json:"pageCount"`
@@ -510,7 +512,7 @@ type WorkspaceSummary struct {
 
 func summaryOf(ws store.WorkspaceRow) WorkspaceSummary {
 	return WorkspaceSummary{
-		ID: ws.ID, Slug: ws.Slug, Name: ws.Name,
+		ID: ws.ID, Org: ws.Org, Slug: ws.Slug, Name: ws.Name,
 		PageCount: ws.PageCount, Revision: ws.Revision,
 	}
 }
@@ -596,7 +598,7 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 	// Figure references become URLs here rather than at write time, so the
 	// stored body stays independent of where this deployment serves images
 	// from.
-	body := resolveFigureBody(p.Body, chi.URLParam(r, "workspace"),
+	body := resolveFigureBody(p.Body, ws.ID,
 		s.knownFigureIDs(r.Context(), ws.ID))
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -725,15 +727,48 @@ func (s *Server) handleGaps(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// workspaceRef reads the {workspace} path segment as a workspace reference:
+// a workspace id, "org/slug", or a bare slug.
+//
+// A path segment cannot carry a literal "/", so org/slug travels as
+// "org~slug". Slugs are lowercase letters, digits and dashes, so "~" can never
+// appear inside one and the mapping is lossless. A percent-encoded
+// "org%2Fslug" is accepted too, for clients that encode the slash themselves.
+func workspaceRef(r *http.Request) string {
+	ref := chi.URLParam(r, "workspace")
+	if dec, err := url.PathUnescape(ref); err == nil {
+		ref = dec
+	}
+	return strings.Replace(ref, "~", "/", 1)
+}
+
 // resolve turns the {workspace} path segment into a workspace, bounded to
 // what the caller can see. Absence and no-access answer identically, so a
-// slug cannot be probed for existence across org boundaries.
+// workspace cannot be probed for existence across org boundaries. A bare slug
+// that more than one visible workspace carries is a 409 listing the
+// candidates, never a silent pick.
 func (s *Server) resolve(w http.ResponseWriter, r *http.Request) (store.WorkspaceRow, bool) {
-	ref := chi.URLParam(r, "workspace")
+	ref := workspaceRef(r)
 	uid, admin := s.scope(r)
 
 	ws, err := s.Store.ResolveWorkspace(r.Context(), ref, uid, admin)
+	var amb *store.AmbiguousWorkspaceError
 	switch {
+	case errors.As(err, &amb):
+		type candidate struct {
+			Ref string `json:"ref"`
+			ID  string `json:"id"`
+		}
+		cands := make([]candidate, 0, len(amb.Candidates))
+		for _, c := range amb.Candidates {
+			cands = append(cands, candidate{Ref: c.Ref(), ID: c.ID})
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": fmt.Sprintf("workspace %q is ambiguous: more than one workspace you can see has that slug. "+
+				"Address it by id, or as org/slug (org~slug in a URL path).", amb.Ref),
+			"candidates": cands,
+		})
+		return store.WorkspaceRow{}, false
 	case errors.Is(err, store.ErrNotFound):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
 		return store.WorkspaceRow{}, false
