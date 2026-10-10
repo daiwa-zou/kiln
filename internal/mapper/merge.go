@@ -17,7 +17,7 @@ const MergeKind = "mixed"
 //
 // This is what makes a workspace source-agnostic in practice rather than only
 // in the interface: a repository and a folder of PDFs each get the mapper that
-// understands them, and the result is one unit list, one hash, and one wiki
+// understands them, and the result is one unit list and one wiki
 // whose pages can link across the boundary. Without it each connector would
 // need its own run and cross-source wikilinks could never resolve, because the
 // two halves would never be in scope together.
@@ -33,14 +33,18 @@ func Merge(root string, maps ...*WorkspaceMap) (*WorkspaceMap, error) {
 	out := &WorkspaceMap{SchemaVersion: 1, Root: root}
 
 	var (
-		kinds     []string
-		summaries []string
-		seen      = map[string]string{} // unit key -> the map kind that claimed it
+		kinds      []string
+		summaries  []string
+		archHashes []string
+		seen       = map[string]string{} // unit key -> the map kind that claimed it
 	)
 
 	for _, m := range maps {
 		if m == nil {
 			continue
+		}
+		if m.ArchHash != "" {
+			archHashes = append(archHashes, m.ArchHash)
 		}
 		if m.Kind != "" && !slices.Contains(kinds, m.Kind) {
 			kinds = append(kinds, m.Kind)
@@ -81,11 +85,11 @@ func Merge(root string, maps ...*WorkspaceMap) (*WorkspaceMap, error) {
 	}
 
 	// Units are sorted so the merged order does not depend on which connector
-	// the caller happened to sync first. The unit hash below depends on this.
+	// the caller happened to sync first.
 	sort.SliceStable(out.Units, func(i, j int) bool { return out.Units[i].Key < out.Units[j].Key })
 
 	out.Summary = strings.Join(summaries, "\n\n")
-	out.Hash = hashUnits(out.Units)
+	out.ArchHash = mergeArchHashes(archHashes)
 	return out, nil
 }
 
@@ -100,17 +104,26 @@ func (e *DuplicateKeyError) Error() string {
 		e.First + " and " + e.Second + " mappers"
 }
 
-// hashUnits digests the merged shape.
+// mergeArchHashes carries the architecture digest through a merge.
 //
-// Keyed on unit key and content hash only: a unit that moved in the list has
-// not changed, and treating it as changed would spend a model call to rewrite
-// an identical page.
-func hashUnits(units []Unit) string {
+// Only the repository mapper produces one, so the usual input is a single
+// value and it passes through untouched: that is what keeps a repository
+// merged with any number of documents on the same digest as the repository
+// alone, and what the architecture synthesis's gate depends on. Several
+// values (two repositories) combine order-independently, so reordering the
+// connectors does not look like a structural change.
+func mergeArchHashes(hashes []string) string {
+	switch len(hashes) {
+	case 0:
+		return ""
+	case 1:
+		return hashes[0]
+	}
+	sorted := slices.Clone(hashes)
+	slices.Sort(sorted)
 	h := sha256.New()
-	for _, u := range units {
-		h.Write([]byte(u.Key))
-		h.Write([]byte{0})
-		h.Write([]byte(u.Hash))
+	for _, s := range sorted {
+		h.Write([]byte(s))
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))

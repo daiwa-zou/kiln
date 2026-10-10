@@ -73,10 +73,61 @@ func TestMergeRejectsDuplicateKeys(t *testing.T) {
 	}
 }
 
-func TestMergeHashIgnoresConnectorOrder(t *testing.T) {
-	// The hash gates whether a run costs anything. If it depended on which
+// repoMap is a repository-shaped input carrying the architecture digest the
+// repository mapper would have computed.
+func repoMap(archHash string, units ...Unit) *WorkspaceMap {
+	return &WorkspaceMap{Kind: "repo", ArchHash: archHash, Units: units}
+}
+
+func TestMergeCarriesArchHashThroughUnchanged(t *testing.T) {
+	// The architecture synthesis reads the repository's module structure. A
+	// repository merged with documents must gate it exactly as the repository
+	// alone does, or every document edit re-pays for the synthesis and a run
+	// pinned to the git connector disagrees with one that is not.
+	code := repoMap("structure-1", unit("module:auth", "h1"))
+	docs := &WorkspaceMap{Kind: "doc", Units: []Unit{unit("doc:a.pdf", "h2")}}
+
+	alone, err := Merge("/repo", code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := Merge("/repo", code, docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alone.ArchHash != "structure-1" || merged.ArchHash != alone.ArchHash {
+		t.Errorf("arch hash = %q merged, %q alone; want both structure-1", merged.ArchHash, alone.ArchHash)
+	}
+}
+
+func TestMergeArchHashIgnoresDocumentContent(t *testing.T) {
+	code := repoMap("structure-1", unit("module:auth", "h1"))
+
+	a, _ := Merge("/repo", code, &WorkspaceMap{Kind: "doc", Units: []Unit{unit("doc:a.pdf", "draft")}})
+	b, _ := Merge("/repo", code, &WorkspaceMap{Kind: "doc", Units: []Unit{unit("doc:a.pdf", "final")}})
+	c, _ := Merge("/repo", code, &WorkspaceMap{Kind: "doc", Units: []Unit{
+		unit("doc:a.pdf", "final"), unit("doc:b.pdf", "new"),
+	}})
+	if a.ArchHash != b.ArchHash || a.ArchHash != c.ArchHash {
+		t.Errorf("a document edit or addition moved the arch hash: %q %q %q", a.ArchHash, b.ArchHash, c.ArchHash)
+	}
+}
+
+func TestMergeArchHashTracksTheRepository(t *testing.T) {
+	docs := &WorkspaceMap{Kind: "doc", Units: []Unit{unit("doc:a.pdf", "h2")}}
+
+	a, _ := Merge("/repo", repoMap("structure-1", unit("module:auth", "h1")), docs)
+	b, _ := Merge("/repo", repoMap("structure-2", unit("module:auth", "h1")), docs)
+	if a.ArchHash == b.ArchHash {
+		t.Error("a structural change did not change the arch hash")
+	}
+}
+
+func TestMergeArchHashIgnoresConnectorOrder(t *testing.T) {
+	// The gate decides whether a run costs anything. If it depended on which
 	// connector synced first, a reordering would look like a full rebuild.
-	code := &WorkspaceMap{Kind: "repo", Units: []Unit{unit("module:auth", "h1")}}
+	code := repoMap("structure-1", unit("module:auth", "h1"))
+	other := repoMap("structure-2", unit("module:web", "h3"))
 	docs := &WorkspaceMap{Kind: "doc", Units: []Unit{unit("doc:a.pdf", "h2")}}
 
 	a, err := Merge("/repo", code, docs)
@@ -87,20 +138,29 @@ func TestMergeHashIgnoresConnectorOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if a.ArchHash != b.ArchHash {
+		t.Errorf("arch hash depends on merge order: %s vs %s", a.ArchHash, b.ArchHash)
+	}
 
-	if a.Hash != b.Hash {
-		t.Errorf("hash depends on merge order: %s vs %s", a.Hash, b.Hash)
+	// Two repositories combine, and do so the same way in either order.
+	ab, _ := Merge("/repo", code, other)
+	ba, _ := Merge("/repo", other, code)
+	if ab.ArchHash == "" || ab.ArchHash != ba.ArchHash {
+		t.Errorf("combined arch hash depends on merge order: %q vs %q", ab.ArchHash, ba.ArchHash)
+	}
+	if ab.ArchHash == code.ArchHash || ab.ArchHash == other.ArchHash {
+		t.Error("combined arch hash ignores one of its repositories")
 	}
 }
 
-func TestMergeHashTracksContent(t *testing.T) {
-	base := &WorkspaceMap{Kind: "repo", Units: []Unit{unit("module:auth", "h1")}}
-	changed := &WorkspaceMap{Kind: "repo", Units: []Unit{unit("module:auth", "h2")}}
-
-	a, _ := Merge("/repo", base)
-	b, _ := Merge("/repo", changed)
-	if a.Hash == b.Hash {
-		t.Error("a changed unit hash did not change the map hash")
+func TestMergeWithoutRepositoryHasNoArchHash(t *testing.T) {
+	// Documents alone have no module structure for a synthesis to describe.
+	got, err := Merge("/docs", &WorkspaceMap{Kind: "doc", Units: []Unit{unit("doc:a.pdf", "h2")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ArchHash != "" {
+		t.Errorf("arch hash = %q, want none", got.ArchHash)
 	}
 }
 

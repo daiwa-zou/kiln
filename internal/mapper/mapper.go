@@ -51,5 +51,10 @@ type WorkspaceMap struct {
 	Units         []Unit    `json:"units"`
 	Edges         []Edge    `json:"edges"`
 	Summary       string    `json:"summary"` // rendered, citable by the agent
-	Hash          string    `json:"hash"`    // changes when the shape changes
+	// ArchHash digests what the architecture synthesis reads: the
+	// repository's module structure. Only the repository mapper sets it, and
+	// Merge carries it through unchanged, so adding, editing or removing a
+	// document or web page cannot move it. It is the one map-level hash; the
+	// per-unit hashes (Unit.Hash) gate everything else.
+	ArchHash string `json:"archHash,omitempty"`
 }

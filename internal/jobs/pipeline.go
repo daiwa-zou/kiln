@@ -468,12 +468,15 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 	for _, k := range dirty {
 		var hash string
 		if k == diff.ArchOverview {
-			// The synthesis has no unit of its own; its input is the whole
-			// map, so the map hash gates it. Without this every build --
-			// including a completely unchanged one -- would pay for an
-			// architecture regeneration.
+			// The synthesis has no unit of its own; it describes the
+			// repository's module structure, so the structural digest gates
+			// it. Documents and web pages are deliberately not part of it
+			// (and Merge carries it through untouched), or editing a PDF
+			// would pay for an architecture rewrite. Without this gate every
+			// build -- including a completely unchanged one -- would
+			// regenerate it.
 			if m != nil {
-				hash = m.Hash
+				hash = m.ArchHash
 			}
 		} else if unit, ok := units[string(k)]; ok {
 			hash = unit.Hash
