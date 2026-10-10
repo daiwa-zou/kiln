@@ -20,9 +20,11 @@ nothing. Commit-range change routing narrows the work further on webhook-trigger
 
 ## Status
 
-All four roadmap milestones have shipped — the human loop and reader (M1), server-side builds
-(M2), the multi-tenant SaaS shell with GitHub sign-in and webhooks (M3), and the web connector,
-graph view, and cost attribution (M4). See [ROADMAP.md](ROADMAP.md) for what each contains.
+Milestones M1–M8 have shipped — the human loop and reader, server-side builds, the multi-tenant
+SaaS shell, the web connector and graph view, incremental builds, lifecycle hygiene, self-serve
+sources, and the deployable artifact. M9's concurrent page generation has shipped; its pooler,
+client-address, and scheduler items are open, and M10–M11 are planned. See
+[ROADMAP.md](ROADMAP.md) for what each contains and what comes next.
 
 ## What it reads, and what you get
 
@@ -106,7 +108,8 @@ volume via the fs backend); document uploads accept up to 32 MiB per file, so a
 reverse proxy in front of kiln needs its body limit raised to match (nginx:
 `client_max_body_size 34m`).
 
-Planned, not yet built: a Next.js frontend in its own container.
+A framework frontend is deferred until onboarding flows make the server-driven UI painful; see
+[ROADMAP.md](ROADMAP.md#deferred-decisions).
 
 ## Agents can read it
 
