@@ -6,8 +6,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -74,6 +76,13 @@ func hookServer(t *testing.T, hooks *fakeHooks, cooldown time.Duration) *httptes
 // deliver posts one webhook and returns the status code, closing the body.
 func deliver(t *testing.T, srv *httptest.Server, event string, body []byte, sign bool) int {
 	t.Helper()
+	code, _ := deliverBody(t, srv, event, body, sign)
+	return code
+}
+
+// deliverBody is deliver that also returns the response body.
+func deliverBody(t *testing.T, srv *httptest.Server, event string, body []byte, sign bool) (int, string) {
+	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/hooks/github", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -89,8 +98,14 @@ func deliver(t *testing.T, srv *httptest.Server, event string, body []byte, sign
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
-	return res.StatusCode
+	defer res.Body.Close()
+	out, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(out)
+}
+
+// pushBody is a push payload for daiwa-zou/kiln whose default branch is main.
+func pushBody(ref string) []byte {
+	return []byte(`{"ref":"` + ref + `","after":"abc123","repository":{"full_name":"daiwa-zou/kiln","default_branch":"main"}}`)
 }
 
 func gitConnector(ws, url string) store.ConnectorRow {
@@ -104,7 +119,7 @@ func gitConnector(ws, url string) store.ConnectorRow {
 func TestWebhookSignatureGate(t *testing.T) {
 	hooks := newFakeHooks()
 	srv := hookServer(t, hooks, 0)
-	body := []byte(`{"repository":{"full_name":"daiwa-zou/kiln"}}`)
+	body := []byte(`{"ref":"refs/heads/main","repository":{"full_name":"daiwa-zou/kiln","default_branch":"main"}}`)
 
 	// The M3 verification pair: invalid HMAC → 401, valid → 202.
 	if code := deliver(t, srv, "push", body, false); code != http.StatusUnauthorized {
@@ -140,12 +155,103 @@ func TestWebhookPushMapsRepoToConnector(t *testing.T) {
 	}
 	srv := hookServer(t, hooks, 0)
 
-	body := []byte(`{"repository":{"full_name":"daiwa-zou/kiln"}}`)
+	body := []byte(`{"ref":"refs/heads/main","repository":{"full_name":"daiwa-zou/kiln","default_branch":"main"}}`)
 	if code := deliver(t, srv, "push", body, true); code != http.StatusAccepted {
 		t.Fatalf("push = %d", code)
 	}
 	if len(hooks.enqueued) != 1 || hooks.enqueued[0] != "ws-kiln/webhook" {
 		t.Errorf("enqueued = %v, want exactly ws-kiln", hooks.enqueued)
+	}
+}
+
+// A push to a feature branch changes nothing a wiki of the default branch
+// reads, so it must not build one.
+func TestWebhookIgnoresPushesToOtherBranches(t *testing.T) {
+	hooks := newFakeHooks()
+	hooks.connectors = []store.ConnectorRow{
+		gitConnector("ws-kiln", "https://github.com/daiwa-zou/kiln.git"),
+	}
+	srv := hookServer(t, hooks, 0)
+
+	for name, ref := range map[string]string{
+		"feature branch": "refs/heads/feature/login",
+		"main lookalike": "refs/heads/main2",
+		"case differs":   "refs/heads/Main",
+		"tag":            "refs/tags/main",
+		"no ref":         "",
+	} {
+		code, out := deliverBody(t, srv, "push", pushBody(ref), true)
+		// 2xx, so GitHub does not retry or count a failing hook, and a message
+		// that says why nothing built.
+		if code != http.StatusAccepted {
+			t.Errorf("%s: push = %d, want 202", name, code)
+		}
+		if !strings.Contains(out, "ignored") {
+			t.Errorf("%s: response does not say the push was ignored: %s", name, out)
+		}
+	}
+	if len(hooks.enqueued) != 0 {
+		t.Errorf("enqueued = %v, want nothing", hooks.enqueued)
+	}
+
+	// Deleting the default branch is not a build either.
+	del := []byte(`{"ref":"refs/heads/main","deleted":true,"repository":{"full_name":"daiwa-zou/kiln","default_branch":"main"}}`)
+	if code := deliver(t, srv, "push", del, true); code != http.StatusAccepted {
+		t.Errorf("branch deletion = %d, want 202", code)
+	}
+	if len(hooks.enqueued) != 0 {
+		t.Errorf("a branch deletion enqueued %v", hooks.enqueued)
+	}
+}
+
+func TestWebhookDefaultBranchPushEnqueues(t *testing.T) {
+	hooks := newFakeHooks()
+	hooks.connectors = []store.ConnectorRow{
+		gitConnector("ws-kiln", "https://github.com/daiwa-zou/kiln.git"),
+	}
+	srv := hookServer(t, hooks, 0)
+
+	if code := deliver(t, srv, "push", pushBody("refs/heads/main"), true); code != http.StatusAccepted {
+		t.Fatalf("push = %d", code)
+	}
+	if len(hooks.enqueued) != 1 || hooks.opts[0].RefTo != "abc123" {
+		t.Errorf("enqueued = %v opts = %+v, want one run toward the pushed head", hooks.enqueued, hooks.opts)
+	}
+
+	// The default branch is whatever the repository says it is, not "main".
+	trunk := []byte(`{"ref":"refs/heads/trunk","after":"def456","repository":{"full_name":"daiwa-zou/kiln","default_branch":"trunk"}}`)
+	if code := deliver(t, srv, "push", trunk, true); code != http.StatusAccepted {
+		t.Fatalf("push = %d", code)
+	}
+	if len(hooks.enqueued) != 2 {
+		t.Errorf("a push to the repository's default branch (trunk) enqueued %v", hooks.enqueued)
+	}
+}
+
+func TestWebhookConfiguredBranchOverridesTheDefault(t *testing.T) {
+	hooks := newFakeHooks()
+	release := gitConnector("ws-release", "https://github.com/daiwa-zou/kiln.git")
+	release.Config["branch"] = "release/1.x"
+	hooks.connectors = []store.ConnectorRow{
+		release,
+		gitConnector("ws-main", "https://github.com/daiwa-zou/kiln.git"),
+	}
+	srv := hookServer(t, hooks, 0)
+
+	// The default branch builds the connector that tracks it, and only that one.
+	if code := deliver(t, srv, "push", pushBody("refs/heads/main"), true); code != http.StatusAccepted {
+		t.Fatalf("push = %d", code)
+	}
+	if len(hooks.enqueued) != 1 || hooks.enqueued[0] != "ws-main/webhook" {
+		t.Fatalf("push to main enqueued %v, want only ws-main", hooks.enqueued)
+	}
+
+	// The configured branch builds the connector that names it, not the default one.
+	if code := deliver(t, srv, "push", pushBody("refs/heads/release/1.x"), true); code != http.StatusAccepted {
+		t.Fatalf("push = %d", code)
+	}
+	if len(hooks.enqueued) != 2 || hooks.enqueued[1] != "ws-release/webhook" {
+		t.Errorf("push to release/1.x enqueued %v, want ws-release added", hooks.enqueued)
 	}
 }
 
@@ -161,7 +267,7 @@ func TestWebhookCooldownSchedulesInsteadOfDropping(t *testing.T) {
 	// A push inside the cooldown still enqueues — nothing is dropped — but
 	// carries not_before so the claim waits out the quiet period, and the
 	// pushed head rides along for incremental routing.
-	body := []byte(`{"after":"abc123","repository":{"full_name":"daiwa-zou/kiln"}}`)
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"daiwa-zou/kiln","default_branch":"main"}}`)
 	if code := deliver(t, srv, "push", body, true); code != http.StatusAccepted {
 		t.Fatalf("push = %d", code)
 	}
@@ -268,7 +374,7 @@ func TestWebhookPushStormQueuesOneRun(t *testing.T) {
 	}).Router())
 	t.Cleanup(hooked.Close)
 
-	body := []byte(`{"repository":{"full_name":"daiwa-zou/kiln"}}`)
+	body := []byte(`{"ref":"refs/heads/main","repository":{"full_name":"daiwa-zou/kiln","default_branch":"main"}}`)
 	for i := 0; i < 8; i++ {
 		if code := deliver(t, hooked, "push", body, true); code != http.StatusAccepted {
 			t.Fatalf("push %d = %d", i, code)

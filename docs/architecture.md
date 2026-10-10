@@ -271,6 +271,12 @@ A run already claimed is left alone — it loses nothing, because the base of an
 incremental range always derives from the workspace's last successful build, not
 from the webhook's claim.
 
+**Branch.** A git connector builds one branch: its `branch` config key, or the
+repository's default branch when unset. A push to any other ref (a feature
+branch, a tag, a branch deletion) is acknowledged with a 2xx and an `ignored`
+message, never enqueued and never an error, because GitHub does not redeliver
+failed hooks.
+
 **Cooldown.** `github.webhook_cooldown` (default 1 minute) sets `not_before` on
 enqueue, so however hard someone pushes, a bench rebuilds at most once a minute.
 

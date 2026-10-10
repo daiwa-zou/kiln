@@ -795,10 +795,19 @@ func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteUR
 
 	if err := gitconn.CloneShallow(ctx, gitconn.CloneOptions{
 		URL: remoteURL, Token: token, Dir: staging,
+		Branch: configuredBranch(c.Config),
 	}); err != nil {
 		return "", "", cleanup, err
 	}
 	return staging, token, cleanup, nil
+}
+
+// configuredBranch reads a git connector's optional branch. Empty means the
+// remote's default branch, which is also what its push webhook is matched
+// against (see the api package's connectorBranch).
+func configuredBranch(cfg map[string]any) string {
+	b, _ := cfg["branch"].(string)
+	return strings.TrimSpace(b)
 }
 
 // checkInstallation refuses to mint a token for an installation nobody behind

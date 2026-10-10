@@ -206,6 +206,45 @@ func TestEnsureRefFetchesAreHardenedAndAuthenticated(t *testing.T) {
 	}
 }
 
+func TestValidateBranch(t *testing.T) {
+	for _, ok := range []string{"main", "release/1.x", "feature_x-2", "v1.2.3"} {
+		if err := ValidateBranch(ok); err != nil {
+			t.Errorf("ValidateBranch(%q) = %v, want ok", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"", "-main", "--upload-pack=x", "a b", "a..b", "a//b", "a/", "a.", "x.lock",
+		"a\nb", "a:b", "a~1", "a^", "a?", "a*", "a[b", "@{u}", "a\\b", strings.Repeat("a", 256),
+	} {
+		if err := ValidateBranch(bad); err == nil {
+			t.Errorf("ValidateBranch(%q) accepted", bad)
+		}
+	}
+}
+
+func TestCloneShallowClonesTheConfiguredBranch(t *testing.T) {
+	logFile := fakeGitRecording(t)
+
+	_ = CloneShallow(context.Background(), CloneOptions{
+		URL: "https://8.8.8.8/repo.git", Dir: t.TempDir(), Branch: "release/1.x",
+	})
+	raw, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("the fake git never ran: %v", err)
+	}
+	if !strings.Contains(string(raw), "--branch release/1.x") {
+		t.Errorf("clone did not name the configured branch:\n%s", strings.SplitN(string(raw), "\n", 2)[0])
+	}
+
+	// An option-shaped branch is refused before any process starts.
+	err = CloneShallow(context.Background(), CloneOptions{
+		URL: "https://8.8.8.8/repo.git", Dir: t.TempDir(), Branch: "--upload-pack=x",
+	})
+	if err == nil || !strings.Contains(err.Error(), "branch") {
+		t.Errorf("option-shaped branch = %v, want refusal", err)
+	}
+}
+
 func TestEnsureRefWithoutATokenSetsNoCredentials(t *testing.T) {
 	logFile := fakeGitRecording(t)
 

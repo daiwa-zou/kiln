@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -38,6 +39,9 @@ type CloneOptions struct {
 	Token string
 	// Dir is the destination directory; it must exist and be empty.
 	Dir string
+	// Branch, when set, is the branch to clone instead of the remote's default.
+	// It is what a push webhook must name to trigger a build of this checkout.
+	Branch string
 
 	Timeout  time.Duration
 	MaxBytes int64
@@ -77,10 +81,31 @@ func ValidateRemoteURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
+// branchName is deliberately stricter than git's ref-format rules: a connector
+// config is API-writable, and this value ends up on a command line. A leading
+// alphanumeric rules out anything option-shaped, and the allowed set excludes
+// whitespace, control characters, and the characters git reserves.
+var branchName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+
+// ValidateBranch checks a configured branch name.
+func ValidateBranch(name string) error {
+	if len(name) > 255 || !branchName.MatchString(name) ||
+		strings.Contains(name, "..") || strings.Contains(name, "//") ||
+		strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".") || strings.HasSuffix(name, ".lock") {
+		return fmt.Errorf("connector/git: branch %q is not a plain branch name", name)
+	}
+	return nil
+}
+
 // CloneShallow materializes a depth-1 clone of a validated https remote.
 func CloneShallow(ctx context.Context, opts CloneOptions) error {
 	if _, err := ValidateRemoteURL(opts.URL); err != nil {
 		return err
+	}
+	if opts.Branch != "" {
+		if err := ValidateBranch(opts.Branch); err != nil {
+			return err
+		}
 	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
@@ -96,13 +121,12 @@ func CloneShallow(ctx context.Context, opts CloneOptions) error {
 
 	// The remote is attacker-shaped: gitCmd supplies the shared hardening, the
 	// minimal environment and the askpass token delivery.
-	cmd, cleanup, err := gitCmd(ctx, "", opts.Token,
-		"clone",
-		"--depth", "1",
-		"--single-branch",
-		"--no-tags",
-		opts.URL, opts.Dir,
-	)
+	args := []string{"clone", "--depth", "1", "--single-branch", "--no-tags"}
+	if opts.Branch != "" {
+		args = append(args, "--branch", opts.Branch)
+	}
+	args = append(args, opts.URL, opts.Dir)
+	cmd, cleanup, err := gitCmd(ctx, "", opts.Token, args...)
 	if err != nil {
 		return err
 	}
