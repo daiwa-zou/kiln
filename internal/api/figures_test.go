@@ -20,6 +20,17 @@ func seedFigure(t *testing.T, js *store.WikiStore, wsID, sourceKey, sha string, 
 	t.Helper()
 	ctx := context.Background()
 
+	// An uploaded document's figures are only recorded while its file exists
+	// (a deleted document's pictures are refused), so seed the file first.
+	if path, ok := strings.CutPrefix(sourceKey, "doc:upload:"); ok {
+		if _, _, err := js.CreateFile(ctx, store.FileRow{
+			WorkspaceID: wsID, Path: path, BlobKey: "ws/" + wsID + "/uploads/" + path,
+			SizeBytes: 1, SHA256: "sha-" + path,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	key := blob.FigureKey(wsID, sha)
 	if err := lastMemBlobs.Put(ctx, key, strings.NewReader(string(data)), int64(len(data))); err != nil {
 		t.Fatal(err)

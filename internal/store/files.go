@@ -102,6 +102,14 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 		nullable(f.ContentType), f.SHA256, nullable(f.UploadedBy)).Scan(&id); err != nil {
 		return "", "", fmt.Errorf("store: create file: %w", err)
 	}
+	// The superseded blob is garbage the moment this commits. Queued in the same
+	// transaction so a failed delete after the commit, or a crash, leaves a
+	// record for the sweep instead of bytes nothing remembers.
+	if prevBlobKey != f.BlobKey {
+		if err := enqueueBlobDeletes(ctx, tx, []string{prevBlobKey}); err != nil {
+			return "", "", err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", fmt.Errorf("store: commit create file: %w", err)
 	}
@@ -140,6 +148,13 @@ func (s *WikiStore) DeleteFile(ctx context.Context, workspaceID, id string) (blo
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
+	// Before the row goes, so an import in flight finishes first and its output
+	// is visible to the cascade below; one that starts afterwards finds the file
+	// gone and leaves this document out (see fenceImport).
+	if err := lockImports(ctx, tx, workspaceID); err != nil {
+		return "", diff.Cascade{}, err
+	}
+
 	var path string
 	err = tx.QueryRow(ctx, `
 		DELETE FROM workspace_files WHERE workspace_id = $1 AND id = $2
@@ -156,6 +171,11 @@ func (s *WikiStore) DeleteFile(ctx context.Context, workspaceID, id string) (blo
 	// distinct sources here as well.
 	c, err = cascadeDeleteSources(ctx, tx, workspaceID, []diff.Key{diff.DocKey(diff.UploadOrigin(path))})
 	if err != nil {
+		return "", diff.Cascade{}, err
+	}
+	// The document's own blob and everything the cascade released, queued with
+	// the row deletes so the intent survives a failed delete after the commit.
+	if err := enqueueBlobDeletes(ctx, tx, append([]string{blobKey}, c.DeleteBlobs...)); err != nil {
 		return "", diff.Cascade{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

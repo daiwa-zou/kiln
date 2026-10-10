@@ -63,6 +63,30 @@ func (s *WikiStore) ReplaceFigures(ctx context.Context, workspaceID, sourceKey s
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
+	// Under the import lock, for the same reason Import takes it: an explicit
+	// delete that committed while this run was extracting would otherwise be
+	// undone by the rows written below, leaving a deleted document's pictures
+	// served again and pointing at bytes the delete already freed.
+	if err := lockImports(ctx, tx, workspaceID); err != nil {
+		return nil, err
+	}
+	// The pictures this call would have recorded, if the document it came from
+	// is gone. Its blobs were already written, so they are orphans from the
+	// start and go back to the caller with the rest.
+	var stillborn []string
+	if uploadPathCandidates(sourceKey) != nil {
+		files, err := uploadFilePaths(ctx, tx, workspaceID)
+		if err != nil {
+			return nil, err
+		}
+		if !uploadSourceLive(sourceKey, files) {
+			for _, f := range figs {
+				stillborn = append(stillborn, f.BlobKey)
+			}
+			figs = nil
+		}
+	}
+
 	keep := make(map[string]bool, len(figs))
 	for _, f := range figs {
 		keep[f.SHA256] = true
@@ -107,8 +131,20 @@ func (s *WikiStore) ReplaceFigures(ctx context.Context, workspaceID, sourceKey s
 	// contain the same chart -- or the same document ingested under two names
 	// -- share one blob; dropping it because one of them stopped referencing
 	// it would blank the picture on the other's page.
-	orphaned, err = unreferencedBlobs(ctx, tx, candidates)
+	orphaned, err = unreferencedBlobs(ctx, tx, append(candidates, stillborn...))
 	if err != nil {
+		return nil, err
+	}
+	// Queued in this transaction, so the decision that these bytes are dead
+	// commits with the rows that made them so. The caller's immediate delete
+	// stays as the fast path; the queue is what is left if it fails.
+	if err := enqueueBlobDeletes(ctx, tx, orphaned); err != nil {
+		return nil, err
+	}
+	// And the reverse: a blob this call records is referenced again, so any
+	// delete queued for it earlier (by another document dropping the same
+	// picture) no longer holds.
+	if err := cancelBlobDeletes(ctx, tx, figureBlobKeys(figs)); err != nil {
 		return nil, err
 	}
 
@@ -137,6 +173,14 @@ func (s *WikiStore) ReplaceFigures(ctx context.Context, workspaceID, sourceKey s
 		return nil, fmt.Errorf("store: commit replace figures: %w", err)
 	}
 	return orphaned, nil
+}
+
+func figureBlobKeys(figs []jobs.FigureRecord) []string {
+	out := make([]string, 0, len(figs))
+	for _, f := range figs {
+		out = append(out, f.BlobKey)
+	}
+	return out
 }
 
 func shaList(figs []jobs.FigureRecord) []string {

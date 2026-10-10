@@ -18,8 +18,8 @@ var ErrOrgForbidden = errors.New("store: org belongs to someone else")
 var ErrWorkspaceExists = errors.New("store: workspace already exists")
 
 // DeleteWorkspace removes a bench and everything scoped to it, returning the
-// blob keys its uploaded documents referenced so the caller can free the
-// objects behind them.
+// blob keys its uploaded documents and extracted figures referenced so the
+// caller can free the objects behind them.
 //
 // The row is the only thing this deletes explicitly. Every workspace-scoped
 // table -- pages, artifacts, runs, reviews, connectors, files -- declares
@@ -30,9 +30,9 @@ var ErrWorkspaceExists = errors.New("store: workspace already exists")
 // keys are read inside the transaction, before the cascade takes the rows that
 // name them; deleting the objects themselves is the caller's job and is
 // deliberately not part of this transaction. An object store delete that fails
-// must not roll back a bench the user asked to be rid of -- the worst case is
-// an orphaned blob nothing points at, which is a cleanup job, not a bug the
-// user experiences.
+// must not roll back a bench the user asked to be rid of. What the transaction
+// does do is queue every key in pending_blob_deletes, so a delete that fails
+// or never runs is retried by the worker's sweep instead of leaking.
 //
 // The org is left alone even when this was its last workspace. Orgs carry
 // membership, and dissolving one because its last bench went away would revoke
@@ -44,8 +44,13 @@ func (s *WikiStore) DeleteWorkspace(ctx context.Context, workspaceID string) ([]
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
-	rows, err := tx.Query(ctx,
-		`SELECT blob_key FROM workspace_files WHERE workspace_id = $1 AND blob_key <> ''`,
+	// Figures as well as uploads: both are keyed under the workspace's prefix
+	// and neither survives the row that names it. Collecting only the uploads
+	// leaked every picture ever extracted from a deleted bench's documents.
+	rows, err := tx.Query(ctx, `
+		SELECT blob_key FROM workspace_files WHERE workspace_id = $1 AND blob_key <> ''
+		UNION
+		SELECT blob_key FROM figures WHERE workspace_id = $1 AND blob_key <> ''`,
 		workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("store: collect blob keys: %w", err)
@@ -72,6 +77,12 @@ func (s *WikiStore) DeleteWorkspace(ctx context.Context, workspaceID string) ([]
 		return nil, ErrNotFound
 	}
 
+	// Recorded in the same transaction as the cascade that removes the rows
+	// naming them. The caller still tries the deletes straight away; the queue
+	// is what remains if it fails or the process dies first.
+	if err := enqueueBlobDeletes(ctx, tx, keys); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("store: commit delete workspace: %w", err)
 	}
