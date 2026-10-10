@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -322,5 +323,56 @@ func TestResearchSystemPromptRefusesToWriteAndKeepsTheUntrustedFraming(t *testin
 	}
 	if !strings.Contains(sys, "Document on-call.") {
 		t.Error("steering is not reaching the research prompt")
+	}
+}
+
+func TestResearchPromptSharesOneBudgetAcrossItsUnits(t *testing.T) {
+	// Six units, each with more source than a build would send for it. Rendered
+	// at the build allowance each, one question was ~1.1 MB of context.
+	root := t.TempDir()
+	var units []mapper.Unit
+	for i := 0; i < maxResearchUnits; i++ {
+		var inputs []string
+		for j := 0; j < 3; j++ {
+			rel := fmt.Sprintf("u%d/f%d.go", i, j)
+			write(t, root, rel, fmt.Sprintf("// unit%dmarker\n", i)+strings.Repeat("// filler line\n", maxFileContextBytes/15))
+			inputs = append(inputs, rel)
+		}
+		units = append(units, mapper.Unit{Key: fmt.Sprintf("module:u%d", i), Inputs: inputs})
+	}
+
+	prompt := researchPrompt(Question{Kind: "gap", Title: "How do the units relate"}, root, units, nil)
+
+	// Headings and fences are rendered on top of the budgeted bytes.
+	if limit := maxResearchContextBytes + 8_000; len(prompt) > limit {
+		t.Errorf("research prompt is %d bytes, want at most %d", len(prompt), limit)
+	}
+	// A shared budget must still reach every unit, or the best match would
+	// starve the rest.
+	for i := range units {
+		if !strings.Contains(prompt, fmt.Sprintf("unit%dmarker", i)) {
+			t.Errorf("unit %d received none of the budget", i)
+		}
+	}
+}
+
+func TestBuildContextIsUnchangedByTheBudgetParameter(t *testing.T) {
+	// The build path passes the limits it always had; its rendering must stay
+	// byte-for-byte what it was.
+	root := t.TempDir()
+	write(t, root, "a.go", "package a\n")
+	write(t, root, "b.go", "package b\n")
+
+	got := renderUnitContext(root, mapper.Unit{Inputs: []string{"b.go", "a.go"}}, buildBudget)
+
+	want := "\n## Source material\n\n" +
+		"This is the content of the unit's inputs. Ground every claim in it.\n" +
+		"\n### a.go\n\n```\npackage a\n\n```\n" +
+		"\n### b.go\n\n```\npackage b\n\n```\n"
+	if got != want {
+		t.Errorf("build context changed:\n got %q\nwant %q", got, want)
+	}
+	if buildBudget.total != maxUnitContextBytes || buildBudget.perFile != maxFileContextBytes {
+		t.Errorf("build budget = %+v, want the original %d/%d", buildBudget, maxUnitContextBytes, maxFileContextBytes)
 	}
 }

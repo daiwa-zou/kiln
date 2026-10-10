@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/daiwa-zou/kiln/internal/childproc"
 )
 
 // Tool sets. Bash is disallowed outright: Read/Grep/Glob/Write/Edit is enough
@@ -44,7 +45,7 @@ type ClaudeRunner struct {
 // Capabilities: pages arrive in the scratch directory rather than as data, and
 // the CLI reports its own spend, so nothing here is estimated.
 func (r *ClaudeRunner) Capabilities() Capabilities {
-	return Capabilities{WritesFiles: true, EstimatesCost: false}
+	return Capabilities{WritesFiles: true, ReadsSources: true, EstimatesCost: false}
 }
 
 // NewClaudeRunner constructs a runner, defaulting the binary name.
@@ -58,7 +59,9 @@ func NewClaudeRunner(binary string) *ClaudeRunner {
 // MinimalChildEnv builds the environment for the claude subprocess: enough for
 // the binary to run and authenticate, and nothing else. The child processes
 // untrusted source content, so the parent's KILN_* secrets (master key, session
-// secret, database password) must never be inherited by it.
+// secret, database password) must never be inherited by it. The allow-list
+// itself is childproc.Env, shared with the other children that parse untrusted
+// content; this adds the two variables only the CLI needs.
 //
 // HOME is passed so a logged-in CLI session's credentials still resolve when no
 // API key is configured. USER and LOGNAME go with it, and are not optional
@@ -77,24 +80,19 @@ func NewClaudeRunner(binary string) *ClaudeRunner {
 // silently meant two different things depending on the runner, and a key valid
 // only at a gateway failed to authenticate with no indication why.
 func MinimalChildEnv(apiKey, baseURL string) []string {
-	env := make([]string, 0, 9)
-	for _, k := range []string{"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TERM", "LANG"} {
-		if v, ok := os.LookupEnv(k); ok {
-			env = append(env, k+"="+v)
-		}
-	}
+	var extra []string
 	if apiKey != "" {
-		env = append(env, "ANTHROPIC_API_KEY="+apiKey)
+		extra = append(extra, "ANTHROPIC_API_KEY="+apiKey)
 	}
 	if baseURL != "" {
-		env = append(env, "ANTHROPIC_BASE_URL="+baseURL)
+		extra = append(extra, "ANTHROPIC_BASE_URL="+baseURL)
 	}
-	return env
+	return childproc.Env(extra...)
 }
 
 // Run executes one request and parses the result envelope.
 func (r *ClaudeRunner) Run(ctx context.Context, req Request) (*Result, error) {
-	if err := req.validate(); err != nil {
+	if err := req.Validate(r.Capabilities()); err != nil {
 		return nil, err
 	}
 
@@ -110,6 +108,7 @@ func (r *ClaudeRunner) Run(ctx context.Context, req Request) (*Result, error) {
 	// There is no --cwd flag on the installed CLI; the working directory is
 	// how the agent is pointed at the materialized sources.
 	cmd.Dir = req.WorkDir
+	cmd.WaitDelay = childproc.WaitDelay
 	if r.Env != nil {
 		cmd.Env = r.Env
 	}
@@ -139,20 +138,6 @@ func (r *ClaudeRunner) Run(ctx context.Context, req Request) (*Result, error) {
 		return res, fmt.Errorf("agent: %s step exited non-zero despite a success envelope: %w", req.Step, err)
 	}
 	return res, nil
-}
-
-func (req Request) validate() error {
-	switch {
-	case req.WorkDir == "":
-		return errors.New("agent: WorkDir is required")
-	case strings.TrimSpace(req.Prompt) == "":
-		return errors.New("agent: Prompt is required")
-	case req.Step == StepGenerate && req.ScratchDir == "":
-		return errors.New("agent: ScratchDir is required for the generate step")
-	case req.Step != StepAnalyze && req.Step != StepGenerate:
-		return fmt.Errorf("agent: unknown step %q", req.Step)
-	}
-	return nil
 }
 
 // BuildArgs assembles the CLI arguments. Exported so tests can assert on the

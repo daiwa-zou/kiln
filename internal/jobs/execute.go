@@ -390,7 +390,9 @@ func syncDocSource(ctx context.Context, out io.Writer, src docSource) (res docSy
 		return res, fmt.Errorf("%s connector returned no documents payload", src.kind)
 	}
 
-	dm := &docmap.Mapper{}
+	// Sections are staged beside the documents, so Close removes them with the
+	// rest of res.Staging; their unit inputs resolve against that directory.
+	dm := &docmap.Mapper{StageSections: true}
 	wm, err := dm.MapDocs(ctx, res.Staging, docs)
 	if err != nil {
 		return res, err

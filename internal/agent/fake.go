@@ -63,6 +63,13 @@ func NewFakeRunner(opts FakeOptions) *FakeRunner { return &FakeRunner{opts: opts
 
 // Run implements Runner.
 func (f *FakeRunner) Run(ctx context.Context, req Request) (*Result, error) {
+	// Held to the same contract as the real runners, or a request one of them
+	// would reject runs clean here and the first anyone hears of it is in
+	// production. It also stops an unknown step silently becoming a generate.
+	if err := req.Validate(StandInCapabilities); err != nil {
+		return nil, err
+	}
+
 	if f.opts.Latency > 0 {
 		select {
 		case <-ctx.Done():

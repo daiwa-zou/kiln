@@ -26,13 +26,25 @@ const (
 	maxFileContextBytes = 60_000
 )
 
+// contextBudget bounds the source material rendered for one unit: the total
+// across its files, and the most any single file may contribute.
+type contextBudget struct {
+	total   int
+	perFile int
+}
+
+// buildBudget is what a unit being built is allowed. Analyze and generate both
+// render the unit this way; research passes a smaller, shared one (see
+// researchPrompt).
+var buildBudget = contextBudget{total: maxUnitContextBytes, perFile: maxFileContextBytes}
+
 // renderUnitContext reads a unit's inputs and renders them as prompt material.
 //
 // Returns an empty string when nothing readable is found, so a caller can omit
 // the section entirely rather than sending an empty heading that reads to the
 // model as "this unit has no source".
-func renderUnitContext(root string, unit mapper.Unit) string {
-	files := readInputs(unitRoot(root, unit), unit.Inputs)
+func renderUnitContext(root string, unit mapper.Unit, budget contextBudget) string {
+	files := readInputs(unitRoot(root, unit), unit.Inputs, budget)
 	if len(files) == 0 {
 		return ""
 	}
@@ -44,7 +56,7 @@ func renderUnitContext(root string, unit mapper.Unit) string {
 	for _, f := range files {
 		fmt.Fprintf(&b, "\n### %s\n\n", f.path)
 		if f.truncated {
-			fmt.Fprintf(&b, "_Truncated at %d bytes; the file is longer._\n\n", maxFileContextBytes)
+			fmt.Fprintf(&b, "_Truncated at %d bytes; the file is longer._\n\n", budget.perFile)
 		}
 		// Fenced so the model reads it as data rather than as instructions.
 		// Source files are untrusted input -- a repository can contain a README
@@ -79,9 +91,8 @@ type sourceFile struct {
 //
 // Unreadable and binary files are skipped rather than failing the unit: one
 // unreadable file in a module should cost that file, not the page.
-func readInputs(root string, inputs []string) []sourceFile {
-	// Deduplicated because a doc-section unit points at the same parent file as
-	// its siblings, and paths can repeat across a module's entry points.
+func readInputs(root string, inputs []string, limits contextBudget) []sourceFile {
+	// Deduplicated because paths can repeat across a module's entry points.
 	seen := map[string]bool{}
 	paths := make([]string, 0, len(inputs))
 	for _, in := range inputs {
@@ -97,7 +108,7 @@ func readInputs(root string, inputs []string) []sourceFile {
 
 	var (
 		files  []sourceFile
-		budget = maxUnitContextBytes
+		budget = limits.total
 	)
 	for _, rel := range paths {
 		if budget <= 0 {
@@ -113,7 +124,7 @@ func readInputs(root string, inputs []string) []sourceFile {
 			continue
 		}
 
-		limit := min(maxFileContextBytes, budget)
+		limit := min(limits.perFile, budget)
 
 		f, err := os.Open(full)
 		if err != nil {

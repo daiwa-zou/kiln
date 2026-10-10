@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -34,6 +35,10 @@ type AdminStore interface {
 	DeleteCredential(ctx context.Context, orgID, id string) error
 	CredentialInOrg(ctx context.Context, orgID, id string) (bool, error)
 	OrgOfWorkspace(ctx context.Context, workspaceID string) (string, error)
+
+	// UserHasInstallation answers whether GitHub says this user can reach the
+	// App installation (the user_installations mirror).
+	UserHasInstallation(ctx context.Context, userID string, installationID int64) (bool, error)
 }
 
 const maxAdminBodyBytes = 16 << 10
@@ -196,6 +201,9 @@ func (s *Server) handleConnectorCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
+	if !s.installationUsable(w, r, body.Config, nil) {
+		return
+	}
 	if !s.credentialUsable(w, r, ws, body.CredentialID) {
 		return
 	}
@@ -247,6 +255,9 @@ func (s *Server) handleConnectorPatch(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 			return
 		}
+		if !s.installationUsable(w, r, *body.Config, c.Config) {
+			return
+		}
 	}
 
 	if body.CredentialID != nil && !s.credentialUsable(w, r, ws, *body.CredentialID) {
@@ -289,6 +300,64 @@ func (s *Server) handleConnectorDelete(w http.ResponseWriter, r *http.Request) {
 		"pagesRemoved":      len(cascade.DeletePages),
 		"pagesRegenerating": len(cascade.RegeneratePages),
 	})
+}
+
+// errInstallationNotYours is deliberately the same for an installation that
+// does not exist and one that belongs to someone else, so ids cannot be
+// probed for existence.
+const errInstallationNotYours = "installation_id is not one of your GitHub App installations " +
+	"(sign in with GitHub again to refresh the list, or use a credential instead)"
+
+// installationUsable gates a connector config's installation_id. Naming an
+// installation makes the worker mint a token for it and clone with that
+// token, and installation ids are small guessable integers, so without this
+// anyone who can create a bench could point a connector at another account's
+// private repository. The id is accepted only when GitHub linked it to the
+// caller at sign-in. Instance admins and auth-disabled (loopback dev)
+// deployments bypass, as they do everywhere else.
+//
+// previous is the connector's stored config on an update. Re-sending the id
+// already stored is allowed, so an owner can rename or retarget a connector
+// an admin set up without needing the admin's installation; it grants
+// nothing the connector did not already have, and the worker re-checks at run
+// time anyway. Returns false after writing the response.
+func (s *Server) installationUsable(w http.ResponseWriter, r *http.Request, cfg, previous map[string]any) bool {
+	raw, present := cfg["installation_id"]
+	if !present || raw == nil {
+		return true
+	}
+	// Whole positive numbers only. The worker truncates to an integer, so
+	// anything else would name an installation different from the one checked.
+	f, isNum := raw.(float64)
+	if !isNum || f < 1 || f != math.Trunc(f) || f > 1<<53 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "installation_id must be a positive whole number"})
+		return false
+	}
+	if s.Auth == nil {
+		return true
+	}
+	id, found := auth.FromContext(r.Context())
+	if !found {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": errInstallationNotYours})
+		return false
+	}
+	if id.Admin {
+		return true
+	}
+	if prev, ok := previous["installation_id"].(float64); ok && prev == f {
+		return true
+	}
+	linked, err := s.Admin.UserHasInstallation(r.Context(), id.UserID, int64(f))
+	if err != nil {
+		s.fail(w, err)
+		return false
+	}
+	if !linked {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": errInstallationNotYours})
+		return false
+	}
+	return true
 }
 
 // credentialUsable verifies a referenced credential belongs to the

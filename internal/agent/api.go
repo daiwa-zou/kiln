@@ -82,7 +82,7 @@ func NewAPIRunner(opts APIOptions) *APIRunner {
 
 // Run executes one request.
 func (r *APIRunner) Run(ctx context.Context, req Request) (*Result, error) {
-	if err := req.validateAPI(); err != nil {
+	if err := req.Validate(r.Capabilities()); err != nil {
 		return nil, err
 	}
 
@@ -319,14 +319,4 @@ func refusalMessage(msg *anthropic.Message) string {
 		return fmt.Sprintf("request declined by safety classifiers (category: %s)", c)
 	}
 	return "request declined by safety classifiers"
-}
-
-func (req Request) validateAPI() error {
-	switch {
-	case strings.TrimSpace(req.Prompt) == "":
-		return errors.New("agent: Prompt is required")
-	case req.Step != StepAnalyze && req.Step != StepGenerate && req.Step != StepResearch:
-		return fmt.Errorf("agent: unknown step %q", req.Step)
-	}
-	return nil
 }

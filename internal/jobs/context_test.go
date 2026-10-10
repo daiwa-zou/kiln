@@ -30,7 +30,7 @@ func TestUnitContextCarriesFileContents(t *testing.T) {
 	got := renderUnitContext(root, mapper.Unit{
 		Key:    "module:auth",
 		Inputs: []string{"internal/auth/token.go"},
-	})
+	}, buildBudget)
 
 	if !strings.Contains(got, "func Mint()") {
 		t.Errorf("prompt context omitted the file body:\n%s", got)
@@ -54,7 +54,7 @@ func TestUnitContextResolvesStagedInputsAgainstTheirOwnRoot(t *testing.T) {
 		Meta:   map[string]any{mapper.MetaRoot: staging},
 	}
 
-	got := renderUnitContext(repo, unit)
+	got := renderUnitContext(repo, unit, buildBudget)
 	if !strings.Contains(got, "On-call rotates weekly") {
 		t.Errorf("staged document was not read:\n%s", got)
 	}
@@ -66,7 +66,7 @@ func TestUnitContextIsEmptyWhenNothingIsReadable(t *testing.T) {
 	got := renderUnitContext(t.TempDir(), mapper.Unit{
 		Key:    "module:ghost",
 		Inputs: []string{"does/not/exist.go"},
-	})
+	}, buildBudget)
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
@@ -79,7 +79,7 @@ func TestUnitContextSkipsBinaryFiles(t *testing.T) {
 
 	got := renderUnitContext(root, mapper.Unit{
 		Inputs: []string{"logo.png", "main.go"},
-	})
+	}, buildBudget)
 
 	if strings.Contains(got, "logo.png") {
 		t.Errorf("binary file was sent to the model:\n%s", got)
@@ -94,7 +94,7 @@ func TestUnitContextCapsAFileAndSaysSo(t *testing.T) {
 	huge := strings.Repeat("// a line of filler\n", maxFileContextBytes/20+500)
 	write(t, root, "generated.go", huge)
 
-	got := renderUnitContext(root, mapper.Unit{Inputs: []string{"generated.go"}})
+	got := renderUnitContext(root, mapper.Unit{Inputs: []string{"generated.go"}}, buildBudget)
 
 	if len(got) > maxFileContextBytes+2000 {
 		t.Errorf("context is %d bytes, want it capped near %d", len(got), maxFileContextBytes)
@@ -115,7 +115,7 @@ func TestUnitContextBudgetsAcrossFiles(t *testing.T) {
 
 	got := renderUnitContext(root, mapper.Unit{
 		Inputs: []string{"a.go", "b.go", "c.go", "d.go", "e.go"},
-	})
+	}, buildBudget)
 
 	if len(got) > maxUnitContextBytes+5000 {
 		t.Errorf("unit context is %d bytes, want it capped near %d", len(got), maxUnitContextBytes)
@@ -123,14 +123,14 @@ func TestUnitContextBudgetsAcrossFiles(t *testing.T) {
 }
 
 func TestUnitContextDeduplicatesInputs(t *testing.T) {
-	// Every section of a split document points at the same parent file, so a
-	// naive render would send a book once per chapter.
+	// Paths can repeat across a module's entry points; the same file must not
+	// be sent twice.
 	root := t.TempDir()
 	write(t, root, "book.md", "# Book\n\nchapter text\n")
 
 	got := renderUnitContext(root, mapper.Unit{
 		Inputs: []string{"book.md", "book.md", "book.md"},
-	})
+	}, buildBudget)
 
 	if n := strings.Count(got, "chapter text"); n != 1 {
 		t.Errorf("file body appears %d times, want 1", n)

@@ -46,6 +46,7 @@ type Store interface {
 	ConnectorByID(ctx context.Context, id string) (*store.ConnectorRow, error)
 	MarkConnectorSync(ctx context.Context, id, syncErr string) error
 	LoadSealedCredential(ctx context.Context, id string) (*store.SealedCredential, error)
+	InstallationServesWorkspace(ctx context.Context, workspaceID string, installationID int64) (bool, error)
 	PollDueConnectors(ctx context.Context, olderThan time.Duration) ([]store.ConnectorRow, error)
 	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error)
 	ListFiles(ctx context.Context, workspaceID string) ([]store.FileRow, error)
@@ -130,6 +131,11 @@ type Worker struct {
 	// stored PATs wherever the App is installed.
 	GitHub *github.Client
 
+	// AuthDisabled mirrors auth.mode = "none": a loopback-only dev deployment
+	// where nobody signs in, so there is no user to link an installation to
+	// and the run-time ownership check in cloneRemote cannot apply.
+	AuthDisabled bool
+
 	// Blobs reads uploaded workspace files at sync time, for upload
 	// connectors in files mode (no path in the config). Nil makes such a
 	// connector a clear configuration error rather than a mystery.
@@ -170,6 +176,7 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 		RunRetention:         cfg.Storage.RunArtifactRetention,
 		PermittedSourceRoots: cfg.Worker.PermittedSourceRoots,
 		MasterKey:            cfg.Secrets.MasterKey,
+		AuthDisabled:         cfg.Auth.Mode == config.AuthNone,
 		GitHub: &github.Client{
 			AppID:      cfg.GitHub.AppID,
 			PrivateKey: []byte(cfg.Secrets.GitHubPrivateKey),
@@ -763,6 +770,9 @@ func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteUR
 				"connector names github installation %d, but no GitHub App is configured (set github.app_id and KILN_GITHUB_PRIVATE_KEY)",
 				installationID(c.Config))
 		}
+		if err := w.checkInstallation(ctx, c); err != nil {
+			return "", nil, err
+		}
 		token, _, err = w.GitHub.InstallationToken(ctx, installationID(c.Config))
 		if err != nil {
 			return "", nil, err
@@ -786,6 +796,34 @@ func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteUR
 		return "", cleanup, err
 	}
 	return staging, cleanup, nil
+}
+
+// checkInstallation refuses to mint a token for an installation nobody behind
+// the workspace can use. The API already requires the person writing the
+// connector to hold the installation, but a connector row outlives that
+// moment (the member may leave, lose access on GitHub, or the row may predate
+// the check), and an installation id is a bearer reference to someone's
+// private repositories. So at clone time at least one current member of the
+// workspace's org, or an instance admin, must have it linked.
+//
+// With auth disabled there are no users and nothing to link, so the check is
+// skipped; that mode is loopback-only and treats every caller as an admin.
+func (w *Worker) checkInstallation(ctx context.Context, c store.ConnectorRow) error {
+	if w.AuthDisabled {
+		return nil
+	}
+	id := installationID(c.Config)
+	ok, err := w.Store.InstallationServesWorkspace(ctx, c.WorkspaceID, id)
+	if err != nil {
+		return fmt.Errorf("checking github installation %d: %w", id, err)
+	}
+	if !ok {
+		return fmt.Errorf(
+			"connector %q names github installation %d, which no current member of this workspace's org has access to; "+
+				"have an owner or instance admin who can reach it sign in with GitHub, or point the connector at an installation you control",
+			c.Name, id)
+	}
+	return nil
 }
 
 // installationID reads a connector's github installation reference. JSON

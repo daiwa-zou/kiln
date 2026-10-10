@@ -212,6 +212,10 @@ func (l *loopStore) RequeueRun(_ context.Context, runID, workerID string) error 
 	return nil
 }
 
+func (l *loopStore) InstallationServesWorkspace(context.Context, string, int64) (bool, error) {
+	return true, nil
+}
+
 func (l *loopStore) Sweep(context.Context, time.Duration, time.Duration) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

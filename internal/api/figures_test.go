@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -59,8 +60,17 @@ func TestFigureIsServedWithItsBytes(t *testing.T) {
 	if res.Header.Get("X-Content-Type-Options") != "nosniff" {
 		t.Error("figure served without nosniff")
 	}
-	if cc := res.Header.Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+	// Authenticated content: a shared cache must not store it, or it would
+	// serve this tenant's figure to an unauthenticated requester.
+	cc := res.Header.Get("Cache-Control")
+	if !strings.Contains(cc, "immutable") {
 		t.Errorf("Cache-Control = %q, want an immutable policy", cc)
+	}
+	if !strings.Contains(cc, "private") || strings.Contains(cc, "public") {
+		t.Errorf("Cache-Control = %q, want private and never public", cc)
+	}
+	if !strings.Contains(cc, "max-age="+strconv.Itoa(figureCacheSeconds)) {
+		t.Errorf("Cache-Control = %q, want max-age=%d", cc, figureCacheSeconds)
 	}
 
 	got, err := io.ReadAll(res.Body)

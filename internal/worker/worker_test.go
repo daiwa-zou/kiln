@@ -30,6 +30,12 @@ type fakeStore struct {
 	question *store.ResearchQuestion
 	recorded []string
 
+	// installOK/installErr script the run-time installation ownership check;
+	// installChecked records which ids it was asked about.
+	installOK      bool
+	installErr     error
+	installChecked []int64
+
 	// mu guards what the heartbeat goroutine and the test both touch.
 	mu sync.Mutex
 	// beats counts heartbeats; beatErr, when set, is returned from the nth
@@ -85,6 +91,10 @@ func (f *fakeStore) ConnectorByID(_ context.Context, id string) (*store.Connecto
 }
 func (f *fakeStore) LoadSealedCredential(_ context.Context, id string) (*store.SealedCredential, error) {
 	return nil, store.ErrNotFound
+}
+func (f *fakeStore) InstallationServesWorkspace(_ context.Context, _ string, id int64) (bool, error) {
+	f.installChecked = append(f.installChecked, id)
+	return f.installOK, f.installErr
 }
 func (f *fakeStore) PollDueConnectors(context.Context, time.Duration) ([]store.ConnectorRow, error) {
 	return nil, nil
