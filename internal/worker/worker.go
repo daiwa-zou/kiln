@@ -35,11 +35,12 @@ import (
 // is testable against a fake while the SQL stays in internal/store.
 type Store interface {
 	ClaimNextRun(ctx context.Context, workerID string) (*store.QueuedRun, error)
-	// FailRun, RequeueRun and HeartbeatRun are fenced to the worker holding the
-	// claim and return store.ErrClaimLost when it no longer does. RecordRun and
-	// MarkRunItem are fenced the same way, through the claim process() puts on
-	// the pipeline's context.
+	// FailRun, RefuseRunOverBudget, RequeueRun and HeartbeatRun are fenced to the
+	// worker holding the claim and return store.ErrClaimLost when it no longer
+	// does. RecordRun and MarkRunItem are fenced the same way, through the claim
+	// process() puts on the pipeline's context.
 	FailRun(ctx context.Context, runID, workerID, message string) error
+	RefuseRunOverBudget(ctx context.Context, runID, workerID, message string) error
 	HeartbeatRun(ctx context.Context, runID, workerID string) error
 	RequeueStaleRuns(ctx context.Context, olderThan time.Duration) ([]store.StaleRun, error)
 	EnabledConnectors(ctx context.Context, workspaceID string) ([]store.ConnectorRow, error)
@@ -288,6 +289,15 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	started := time.Now()
 	w.metrics().RunStarted(run.Trigger)
 
+	// The rolling budget is judged here, at claim, as well as when a person asks
+	// for a build. Webhook, poll and continuation runs are enqueued without any
+	// budget check, and a run can wait in the queue while the window fills; this
+	// is the one point every run passes through before it can spend.
+	if w.refuseOverBudget(ctx, run, log) {
+		w.metrics().RunFinished(jobs.StatusOverBudget, time.Since(started), 0, 0, 0, 0)
+		return
+	}
+
 	spec, connectors, cleanup, err := w.sourceSpec(ctx, run)
 	if cleanup != nil {
 		defer cleanup()
@@ -411,6 +421,71 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 			log.Error("mark connector sync failed", "error", merr)
 		}
 	}
+}
+
+// refuseOverBudget finishes a just-claimed run as over_budget, without calling
+// the pipeline, when its workspace has already spent its budget within the
+// rolling window. It reports whether it did.
+//
+// The review is the same item the API files for a refused request, so the queue
+// holds one "budget window exceeded" entry however the pause was reached. No
+// continuation follows: nothing was built, so nothing is deferred, and a
+// refused run that enqueued a successor would only be refused again.
+//
+// A run pinned to a connector stamps that connector's sync with the reason. That
+// both shows the pause where the connector is managed and, for a poll
+// connector, spaces the next attempt a full interval out: left unstamped, the
+// connector would stay due and the scheduler would enqueue a run that is
+// refused every minute for as long as the window stays full.
+//
+// A failed lookup lets the run proceed. The API refuses on a lookup error, but a
+// worker holding a claim has no caller to report to, and failing queued builds
+// over a database hiccup trades a possible overspend for a certain outage.
+func (w *Worker) refuseOverBudget(ctx context.Context, run *store.QueuedRun, log *slog.Logger) bool {
+	if w.BudgetWindow <= 0 {
+		return false
+	}
+	budget, err := w.Store.WorkspaceBudgetUSD(ctx, run.WorkspaceID)
+	if err != nil {
+		log.Error("budget lookup failed; running without the window check", "error", err)
+		return false
+	}
+	if budget == nil || *budget <= 0 {
+		return false
+	}
+	spent, err := w.Store.SpendInWindow(ctx, run.WorkspaceID, w.BudgetWindow)
+	if err != nil {
+		log.Error("spend lookup failed; running without the window check", "error", err)
+		return false
+	}
+	if spent < *budget {
+		return false
+	}
+
+	reason := fmt.Sprintf("budget window exceeded: $%.2f of $%.2f spent in the last %s",
+		spent, *budget, w.BudgetWindow)
+	log.Warn("workspace over budget; finishing the claimed run without building",
+		"spent_usd", spent, "budget_usd", *budget, "trigger", run.Trigger)
+
+	// Terminal bookkeeping, so it outlives cancellation like the other terminal
+	// writes in process.
+	done := context.WithoutCancel(ctx)
+	switch err := w.Store.RefuseRunOverBudget(done, run.ID, w.ID, reason); {
+	case errors.Is(err, store.ErrClaimLost):
+		log.Error("over-budget refusal not recorded: the run is no longer claimed by this worker")
+	case err != nil:
+		log.Error("recording over-budget refusal failed", "error", err)
+	}
+	title, detail := store.BudgetExceededReview(spent, *budget, w.BudgetWindow)
+	if err := w.Store.FileReview(done, run.WorkspaceID, "budget", title, detail); err != nil {
+		log.Error("filing budget review failed", "error", err)
+	}
+	if run.ConnectorID != "" {
+		if err := w.Store.MarkConnectorSync(done, run.ConnectorID, reason); err != nil {
+			log.Error("mark connector sync failed", "error", err)
+		}
+	}
+	return true
 }
 
 // research executes a claimed research run: read the bench's sources with one

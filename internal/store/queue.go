@@ -216,6 +216,26 @@ func (s *WikiStore) FailRun(ctx context.Context, runID, workerID, message string
 	return nil
 }
 
+// RefuseRunOverBudget finishes a claimed run as over_budget without it having
+// built anything: the workspace's rolling budget was already spent when the
+// worker picked the run up.
+//
+// Fenced like FailRun, and additionally to status 'running': this is a decision
+// taken before the pipeline starts, so a row that is already finished is not
+// this worker's to restate. ErrClaimLost means no row matched.
+func (s *WikiStore) RefuseRunOverBudget(ctx context.Context, runID, workerID, message string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runs SET status = 'over_budget', error = $3, finished_at = now()
+		WHERE id = $1 AND claimed_by = $2 AND status = 'running'`, runID, workerID, message)
+	if err != nil {
+		return fmt.Errorf("store: refuse run over budget: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClaimLost
+	}
+	return nil
+}
+
 // RequeueRun returns one claimed run to the queue, for a worker draining at
 // shutdown: interrupted is not failed, and the pipeline is idempotent from
 // the start.

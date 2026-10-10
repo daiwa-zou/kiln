@@ -172,8 +172,11 @@ func (s *Server) handleRunCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // refuseOverBudget checks the rolling budget window. Returns a non-empty
-// refusal message when the workspace is over budget; enforcement is at
-// enqueue on purpose, because it is the last moment a refusal costs nothing.
+// refusal message when the workspace is over budget. This is the immediate
+// feedback path for a person who just asked for a build, and the last moment a
+// refusal costs nothing; it is not the only enforcement. Webhook, poll and
+// continuation runs never pass through here, so the worker checks the same
+// window again when it claims a run.
 func (s *Server) refuseOverBudget(ctx context.Context, ws store.WorkspaceRow) (string, error) {
 	if s.BudgetWindow <= 0 {
 		return "", nil
@@ -193,13 +196,10 @@ func (s *Server) refuseOverBudget(ctx context.Context, ws store.WorkspaceRow) (s
 		return "", nil
 	}
 
-	detail := fmt.Sprintf(
-		"Builds are paused: $%.2f of the $%.2f budget was spent in the last %s. "+
-			"Raise the bench budget or wait for the window to roll on; runs resume as soon as spend is back under the cap.",
-		spent, *budget, s.BudgetWindow)
+	title, detail := store.BudgetExceededReview(spent, *budget, s.BudgetWindow)
 	// Filing can fail independently of the refusal; the refusal stands either
 	// way, so the error is only logged.
-	if err := s.Runs.FileReview(ctx, ws.ID, "budget", "budget window exceeded", detail); err != nil && s.Log != nil {
+	if err := s.Runs.FileReview(ctx, ws.ID, "budget", title, detail); err != nil && s.Log != nil {
 		s.Log.Error("filing budget review failed", "err", err)
 	}
 	return fmt.Sprintf("budget window exceeded: $%.2f of $%.2f spent in the last %s",

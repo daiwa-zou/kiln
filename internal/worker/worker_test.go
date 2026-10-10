@@ -66,6 +66,9 @@ func (f *fakeStore) FailRun(_ context.Context, runID, _, _ string) error {
 	f.failed = append(f.failed, runID)
 	return nil
 }
+func (f *fakeStore) RefuseRunOverBudget(context.Context, string, string, string) error {
+	return nil
+}
 func (f *fakeStore) HeartbeatRun(context.Context, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

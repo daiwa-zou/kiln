@@ -37,9 +37,11 @@ type loopStore struct {
 	rows    map[string]*loopRow
 	beats   map[string]int
 	// stale is what the sweeps report as requeued; nil reports one dead pod.
-	stale   []store.StaleRun
-	failed  map[string]string
-	marked  map[string]string
+	stale  []store.StaleRun
+	failed map[string]string
+	marked map[string]string
+	// refused records runs finished as over_budget, by run id.
+	refused map[string]string
 	requeue int
 	sealed  map[string]*store.SealedCredential
 	// pinned is what ConnectorByID returns when set, for scripting a run
@@ -66,12 +68,13 @@ type loopStore struct {
 
 func newLoopStore(runs ...*store.QueuedRun) *loopStore {
 	return &loopStore{
-		queue:  runs,
-		rows:   map[string]*loopRow{},
-		beats:  map[string]int{},
-		failed: map[string]string{},
-		marked: map[string]string{},
-		sealed: map[string]*store.SealedCredential{},
+		queue:   runs,
+		rows:    map[string]*loopRow{},
+		beats:   map[string]int{},
+		failed:  map[string]string{},
+		refused: map[string]string{},
+		marked:  map[string]string{},
+		sealed:  map[string]*store.SealedCredential{},
 	}
 }
 
@@ -141,6 +144,17 @@ func (l *loopStore) FailRun(_ context.Context, runID, workerID, msg string) erro
 	}
 	l.rows[runID].status = "failed"
 	l.failed[runID] = msg
+	return nil
+}
+
+func (l *loopStore) RefuseRunOverBudget(_ context.Context, runID, workerID, msg string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.owns(runID, workerID, true) {
+		return store.ErrClaimLost
+	}
+	l.rows[runID].status = "over_budget"
+	l.refused[runID] = msg
 	return nil
 }
 

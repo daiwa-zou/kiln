@@ -243,7 +243,7 @@ sequenceDiagram
     rect rgb(30,40,55)
     note over T,API: manual · webhook · poll · continuation
     T->>API: POST /runs, or push webhook
-    API->>API: check workspace budget window
+    API->>API: check workspace budget window<br/>(a person's request: manual, upload)
     API->>DB: EnqueueRun, status queued
     note right of DB: a partial unique index allows<br/>one active run per bench
     DB-->>API: existing run if one is active<br/>— debounced, ref_to advanced
@@ -257,6 +257,7 @@ sequenceDiagram
     end
 
     DB-->>W: run + workspace + org (one round trip)
+    W->>W: check workspace budget window<br/>(spent: finish over_budget, build nothing)
     W->>W: resolve sources, build, import
     W->>DB: RecordRun (terminal status)
     opt deferred work AND something succeeded
@@ -270,6 +271,14 @@ per workspace. A second enqueue collapses onto the waiting run and *advances its
 A run already claimed is left alone — it loses nothing, because the base of an
 incremental range always derives from the workspace's last successful build, not
 from the webhook's claim.
+
+**Budget window.** The API checks the rolling workspace budget when a person
+asks for a build, so they get an immediate refusal. Webhook, poll and
+continuation runs are enqueued without that check, and any run can wait in the
+queue while the window fills, so the worker checks the same window when it
+claims a run: a bench already at its `budget_usd` has the run finished as
+`over_budget` with the pipeline never called, files the same deduplicated
+"budget window exceeded" review, and enqueues no continuation.
 
 **Cooldown.** `github.webhook_cooldown` (default 1 minute) sets `not_before` on
 enqueue, so however hard someone pushes, a bench rebuilds at most once a minute.
@@ -801,7 +810,7 @@ flowchart TD
     L3["<b>3 · max_pages_per_run</b><br/>truncates the plan; remainder deferred"]
     L4["<b>4 · Per-call budgets</b><br/>analyze_budget_usd · page_budget_usd"]
     L5["<b>5 · run_budget_usd</b><br/>reserve-before / settle-after ledger"]
-    L6["<b>6 · Workspace budget window</b><br/>rolling cap, enforced at enqueue;<br/>warns at 80%"]
+    L6["<b>6 · Workspace budget window</b><br/>rolling cap, enforced at enqueue<br/>and again at claim; warns at 80%"]
 
     L1 --> L2 --> L3 --> L4 --> L5 --> L6
 
