@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strconv"
@@ -23,10 +24,39 @@ var migrationsFS embed.FS
 // run implicitly on server boot.
 const migrateLockKey int64 = 0x6b696c6e0001 // "kiln" + 1
 
-// SchemaVersion is the migration version this binary expects. A server whose
-// database is at a different version refuses to start rather than operating on
-// an unexpected shape.
-const SchemaVersion = 19
+// SchemaVersion is the highest migration version this binary embeds, derived
+// from the files in migrations/ so that adding a migration is one new file and
+// no edit to a shared constant (which conflicted in every migration PR).
+//
+// It is informational: it is what /version reports and what `admin doctor`
+// prints. Whether a database is acceptable is decided by comparing the full set
+// of applied versions to the embedded set (see CheckSchemaVersion), not by this
+// number alone, because a database can sit at the right maximum and still be
+// missing a lower migration.
+//
+// It is a variable only because Go cannot evaluate an embed.FS in a constant;
+// treat it as read-only. The scan here is deliberately lenient (it skips names
+// it cannot parse rather than panicking at init): a malformed name is reported
+// by loadMigrations, which Migrate and CheckSchemaVersion both run.
+var SchemaVersion = highestEmbeddedVersion()
+
+func highestEmbeddedVersion() int {
+	entries, err := fs.ReadDir(migrationsFS, "migrations")
+	if err != nil {
+		return 0
+	}
+	highest := 0
+	for _, e := range entries {
+		m := migrationName.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		if v, err := strconv.Atoi(m[1]); err == nil && v > highest {
+			highest = v
+		}
+	}
+	return highest
+}
 
 var migrationName = regexp.MustCompile(`^(\d+)_([a-z0-9_]+)\.sql$`)
 
@@ -36,14 +66,25 @@ type migration struct {
 	body    string
 }
 
-// Migrate applies every unapplied migration in order, inside an advisory lock.
-// It is idempotent and safe to run concurrently from multiple processes.
+// Migrate applies every embedded migration that is not recorded in
+// schema_migrations, in ascending version order, inside an advisory lock. It is
+// idempotent and safe to run concurrently from multiple processes.
+//
+// "Not recorded" is decided per version, not against the highest applied
+// version. Two branches can add migrations and land in either order, or a dev
+// server can migrate between merges; a migration numbered below one already
+// applied is still owed, and is applied (and reported) here.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) (applied []int, err error) {
 	migrations, err := loadMigrations()
 	if err != nil {
 		return nil, err
 	}
+	return migrateWith(ctx, pool, migrations)
+}
 
+// migrateWith is Migrate over an explicit, version-sorted migration set, so
+// tests can exercise ordering without editing the embedded files.
+func migrateWith(ctx context.Context, pool *pgxpool.Pool, migrations []migration) (applied []int, err error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("store: acquire connection: %w", err)
@@ -84,17 +125,28 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (applied []int, err error)
 		return nil, fmt.Errorf("store: create schema_migrations: %w", err)
 	}
 
-	current, err := currentVersion(ctx, conn.Conn())
+	have, err := appliedVersions(ctx, conn.Conn())
 	if err != nil {
 		return nil, err
 	}
+	current := 0
+	for v := range have {
+		current = max(current, v)
+	}
 
 	for _, m := range migrations {
-		if m.version <= current {
+		if have[m.version] {
 			continue
 		}
 		if err := applyOne(ctx, conn.Conn(), m); err != nil {
 			return applied, err
+		}
+		if m.version < current {
+			// Visible in the log as well as the returned list: a back-filled
+			// migration means two branches landed out of order, and the operator
+			// should know the schema gained something below its old maximum.
+			slog.Default().Warn("applied migration below the database's highest applied version",
+				"version", m.version, "name", m.name, "highest_applied", current)
 		}
 		applied = append(applied, m.version)
 	}
@@ -123,52 +175,136 @@ func applyOne(ctx context.Context, conn *pgx.Conn, m migration) error {
 }
 
 // CurrentVersion reports the highest applied migration version, or 0 when the
-// database has never been migrated.
+// database has never been migrated. It says nothing about gaps below that
+// version; use CheckSchemaVersion to judge whether the schema is complete.
 func CurrentVersion(ctx context.Context, pool *pgxpool.Pool) (int, error) {
-	conn, err := pool.Acquire(ctx)
+	versions, err := AppliedVersions(ctx, pool)
 	if err != nil {
-		return 0, fmt.Errorf("store: acquire connection: %w", err)
+		return 0, err
 	}
-	defer conn.Release()
-	return currentVersion(ctx, conn.Conn())
+	if len(versions) == 0 {
+		return 0, nil
+	}
+	return versions[len(versions)-1], nil
 }
 
-func currentVersion(ctx context.Context, conn *pgx.Conn) (int, error) {
+// AppliedVersions returns every version recorded in schema_migrations in
+// ascending order, or nil when the database has never been migrated.
+func AppliedVersions(ctx context.Context, pool *pgxpool.Pool) ([]int, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: acquire connection: %w", err)
+	}
+	defer conn.Release()
+	set, err := appliedVersions(ctx, conn.Conn())
+	if err != nil {
+		return nil, err
+	}
+	return sortedVersions(set), nil
+}
+
+func sortedVersions(set map[int]bool) []int {
+	out := make([]int, 0, len(set))
+	for v := range set {
+		out = append(out, v)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// appliedVersions reads the set of recorded versions. A database that has no
+// schema_migrations table yet has applied nothing.
+func appliedVersions(ctx context.Context, conn *pgx.Conn) (map[int]bool, error) {
 	var exists bool
 	if err := conn.QueryRow(ctx,
 		`SELECT to_regclass('public.schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
-		return 0, fmt.Errorf("store: check schema_migrations: %w", err)
+		return nil, fmt.Errorf("store: check schema_migrations: %w", err)
 	}
+	set := map[int]bool{}
 	if !exists {
-		return 0, nil
+		return set, nil
 	}
 
-	var version *int
-	if err := conn.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil {
-		return 0, fmt.Errorf("store: read schema version: %w", err)
+	rows, err := conn.Query(ctx, `SELECT version FROM schema_migrations`)
+	if err != nil {
+		return nil, fmt.Errorf("store: read applied versions: %w", err)
 	}
-	if version == nil {
-		return 0, nil
+	defer rows.Close()
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("store: read applied versions: %w", err)
+		}
+		set[v] = true
 	}
-	return *version, nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read applied versions: %w", err)
+	}
+	return set, nil
 }
 
-// CheckSchemaVersion verifies the database matches what this binary expects.
-// Callers should fail startup on error rather than proceeding: running against
-// an unexpected schema produces confusing failures much later.
+// CheckSchemaVersion verifies the database holds exactly the migrations this
+// binary embeds. Callers should fail startup on error rather than proceeding:
+// running against an unexpected schema produces confusing failures much later.
 func CheckSchemaVersion(ctx context.Context, pool *pgxpool.Pool) error {
-	got, err := CurrentVersion(ctx, pool)
+	migrations, err := loadMigrations()
 	if err != nil {
 		return err
 	}
-	switch {
-	case got == SchemaVersion:
-		return nil
-	case got < SchemaVersion:
-		return fmt.Errorf("store: database schema is at version %d, this build expects %d; run `kiln admin migrate`", got, SchemaVersion)
-	default:
-		return fmt.Errorf("store: database schema is at version %d, newer than this build expects (%d); deploy a matching kiln version", got, SchemaVersion)
+	applied, err := AppliedVersions(ctx, pool)
+	if err != nil {
+		return err
 	}
+	return checkSchema(applied, migrations)
+}
+
+// checkSchema compares the applied versions with the embedded set.
+//
+// Unknown versions (applied but not embedded) are checked rather than only the
+// maximum. Every version above the embedded maximum is unknown, so this covers
+// the old "newer than this build" case; it additionally catches a database that
+// holds a lower version this build lacks, which a max comparison would wave
+// through even though that migration changed the schema under this binary. It
+// is checked before missing versions: if the database is from a different
+// build, `kiln admin migrate` would not make this build acceptable.
+func checkSchema(applied []int, migrations []migration) error {
+	embedded := make(map[int]bool, len(migrations))
+	for _, m := range migrations {
+		embedded[m.version] = true
+	}
+	have := make(map[int]bool, len(applied))
+	var unknown []int
+	for _, v := range applied {
+		have[v] = true
+		if !embedded[v] {
+			unknown = append(unknown, v)
+		}
+	}
+	var missing []int
+	for _, m := range migrations {
+		if !have[m.version] {
+			missing = append(missing, m.version)
+		}
+	}
+
+	highest := 0
+	if len(applied) > 0 {
+		highest = applied[len(applied)-1]
+	}
+	expected := 0
+	if len(migrations) > 0 {
+		expected = migrations[len(migrations)-1].version
+	}
+
+	switch {
+	case len(unknown) > 0:
+		return fmt.Errorf("store: database schema is at version %d and has migration(s) %v this build does not know (it expects up to %d); it is newer than this build, deploy a matching kiln version",
+			highest, unknown, expected)
+	case len(missing) > 0:
+		return fmt.Errorf("store: database schema is at version %d but is missing migration(s) %v (this build expects %d); run `kiln admin migrate`",
+			highest, missing, expected)
+	}
+	return nil
 }
 
 func loadMigrations() ([]migration, error) {
