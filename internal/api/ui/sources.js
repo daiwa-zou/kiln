@@ -618,7 +618,7 @@ const triggerChip = {
   upload: ["documents changed", "Documents were uploaded or removed, so a run was queued."],
   poll: ["scheduled check", "The poll schedule came due and re-read the source."],
   continuation: ["leftover pages",
-    "The previous run reached its per-run page cap; this run built the pages it had to defer."],
+    "Follow-up to the previous run: it left pages unbuilt (per-run page cap), came back partial, or was interrupted by a restart. This run builds what was left."],
   research: ["review research",
     "A reader was sent through the sources to answer a question filed under Reviews. It writes findings, not pages."],
 };
