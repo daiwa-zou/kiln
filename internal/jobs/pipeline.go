@@ -141,8 +141,11 @@ type BuildResult struct {
 	Planned []diff.Key
 	// EstimatedUSD is the projected spend shown before anything is charged.
 	EstimatedUSD float64
-	// Deferred counts units the per-run page cap held back. They stay stale and
-	// are picked up by the next run.
+	// Deferred counts units this run planned and did not reach: the per-run page
+	// cap held them back, or the run was canceled before the scheduler got to
+	// them. They stay stale and are picked up by the next run. A run that halts
+	// on its own budget does not count its remainder here -- that stop is a
+	// decision to spend no more, and a follow-up would only spend it.
 	Deferred   int
 	Violations []wiki.Violation
 }
@@ -345,6 +348,13 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	}, log)
 	if halted != "" {
 		res.Summary.Status = halted
+	}
+	if halted == StatusCanceled {
+		for _, oc := range outcomes {
+			if !oc.attempted {
+				res.Deferred++
+			}
+		}
 	}
 
 	written, newSources, findings, spent := p.mergeOutcomes(res, req, outcomes, known, perUnit, log)

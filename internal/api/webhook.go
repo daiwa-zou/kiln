@@ -114,9 +114,11 @@ func (s *Server) handlePushEvent(w http.ResponseWriter, ctx context.Context, bod
 		// Completion cooldown, expressed as scheduling rather than skipping:
 		// the push always enqueues (the active-run index collapses storms),
 		// but a run created inside the cooldown carries not_before so it
-		// waits out the quiet period. Nothing is dropped — a debounced push
-		// advances the waiting run's ref_to, and the range base derives from
-		// the last build, so late pushes cannot punch holes in the diff.
+		// waits out the quiet period. Nothing is dropped — a push that lands
+		// on a waiting build advances its ref_to, and one that finds the bench
+		// busy with research or a running build is recorded and queued as a
+		// build when that finishes. The range base derives from the last
+		// build, so late pushes cannot punch holes in the diff.
 		opts := store.EnqueueOptions{RefTo: push.After}
 		if s.WebhookCooldown > 0 {
 			finished, err := s.Hooks.LastRunFinishedAt(ctx, c.WorkspaceID)

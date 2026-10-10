@@ -161,6 +161,22 @@ function armButton(b, label) {
   return false;
 }
 
+// enqueueSummary says what became of a build request. A request is never
+// dropped, but it does not always become a run of its own: it may join a build
+// that is waiting (the toast names the trigger, because "joined a webhook build"
+// tells the person their click is covered), or wait behind a job that cannot do
+// the work -- research, or a build already underway -- and queue itself after.
+function enqueueSummary(res, createdMsg) {
+  switch (res && res.outcome) {
+    case "merged":
+      return `Joined the build already waiting (${res.mergedInto})`;
+    case "deferred":
+      return `A ${res.queuedBehind} run is in progress — a build is queued behind it`;
+    default:
+      return res && res.created === false ? "A run was already waiting — joined it" : createdMsg;
+  }
+}
+
 // removalSummary phrases what a delete actually did. Deleting a source takes
 // the pages only it produced with it, so the toast has to name that -- a bare
 // "removed" reads like the upload row went and nothing else, which is the one
@@ -1182,7 +1198,7 @@ async function showSources() {
       buildBtn.disabled = true;
       try {
         const res = await api(`/workspaces/${ws}/runs`, { method: "POST", body: {} });
-        toast(res.created ? "Run queued" : "A run was already waiting — joined it");
+        toast(enqueueSummary(res, "Run queued"));
         // The run appears in Recent runs below; no page bounce. The refresh
         // settles the button to match whatever the queue now says.
         await refreshRuns.now();
@@ -1443,7 +1459,7 @@ async function showGetStarted() {
     if (ingestBtn) once(ingestBtn, async () => {
       try {
         const res = await api(`/workspaces/${ws}/runs`, { method: "POST", body: {} });
-        toast(res.created ? "Ingesting — pages appear as it finishes" : "A run was already waiting — joined it");
+        toast(enqueueSummary(res, "Ingesting — pages appear as it finishes"));
         showGetStarted();
       } catch (err) {
         if (err.handled) return;

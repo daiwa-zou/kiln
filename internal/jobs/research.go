@@ -159,10 +159,27 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 }
 
 // failResearch ledgers a failed pass and returns the cause. Recording happens
-// on a detached context because the usual reason a research call fails is that
-// the worker is draining, and a run row left 'running' blocks its workspace
-// until the stale deadline.
+// on a detached context so a failure that arrives as the worker is shutting
+// down is still written, rather than leaving the row 'running' until the stale
+// deadline.
+//
+// A canceled context is the exception, and the reason is what the cancellation
+// means. The worker cancels a run's context for exactly two reasons: it is
+// draining past its grace period, in which case the run is not broken and goes
+// back to the queue, or the run's claim was lost, in which case it is no longer
+// this worker's to write. Recording 'failed' is wrong for both. For a drain it
+// finishes the row, so the requeue that follows (fenced to status 'running') is
+// refused and the question is never researched; for a lost claim the fenced
+// write is refused anyway. So an interrupted pass writes nothing, and returns
+// the context's error for the worker to act on. No known spend is lost by it: a
+// call canceled mid-flight returns no result, so there is no cost to ledger, and
+// the requeued run is charged for its own pass.
 func (p *Pipeline) failResearch(ctx context.Context, summary RunSummary, cause error) error {
+	if ctx.Err() != nil {
+		p.logger().Warn("research interrupted; leaving the run for the worker to requeue",
+			"run", summary.RunID, "cause", cause)
+		return ctx.Err()
+	}
 	summary.Status = StatusFailed
 	summary.Err = cause.Error()
 	if err := p.Store.RecordRun(context.WithoutCancel(ctx), summary); err != nil {

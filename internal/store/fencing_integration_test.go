@@ -260,3 +260,42 @@ func TestUnfencedRecordRunStillFinishesAnyRow(t *testing.T) {
 		t.Errorf("unfenced RecordRun left status %q", status)
 	}
 }
+
+func TestRefuseRunOverBudgetFinishesOnlyTheOwnersRunningRow(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	freshSchema(t, pool)
+	s := NewWikiStore(pool)
+	ws, err := s.EnsureWorkspace(ctx, "local", "bench", "bench")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := claimedRun(t, s, ws, "w1")
+
+	// A worker that does not hold the claim cannot refuse the run.
+	if err := s.RefuseRunOverBudget(ctx, runID, "w2", "nope"); !errors.Is(err, ErrClaimLost) {
+		t.Fatalf("refusal by a non-owner = %v, want ErrClaimLost", err)
+	}
+	if err := s.RefuseRunOverBudget(ctx, runID, "w1", "budget window exceeded"); err != nil {
+		t.Fatal(err)
+	}
+
+	var status, msg string
+	var finished bool
+	if err := pool.QueryRow(ctx,
+		`SELECT status, coalesce(error, ''), finished_at IS NOT NULL FROM runs WHERE id = $1`,
+		runID).Scan(&status, &msg, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if status != jobs.StatusOverBudget || msg != "budget window exceeded" || !finished {
+		t.Errorf("refused run = %q %q finished=%v", status, msg, finished)
+	}
+	// It released the workspace's one active-run slot.
+	if _, created, err := s.EnqueueRun(ctx, ws, "manual", ""); err != nil || !created {
+		t.Errorf("enqueue after a refusal: created=%v err=%v", created, err)
+	}
+	// And a finished row is not the owner's to restate.
+	if err := s.RefuseRunOverBudget(ctx, runID, "w1", "again"); !errors.Is(err, ErrClaimLost) {
+		t.Errorf("second refusal = %v, want ErrClaimLost", err)
+	}
+}
