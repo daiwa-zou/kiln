@@ -30,10 +30,15 @@ type concurrentRunner struct {
 	inFlight     int
 	peak         int
 	calls        int
+	// generateCalls counts StepGenerate calls per unit, so a test can tell a
+	// unit that succeeded first time from one that burned retries and then
+	// succeeded, which Summary.Items alone cannot.
+	generateCalls map[string]int
 }
 
 func newConcurrentRunner(byUnit map[string][]agent.GeneratedPage) *concurrentRunner {
-	return &concurrentRunner{byUnit: byUnit, delays: map[string]time.Duration{}, cost: 0.01}
+	return &concurrentRunner{byUnit: byUnit, delays: map[string]time.Duration{}, cost: 0.01,
+		generateCalls: map[string]int{}}
 }
 
 func (r *concurrentRunner) Run(_ context.Context, req agent.Request) (*agent.Result, error) {
@@ -70,6 +75,7 @@ func (r *concurrentRunner) Run(_ context.Context, req agent.Request) (*agent.Res
 		return res, nil
 	}
 	r.mu.Lock()
+	r.generateCalls[unit]++
 	pages := r.byUnit[unit]
 	r.mu.Unlock()
 	res.Generation = &agent.GenerationResult{Pages: pages}
@@ -87,6 +93,12 @@ func (r *concurrentRunner) unitFor(sessionID string) string {
 		}
 	}
 	return ""
+}
+
+func (r *concurrentRunner) generateCount(unit string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.generateCalls[unit]
 }
 
 func (r *concurrentRunner) peakInFlight() int {
@@ -327,6 +339,101 @@ func TestFanOutResolvesLinksAcrossUnits(t *testing.T) {
 	}
 	if len(res.Violations) != 0 {
 		t.Errorf("violations on a clean cross-linked run: %+v", res.Violations)
+	}
+}
+
+// TestSequentialResolvesLinksToEarlierUnits is the same guarantee at the
+// default concurrency of 1. The link check is deferred to the merge there too:
+// validating inside the retry loop would judge the later unit against the
+// slug set frozen when the run began, so four links to pages the earlier unit
+// wrote this run (one over the tolerance) would fail it on every attempt --
+// paying the full retry budget, the last call on the fallback model, only for
+// the pages to be discarded and the cost paid again next run.
+func TestSequentialResolvesLinksToEarlierUnits(t *testing.T) {
+	store := newMemStore()
+	runner := newConcurrentRunner(map[string][]agent.GeneratedPage{
+		"module:alpha": {
+			genPage("entities/a1.md", "A1"), genPage("entities/a2.md", "A2"),
+			genPage("entities/a3.md", "A3"), genPage("entities/a4.md", "A4"),
+		},
+		"module:beta": {genPage("entities/beta.md", "Beta", "a1", "a2", "a3", "a4")},
+	})
+
+	p := testPipeline(store, runner)
+	p.UnitConcurrency = 1
+
+	res, err := p.Build(context.Background(), fanoutRequest(t,
+		mapper.Unit{Key: "module:alpha", Slug: "alpha", Hash: "h1"},
+		mapper.Unit{Key: "module:beta", Slug: "beta", Hash: "h2"},
+	))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for _, it := range res.Summary.Items {
+		if it.Key == "arch:overview" {
+			continue
+		}
+		if it.Status != StatusSucceeded {
+			t.Errorf("unit %s = %s (%s); links to an earlier unit's pages must resolve at merge",
+				it.Key, it.Status, it.Err)
+		}
+	}
+	for _, unit := range []string{"module:alpha", "module:beta"} {
+		if n := runner.generateCount(unit); n != 1 {
+			t.Errorf("%s made %d generate calls, want exactly 1 (no retries)", unit, n)
+		}
+	}
+	if len(res.Violations) != 0 {
+		t.Errorf("violations on a clean cross-linked run: %+v", res.Violations)
+	}
+}
+
+// TestSequentialStillRejectsDanglingLinks pins the other half of deferral:
+// moving the check to the merge must not stop it catching links that resolve
+// nowhere, in this run or before it. The unit fails at merge, so its pages
+// never reach the database and it keeps its stale hash for the next run.
+func TestSequentialStillRejectsDanglingLinks(t *testing.T) {
+	store := newMemStore()
+	runner := newConcurrentRunner(map[string][]agent.GeneratedPage{
+		"module:alpha": {genPage("entities/alpha.md", "Alpha")},
+		"module:beta": {genPage("entities/beta.md", "Beta",
+			"alpha", "ghost1", "ghost2", "ghost3", "ghost4")},
+	})
+
+	p := testPipeline(store, runner)
+	p.UnitConcurrency = 1
+
+	res, err := p.Build(context.Background(), fanoutRequest(t,
+		mapper.Unit{Key: "module:alpha", Slug: "alpha", Hash: "h1"},
+		mapper.Unit{Key: "module:beta", Slug: "beta", Hash: "h2"},
+	))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	status := map[string]string{}
+	for _, it := range res.Summary.Items {
+		status[string(it.Key)] = it.Status
+	}
+	if status["module:alpha"] != StatusSucceeded {
+		t.Errorf("module:alpha = %s, want succeeded", status["module:alpha"])
+	}
+	if status["module:beta"] != StatusFailed {
+		t.Errorf("module:beta = %s, want failed: four links to nonexistent pages", status["module:beta"])
+	}
+
+	var named bool
+	for _, v := range res.Violations {
+		if strings.Contains(v.Reason, "unresolved wikilinks") && strings.Contains(v.Reason, "ghost1") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("no violation named the unresolved links: %+v", res.Violations)
+	}
+	if imp := store.lastImport(); imp == nil || len(imp.UpsertPages) != 1 {
+		t.Errorf("imported %v pages, want only alpha's", imp)
 	}
 }
 
