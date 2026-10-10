@@ -115,6 +115,49 @@ func TestResearchReadsEnvelopeTextWhenTheRunnerReturnsNoStructure(t *testing.T) 
 	}
 }
 
+// A bench of only uploaded documents has no checkout, so the source's Path is
+// empty. Research passed it straight through as the working directory, and the
+// CLI runner refused every question on such a bench with "agent: WorkDir is
+// required" -- the same failure builds had before they resolved it per unit.
+func TestResearchOnADocumentsOnlyBenchHasAWorkDir(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		title string
+	}{
+		{"a document matches", "Who wrote the beachhead markets notes?"},
+		{"nothing matches", "Is the quarterly forecast still current?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docs := t.TempDir()
+			writeTree(t, docs, map[string]string{
+				"beachhead-markets.md": "# Beachhead markets\n\nPick one segment first.\n",
+			})
+			store := newMemStore()
+			runner := newScriptedRunner()
+			runner.researchResult = &agent.ResearchResult{Findings: "Not answerable from these sources."}
+			p := testPipeline(store, runner)
+
+			if _, err := p.Research(context.Background(), ResearchRequest{
+				RunID: "run-research", WorkspaceID: "ws-1",
+				Source:   SourceSpec{DocsDir: docs, Slug: "bench"},
+				Question: Question{Kind: "uncertain", Title: tc.title},
+			}); err != nil {
+				t.Fatalf("Research: %v", err)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("made %d agent calls, want 1", len(runner.calls))
+			}
+			wd := runner.calls[0].WorkDir
+			if wd == "" {
+				t.Fatal("research gave the agent no working directory")
+			}
+			if !runner.workDirExisted[wd] {
+				t.Errorf("WorkDir %q was not a directory when called", wd)
+			}
+		})
+	}
+}
+
 func TestResearchLedgersAFailedPass(t *testing.T) {
 	repo := researchRepo(t)
 	store := newMemStore()

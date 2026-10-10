@@ -103,7 +103,7 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 
 	res, aerr := p.Runner.Run(ctx, agent.Request{
 		Step:             agent.StepResearch,
-		WorkDir:          req.Source.Path,
+		WorkDir:          researchWorkDir(req.Source.Path, units, mat.staging),
 		Model:            p.researchModel(),
 		BudgetUSD:        p.Budget.AnalyzeUSD,
 		Timeout:          p.Timeout,
@@ -169,6 +169,28 @@ func (p *Pipeline) failResearch(ctx context.Context, summary RunSummary, cause e
 		p.logger().Error("failed research run could not be ledgered", "err", err)
 	}
 	return cause
+}
+
+// researchWorkDir is where the agent's Read and Grep start. The repository
+// path alone was wrong for the same reason it was wrong for builds (see
+// runUnit): a bench of only documents has no checkout, so research sent the
+// CLI runner an empty WorkDir and every question on such a bench failed with
+// "agent: WorkDir is required". The best-matching unit's own root comes first
+// because that is the material the question is about; with no unit matched,
+// the checkout, and failing that whatever the sync staged.
+func researchWorkDir(repo string, units []mapper.Unit, staging []string) string {
+	if len(units) > 0 {
+		if dir := unitRoot(repo, units[0]); dir != "" {
+			return dir
+		}
+	}
+	if repo != "" {
+		return repo
+	}
+	if len(staging) > 0 {
+		return staging[0]
+	}
+	return ""
 }
 
 // researchModel prefers the analyze model: research is the same shape of work
