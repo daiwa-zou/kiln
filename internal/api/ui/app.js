@@ -34,6 +34,9 @@ const runViewCleanups = () => {
 
 // Motion is opt-out: --dur drives the CSS; this drives JS scroll behavior.
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)");
+// The width below which Reviews shows the list or the detail, never both.
+// Mirrors the 860px breakpoint in style.css.
+const NARROW = matchMedia("(max-width: 860px)");
 const scrollBehavior = () => (REDUCED.matches ? "auto" : "smooth");
 
 // localStorage that survives private-mode Safari, where setItem throws.
@@ -2014,6 +2017,19 @@ const iconChip = (icons, name, extra = "") => icons[name]
 let reviewFilter = "open";
 let selectedReviewIndex = 0;
 let reviewRows = [];
+// reviewSelectId asks the next render to select that review (and open its
+// detail on a narrow screen) instead of whatever sits at the old index. It is
+// how a review stays selected after it changes queue under the reader.
+let reviewSelectId = null;
+// The open reviews and gap rows as of the last fetch, shared by the render and
+// the poll so the pills and the list are always computed from the same data.
+let reviewOpen = [];
+let reviewGapRows = [];
+// Ids that were being researched the last time anyone looked, and ids whose
+// research has finished but whose findings nobody has opened since. The first
+// is how "finished" is noticed; the second is the "new findings" chip.
+let researchWatch = new Set();
+const reviewFresh = new Set();
 
 // Action labels are per kind: "approve" means something different for a
 // deletion than for a gap, and a button reading "approve" says neither.
@@ -2056,6 +2072,90 @@ const actionsFor = (kind) => REVIEW_ACTIONS[kind] || REVIEW_ACTIONS_FALLBACK;
 const kindClass = (kind) =>
   REVIEW_ACTIONS[kind] ? `k-${kind}` : "k-other";
 
+// The pool a queue draws from. "Researching" is a flag on an open review, not
+// a status of its own: a question someone handed to a worker is still waiting
+// for a human. "Answered" covers both statuses a resolution writes, 'resolved'
+// and 'approved'. `shown` is that second fetch; it is null for every other queue.
+function setReviewRows(open, shown) {
+  reviewRows = reviewFilter === "gaps" ? reviewGapRows
+    : reviewFilter === "answered" ? (shown ?? reviewRows)
+    : reviewFilter === "researching" ? open.filter((r) => r.researching)
+    : open.filter((r) => !r.researching);
+}
+
+const reviewCounts = (open) => ({
+  open: open.filter((r) => !r.researching).length,
+  researching: open.filter((r) => r.researching).length,
+  gaps: reviewGapRows.length,
+});
+
+function inboxPillsHTML(counts) {
+  const pill = (key, label) =>
+    `<button class="pill" data-filter="${key}" aria-pressed="${reviewFilter === key}">${label}</button>`;
+  return `${pill("open", `Open ${counts.open}`)}
+    ${pill("researching", `Researching ${counts.researching}`)}
+    ${counts.gaps || reviewFilter === "gaps"
+      // A bench with no gaps says nothing rather than "Gaps 0" -- but
+      // the queue stays reachable by hash, and arriving there to find
+      // no pill pressed is a page that looks broken.
+      ? pill("gaps", `Gaps ${counts.gaps}`) : ""}
+    ${pill("answered", "Resolved")}`;
+}
+
+function inboxRowsHTML() {
+  if (!reviewRows.length) {
+    return `<div class="empty">${reviewFilter === "answered"
+      ? "Nothing resolved yet. Answered reviews are kept here as a record of what was decided."
+      : reviewFilter === "researching"
+        ? "Nothing is being researched right now."
+        : reviewFilter === "gaps"
+          ? (state.pages.length
+              ? "No gaps — every link resolves to an existing page."
+              : "Nothing to check yet — gaps are links the wiki wants and does not have.")
+          : `No open reviews. Builds file one here when they need a decision,
+           such as confirming a deletion after a source disappears.`}</div>`;
+  }
+  return reviewRows.map((r, i) => `
+    <button class="inbox-row ${kindClass(r.kind)}" role="option" data-idx="${i}"
+            aria-current="${i === selectedReviewIndex}"
+            aria-selected="${i === selectedReviewIndex}">
+      <span class="inbox-row-top">
+        <span class="kind-sq">${REVIEW_KIND_ICONS[r.kind] || iconUncertain}</span>
+        <span class="kind-name">${esc(r.kind)}</span>
+        ${reviewFresh.has(r.id) ? `<span class="chip new-findings">new findings</span>` : ""}
+        <span class="inbox-row-when">${r.gap
+          ? `wanted by ${esc(r.wantedBy)}`
+          : esc(relTime(r.created))}</span>
+      </span>
+      <span class="inbox-row-title">${esc(r.title)}</span>
+      <span class="inbox-row-unit">${r.gap ? "not written yet"
+        : esc(r.unit ? unitSource(r.unit).name : (r.pageSlug || ""))}</span>
+    </button>`).join("");
+}
+
+// noteResearchDone compares the open reviews with the ones last seen being
+// researched and returns those that stopped. Each is marked "new findings"
+// until it is next viewed. A review that vanished (resolved elsewhere) is
+// forgotten without comment.
+function noteResearchDone(open) {
+  const finished = open.filter((r) => !r.researching && researchWatch.has(r.id));
+  for (const r of finished) reviewFresh.add(r.id);
+  researchWatch = new Set(open.filter((r) => r.researching).map((r) => r.id));
+  return finished;
+}
+
+function announceResearchDone(r) {
+  toast(`Research finished: ${r.title}`, {
+    action: "Open",
+    onAction: () => {
+      reviewFilter = "open";
+      reviewSelectId = r.id;
+      if (location.hash === "#/reviews") showReviews(false);
+      else location.hash = "#/reviews";
+    },
+  });
+}
+
 // showReviews keeps its old signature: `true` is the resolved queue, which is
 // now a filter pill rather than a separate route. Every hash it has ever had
 // stays routable.
@@ -2069,10 +2169,9 @@ async function showReviews(history) {
   try {
     // "answered" covers both statuses a resolution writes, 'resolved' and
     // 'approved'; asking for either alone would hide half the history.
-    const wanted = reviewFilter === "answered" ? "answered" : "open";
     const [open, shown, gaps] = await Promise.all([
       api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=open`),
-      wanted === "open"
+      reviewFilter !== "answered"
         ? null
         : api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=answered`),
       // Rides the same revision-keyed cache as everything else here, so the
@@ -2084,27 +2183,30 @@ async function showReviews(history) {
     // Demand is scaled against the most-wanted gap, so the bars compare with
     // each other rather than with an invented ceiling.
     const peak = Math.max(...gaps.map((g) => Number(g.wantedBy) || 0), 1);
-    const gapRows = gaps.map((g) => ({
+    reviewGapRows = gaps.map((g) => ({
       id: `gap:${g.slug}`, kind: "gap", gap: true, slug: g.slug, title: g.slug,
       wantedBy: Number(g.wantedBy) || 0, peak,
     }));
+    reviewOpen = open;
 
-    const pool = wanted === "open" ? open : shown;
-    // "Researching" is a flag on an open review, not a status of its own: a
-    // question someone handed to a worker is still waiting for a human.
-    reviewRows = reviewFilter === "gaps" ? gapRows
-      : reviewFilter === "open" ? pool.filter((r) => !r.researching)
-      : reviewFilter === "researching" ? pool.filter((r) => r.researching)
-      : pool;
+    setReviewRows(open, shown);
+    // A review that finished researching while nobody was on this screen.
+    const finished = noteResearchDone(open);
+    if (reviewSelectId) {
+      const at = reviewRows.findIndex((r) => r.id === reviewSelectId);
+      if (at >= 0) {
+        selectedReviewIndex = at;
+        reviewFresh.delete(reviewSelectId);
+        // Asked for by name: on a narrow screen that means the detail, not
+        // the list it was picked from.
+        document.body.classList.add("inbox-detail-open");
+      }
+      reviewSelectId = null;
+    }
     if (selectedReviewIndex >= reviewRows.length) selectedReviewIndex = 0;
-
-    const counts = {
-      open: open.filter((r) => !r.researching).length,
-      researching: open.filter((r) => r.researching).length,
-      gaps: gaps.length,
-    };
-    const pill = (key, label) =>
-      `<button class="pill" data-filter="${key}" aria-pressed="${reviewFilter === key}">${label}</button>`;
+    // On a wide screen the selected row's detail is already on show, which is
+    // what "viewed" means; on a narrow one it is hidden until picked.
+    if (!NARROW.matches) reviewFresh.delete(reviewRows[selectedReviewIndex]?.id);
 
     if (!view.done(`<div class="inbox">
       <div class="inbox-list">
@@ -2115,48 +2217,18 @@ async function showReviews(history) {
               aria-label="What is this page for?" title="What is this page for?">?</button>
           </div>
           <p>Decisions a build could not make on its own.</p>
-          <div class="pills" role="group" aria-label="Filter reviews">
-            ${pill("open", `Open ${counts.open}`)}
-            ${pill("researching", `Researching ${counts.researching}`)}
-            ${counts.gaps || reviewFilter === "gaps"
-              // A bench with no gaps says nothing rather than "Gaps 0" -- but
-              // the queue stays reachable by hash, and arriving there to find
-              // no pill pressed is a page that looks broken.
-              ? pill("gaps", `Gaps ${counts.gaps}`) : ""}
-            ${pill("answered", "Resolved")}
+          <div class="pills" id="inbox-pills" role="group" aria-label="Filter reviews">
+            ${inboxPillsHTML(reviewCounts(open))}
           </div>
         </div>
         <div class="inbox-scroll" id="inbox-scroll" role="listbox" aria-label="Reviews">
-          ${reviewRows.length ? reviewRows.map((r, i) => `
-            <button class="inbox-row ${kindClass(r.kind)}" role="option" data-idx="${i}"
-                    aria-current="${i === selectedReviewIndex}"
-                    aria-selected="${i === selectedReviewIndex}">
-              <span class="inbox-row-top">
-                <span class="kind-sq">${REVIEW_KIND_ICONS[r.kind] || iconUncertain}</span>
-                <span class="kind-name">${esc(r.kind)}</span>
-                <span class="inbox-row-when">${r.gap
-                  ? `wanted by ${esc(r.wantedBy)}`
-                  : esc(relTime(r.created))}</span>
-              </span>
-              <span class="inbox-row-title">${esc(r.title)}</span>
-              <span class="inbox-row-unit">${r.gap ? "not written yet"
-                : esc(r.unit ? unitSource(r.unit).name : (r.pageSlug || ""))}</span>
-            </button>`).join("")
-            : `<div class="empty">${reviewFilter === "answered"
-                ? "Nothing resolved yet. Answered reviews are kept here as a record of what was decided."
-                : reviewFilter === "researching"
-                  ? "Nothing is being researched right now."
-                  : reviewFilter === "gaps"
-                    ? (state.pages.length
-                        ? "No gaps — every link resolves to an existing page."
-                        : "Nothing to check yet — gaps are links the wiki wants and does not have.")
-                    : `No open reviews. Builds file one here when they need a decision,
-                     such as confirming a deletion after a source disappears.`}</div>`}
+          ${inboxRowsHTML()}
         </div>
       </div>
       <div class="inbox-detail" id="inbox-detail">${reviewDetailHTML(reviewRows[selectedReviewIndex])}</div>
     </div>`)) return;
 
+    for (const r of finished) announceResearchDone(r);
     wireInbox(view);
   } catch (err) {
     if (!err.handled) view.done(banner(err));
@@ -2267,29 +2339,59 @@ function wireInbox(view) {
   const select = (i, focusDetail) => {
     if (!reviewRows.length) return;
     selectedReviewIndex = (i + reviewRows.length) % reviewRows.length;
+    // Selecting a row is viewing it: the "new findings" chip has done its job.
+    if (reviewFresh.delete(reviewRows[selectedReviewIndex].id)) {
+      // Removed in place: re-rendering the list would drop the focus of the
+      // row that was just clicked.
+      document.querySelector(`.inbox-row[data-idx="${selectedReviewIndex}"] .new-findings`)?.remove();
+      lastRows = inboxRowsHTML();
+    }
     for (const el of document.querySelectorAll(".inbox-row")) {
       const on = Number(el.dataset.idx) === selectedReviewIndex;
       el.setAttribute("aria-current", String(on));
       el.setAttribute("aria-selected", String(on));
       if (on) el.scrollIntoView({ block: "nearest" });
     }
-    $("inbox-detail").innerHTML = reviewDetailHTML(reviewRows[selectedReviewIndex]);
-    sizeBars($("inbox-detail")); // a gap's demand bar; no-op for every other kind
-    wireDetail();
+    showDetail();
     if (focusDetail) document.body.classList.add("inbox-detail-open");
   };
 
-  for (const b of document.querySelectorAll(".inbox-row")) {
-    b.addEventListener("click", () => select(Number(b.dataset.idx), true));
-  }
-  for (const b of document.querySelectorAll("[data-filter]")) {
-    b.addEventListener("click", () => {
-      if (reviewFilter === b.dataset.filter) return;
-      reviewFilter = b.dataset.filter;
-      selectedReviewIndex = 0;
-      showReviews(false);
-    });
-  }
+  // The detail pane, rebuilt from the selected row. Shared by selection and by
+  // the research poll, which has to replace a pane whose review just changed.
+  const showDetail = () => {
+    const r = reviewRows[selectedReviewIndex];
+    $("inbox-detail").innerHTML = reviewDetailHTML(r);
+    lastDetail = detailKey(r);
+    sizeBars($("inbox-detail")); // a gap's demand bar; no-op for every other kind
+    wireDetail();
+  };
+  const detailKey = (r) => (r ? `${r.id}|${r.researching}|${r.research ?? ""}|${r.status}` : "");
+
+  // Rows and pills are re-rendered in place by the poll, so their handlers are
+  // bound by functions that can run again over the new elements -- separately,
+  // because rebinding the pills that were not replaced would fire twice.
+  const wireRows = () => {
+    for (const b of document.querySelectorAll(".inbox-row")) {
+      b.addEventListener("click", () => select(Number(b.dataset.idx), true));
+    }
+  };
+  const wirePills = () => {
+    for (const b of document.querySelectorAll("[data-filter]")) {
+      b.addEventListener("click", () => {
+        if (reviewFilter === b.dataset.filter) return;
+        reviewFilter = b.dataset.filter;
+        selectedReviewIndex = 0;
+        showReviews(false);
+      });
+    }
+  };
+  // What each region was last rendered from, so the poll can tell whether
+  // anything it fetched actually changes what is on screen.
+  let lastRows = inboxRowsHTML();
+  let lastPills = inboxPillsHTML(reviewCounts(reviewOpen));
+  let lastDetail = detailKey(reviewRows[selectedReviewIndex]);
+  wireRows();
+  wirePills();
 
   const resolve = async (btn) => {
     const r = reviewRows[selectedReviewIndex];
@@ -2348,6 +2450,12 @@ function wireInbox(view) {
           // Nothing is resolved, so the badge is left alone: the question is
           // still waiting for a human, now with a reader working on it.
           toast("Research queued");
+          // The review moves out of Open the moment it is queued. Follow it:
+          // switch to the Researching queue and keep it selected, so the
+          // reader sees it being worked on rather than being thrown at
+          // whichever review slid into its place.
+          reviewFilter = "researching";
+          reviewSelectId = b.dataset.research;
           showReviews(false);
         } catch (err) {
           if (!err.handled) note(err.message);
@@ -2383,6 +2491,57 @@ function wireInbox(view) {
   };
   document.addEventListener("keydown", onKey);
   onViewCleanup(() => document.removeEventListener("keydown", onKey));
+
+  // ---- research poll ----------------------------------------------------------
+  // A research pass runs for minutes and nothing else on this screen changes
+  // when it ends, so while any review is being researched the open list is
+  // re-read every 10s. Like the Ingest feed's poll it patches the list in
+  // place -- re-running the view would move focus to <main> and scroll to the
+  // top every tick -- and it stops by itself once nothing is being researched.
+  let timer = 0;
+  onViewCleanup(() => clearTimeout(timer));
+  const schedule = () => {
+    clearTimeout(timer);
+    if (reviewOpen.some((r) => r.researching)) timer = setTimeout(tick, 10000);
+  };
+  async function tick() {
+    if (!view.current()) return;
+    let open;
+    try {
+      open = await api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=open`);
+    } catch (err) {
+      if (!err?.handled) schedule(); // a blip: the screen's numbers are still the last true ones
+      return;
+    }
+    if (!view.current()) return;
+    const before = reviewRows[selectedReviewIndex]?.id;
+    reviewOpen = open;
+    const finished = noteResearchDone(open);
+    updateReviewsBadge(open.length);
+    if (reviewFilter === "open" || reviewFilter === "researching") {
+      setReviewRows(open);
+      const at = reviewRows.findIndex((r) => r.id === before);
+      selectedReviewIndex = at >= 0 ? at : Math.min(selectedReviewIndex, Math.max(reviewRows.length - 1, 0));
+    }
+    // Only touch the DOM for what changed: a replaced pill or row would drop
+    // the focus of a reader who happens to be on it.
+    const pills = inboxPillsHTML(reviewCounts(open));
+    if (pills !== lastPills) {
+      $("inbox-pills").innerHTML = lastPills = pills;
+      wirePills();
+    }
+    const rows = inboxRowsHTML();
+    if (rows !== lastRows) {
+      const hadFocus = document.activeElement?.classList?.contains("inbox-row");
+      $("inbox-scroll").innerHTML = lastRows = rows;
+      wireRows();
+      if (hadFocus) document.querySelector('.inbox-row[aria-current="true"]')?.focus({ preventScroll: true });
+    }
+    if (detailKey(reviewRows[selectedReviewIndex]) !== lastDetail) showDetail();
+    for (const r of finished) announceResearchDone(r);
+    schedule();
+  }
+  schedule();
 }
 
 // showGraph renders the page graph from the materialized links: every live

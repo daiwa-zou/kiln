@@ -914,6 +914,12 @@
     font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600;
   }
   .inbox-row-when { margin-left: auto; font-size: 11px; color: var(--ink-faint); flex: none; }
+  /* A research pass finished on this review and nobody has opened it since.
+     Solid ink so it reads as a state, not as another kind of label. */
+  .chip.new-findings {
+    padding: 1px 7px; font-size: 10.5px; font-weight: 600; flex: none;
+    background: var(--ink); border-color: var(--ink); color: var(--bg);
+  }
   .inbox-row-title { font-size: 13.5px; font-weight: 500; line-height: 1.35; margin-bottom: 3px; }
   .inbox-row-unit {
     font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
