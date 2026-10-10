@@ -135,7 +135,7 @@ func bindEnv(v *viper.Viper) error {
 		"agent.run_budget_usd", "agent.max_pages_per_run", "agent.unit_concurrency", "agent.warn_turns",
 		"agent.budget_window",
 		"agent.fake_cost_usd", "agent.fake_fail_units", "agent.fake_latency",
-		"auth.mode",
+		"auth.mode", "auth.default_role",
 		"worker.poll_interval", "worker.stale_after", "worker.permitted_source_roots",
 		"worker.source_poll_interval", "worker.drain_grace", "worker.heartbeat_interval",
 		"github.client_id", "github.app_id",

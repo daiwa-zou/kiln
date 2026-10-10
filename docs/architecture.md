@@ -1271,6 +1271,7 @@ deliver them.
 | Key | Default | Notes |
 | --- | --- | --- |
 | `auth.mode` | `token` | `none` refused on a non-loopback bind. |
+| `auth.default_role` | `member` | Role for a membership `kiln admin token create --org` creates: `viewer` or `member`, nothing else. Existing memberships keep theirs; admin tokens bypass the role. |
 | `github.client_id` | — | Empty disables sign-in. |
 | `github.app_id` | — | For installation tokens. |
 | `github.base_url` / `.api_base_url` | github.com | For GitHub Enterprise. |
