@@ -20,6 +20,12 @@ import (
 // here and the pipeline stays testable against an in-memory fake.
 type WikiStore struct {
 	pool *pgxpool.Pool
+
+	// onLinkResolve, when set, is told how many page_links rows each import
+	// rewrote while resolving and unresolving. It exists so a test can prove
+	// resolveLinks writes only the rows whose value changes; production code
+	// leaves it nil.
+	onLinkResolve func(resolved, unresolved int64)
 }
 
 // NewWikiStore wraps a pool.
@@ -230,8 +236,12 @@ func (s *WikiStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 	if err := softDeletePages(ctx, tx, wikiID, in.SoftDeletePages); err != nil {
 		return err
 	}
-	if err := resolveLinks(ctx, tx, wikiID); err != nil {
+	resolved, unresolved, err := resolveLinksCounted(ctx, tx, wikiID)
+	if err != nil {
 		return err
+	}
+	if s.onLinkResolve != nil {
+		s.onLinkResolve(resolved, unresolved)
 	}
 	for _, src := range in.UpsertSources {
 		if err := upsertSource(ctx, tx, in.WorkspaceID, src); err != nil {
@@ -404,37 +414,54 @@ func upsertPage(ctx context.Context, tx pgx.Tx, wikiID string, p wiki.Page) erro
 }
 
 // resolveLinks points every link at its target where one exists.
+func resolveLinks(ctx context.Context, tx pgx.Tx, wikiID string) error {
+	_, _, err := resolveLinksCounted(ctx, tx, wikiID)
+	return err
+}
+
+// resolveLinksCounted is resolveLinks, also reporting how many rows each of its
+// two statements rewrote.
 //
 // Unresolved rows are left in place deliberately: a link to a page that does
 // not exist is the cheapest and most precise gap signal available, since the
 // wiki has explicitly declared it wants that page.
-func resolveLinks(ctx context.Context, tx pgx.Tx, wikiID string) error {
-	_, err := tx.Exec(ctx, `
+//
+// Both statements write only rows whose value would change. Postgres writes a
+// new tuple version for every row an UPDATE matches, whether or not any column
+// differs, so without the predicate each import would rewrite every link in the
+// wiki -- WAL, bloat, and vacuum work proportional to the whole graph, inside
+// the advisory-locked transaction, for an import that touched one page.
+func resolveLinksCounted(ctx context.Context, tx pgx.Tx, wikiID string) (resolved, unresolved int64, err error) {
+	tag, err := tx.Exec(ctx, `
 		UPDATE page_links l
 		SET to_page_id = t.id, resolved = true
 		FROM pages t
 		WHERE t.wiki_id = $1
 		  AND t.deleted_at IS NULL
 		  AND t.slug = l.to_slug
-		  AND l.from_page_id IN (SELECT id FROM pages WHERE wiki_id = $1)`, wikiID)
+		  AND l.from_page_id IN (SELECT id FROM pages WHERE wiki_id = $1)
+		  AND (NOT l.resolved OR l.to_page_id IS DISTINCT FROM t.id)`, wikiID)
 	if err != nil {
-		return fmt.Errorf("store: resolve links: %w", err)
+		return 0, 0, fmt.Errorf("store: resolve links: %w", err)
 	}
+	resolved = tag.RowsAffected()
 
 	// A target that has since been deleted must not stay marked resolved.
 	// Scoped to this wiki's own links: without the wiki_id predicate this
 	// statement would scan and lock page_links for every tenant on every import.
-	if _, err := tx.Exec(ctx, `
+	// Already restricted to resolved rows, so every match is a real change.
+	tag, err = tx.Exec(ctx, `
 		UPDATE page_links l
 		SET to_page_id = NULL, resolved = false
 		WHERE l.resolved
 		  AND l.from_page_id IN (SELECT id FROM pages WHERE wiki_id = $1)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM pages t
-		      WHERE t.id = l.to_page_id AND t.deleted_at IS NULL)`, wikiID); err != nil {
-		return fmt.Errorf("store: unresolve dead links: %w", err)
+		      WHERE t.id = l.to_page_id AND t.deleted_at IS NULL)`, wikiID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: unresolve dead links: %w", err)
 	}
-	return nil
+	return resolved, tag.RowsAffected(), nil
 }
 
 // softDeletePages marks pages removed without destroying them.
