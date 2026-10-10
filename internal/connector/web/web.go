@@ -37,6 +37,8 @@ const (
 	maxPageBytes = 2 << 20 // 2 MiB of HTML is an article, not a tarball
 	maxRedirects = 5
 	fetchTimeout = 30 * time.Second
+	// idleConnTimeout bounds how long a kept-alive connection may sit unused.
+	idleConnTimeout = 30 * time.Second
 )
 
 // Connector fetches a fixed set of URLs.
@@ -144,6 +146,11 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		extractors = extract.DefaultExtractors()
 	}
 	client := c.client()
+	// Each Sync builds its own transport, so nothing else will ever reuse or
+	// reap its keep-alive connections. Close them here, or every poll interval
+	// strands a connection, its goroutines and a file descriptor until the
+	// remote happens to hang up.
+	defer client.CloseIdleConnections()
 
 	set := &connector.SourceSet{Root: dst, Kind: c.Kind()}
 	payload := &Payload{}
@@ -273,6 +280,9 @@ func (c *Connector) client() *http.Client {
 			return nil, fmt.Errorf("connector/web: %s resolves only to non-public addresses", host)
 		},
 		TLSHandshakeTimeout: 10 * time.Second,
+		// Backstop for CloseIdleConnections: a connection parked between two
+		// fetches of one Sync must not outlive the Sync indefinitely.
+		IdleConnTimeout: idleConnTimeout,
 	}
 	return &http.Client{
 		Transport: transport,
