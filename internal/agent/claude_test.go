@@ -564,3 +564,110 @@ func flagVal(args []string, name string) string {
 	}
 	return ""
 }
+
+func flagValOK(args []string, name string) (string, bool) {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+func indexOf(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// sandboxRequests has one request per step the pipeline can make, each carrying
+// everything any step reads, for the sandbox assertions below.
+func sandboxRequests() map[Step]Request {
+	reqs := map[Step]Request{}
+	for _, step := range []Step{StepAnalyze, StepGenerate, StepResearch} {
+		reqs[step] = Request{
+			Step: step, WorkDir: "/src", ScratchDir: "/scratch", SessionID: "abc",
+			ExtraDirs: []string{"/other"}, Model: "sonnet", FallbackModel: "haiku",
+			BudgetUSD: 1, SystemPrompt: "sys", Prompt: "go",
+		}
+	}
+	return reqs
+}
+
+// --restricted is what confines Read, Grep and Glob to the working directories.
+// Without it they reach /proc/<ppid>/environ, the blob store and ~/.claude, so
+// it has to be on every step: research and analyze read untrusted content just
+// as generate does.
+func TestBuildArgsEveryStepIsRestricted(t *testing.T) {
+	for step, req := range sandboxRequests() {
+		args := BuildArgs(req)
+		if !containsArg(args, "--restricted") {
+			t.Errorf("%s: --restricted missing: %v", step, args)
+		}
+		// It adds to the isolation flags; it does not replace them.
+		if v, ok := flagValOK(args, "--setting-sources"); !ok || v != "" {
+			t.Errorf("%s: --setting-sources = %q (present %v), want the empty source list", step, v, ok)
+		}
+		if !containsArg(args, "--strict-mcp-config") {
+			t.Errorf("%s: --strict-mcp-config missing", step)
+		}
+	}
+}
+
+// Analyze used to pass no --disallowedTools at all, leaning on --tools alone.
+func TestBuildArgsEveryStepCarriesTheDenyList(t *testing.T) {
+	for step, req := range sandboxRequests() {
+		args := BuildArgs(req)
+		got := strings.Split(flagVal(args, "--disallowedTools"), ",")
+		for _, want := range deniedTools {
+			if !containsArg(got, want) {
+				t.Errorf("%s: --disallowedTools = %v, missing %s", step, got, want)
+			}
+		}
+	}
+}
+
+// --add-dir (and --tools, --disallowedTools) take any number of values, so a
+// prompt that follows one of them is read as one more value and the CLI is left
+// with no prompt. Every step, with and without a session, must end in a flag
+// that takes a fixed number of values.
+func TestBuildArgsNoVariadicFlagPrecedesThePrompt(t *testing.T) {
+	variadic := map[string]bool{"--add-dir": true, "--tools": true, "--disallowedTools": true, "--allowedTools": true}
+	for step, req := range sandboxRequests() {
+		for _, withSession := range []bool{true, false} {
+			r := req
+			if !withSession {
+				r.SessionID = ""
+			}
+			args := BuildArgs(r)
+			if args[len(args)-1] != "go" {
+				t.Fatalf("%s: prompt is not last: %v", step, args)
+			}
+			last := ""
+			for _, a := range args[:len(args)-1] {
+				if strings.HasPrefix(a, "--") {
+					last = a
+				}
+			}
+			if variadic[last] {
+				t.Errorf("%s (session %v): the prompt follows %s and would be swallowed by it: %v", step, withSession, last, args)
+			}
+		}
+	}
+}
+
+func TestBuildArgsGrantsExtraReadDirsToResearch(t *testing.T) {
+	args := BuildArgs(Request{
+		Step: StepResearch, WorkDir: "/src", ExtraDirs: []string{"/docs", "", "/docs", "/web"}, Prompt: "q",
+	})
+	i := indexOf(args, "--add-dir")
+	if i < 0 {
+		t.Fatalf("no --add-dir: %v", args)
+	}
+	if args[i+1] != "/docs" || args[i+2] != "/web" || strings.HasPrefix(args[i+3], "/") {
+		t.Errorf("--add-dir values = %v, want /docs and /web once each", args[i:])
+	}
+}

@@ -156,6 +156,15 @@ func BuildArgs(req Request) []string {
 		// vector. These two flags stop the CLI loading any of it.
 		"--setting-sources", "",
 		"--strict-mcp-config",
+		// Confines the built-in file tools to the working directories
+		// (--add-dir included) and removes every tool that runs commands or
+		// code unless --tools names it. Without it Read, Grep and Glob reach
+		// any path the kiln process can: /proc/<ppid>/environ (the parent's
+		// KILN_MASTER_KEY), the blob store holding other tenants' uploads, and
+		// ~/.claude. --tools below still decides which tools exist; this
+		// decides where they may go. Needs CLI >= 2.1.248, and an older CLI
+		// fails loudly on the unknown flag rather than running unconfined.
+		"--restricted",
 	}
 
 	// Daemon runs should not pollute the operator's resume history -- but a
@@ -192,8 +201,13 @@ func BuildArgs(req Request) []string {
 	case StepAnalyze:
 		args = append(args,
 			"--tools", strings.Join(readOnlyTools, ","),
-			"--permission-mode", "dontAsk",
+			// Redundant with --tools today, and kept on purpose: it stays true if
+			// someone widens the tool list for this step, and it is the same
+			// deny list the other steps carry.
+			"--disallowedTools", strings.Join(deniedTools, ","),
 		)
+		args = append(args, addDirArgs(req.ExtraDirs...)...)
+		args = append(args, "--permission-mode", "dontAsk")
 		args = append(args, "--json-schema", schemaTextFor(req.Step))
 		if req.SessionID != "" {
 			args = append(args, "--session-id", SessionUUID(req.SessionID))
@@ -207,19 +221,21 @@ func BuildArgs(req Request) []string {
 		args = append(args,
 			"--tools", strings.Join(readOnlyTools, ","),
 			"--disallowedTools", strings.Join(deniedTools, ","),
-			"--permission-mode", "dontAsk",
 		)
+		// Under --restricted the file tools stop at the working directory, so
+		// every other directory the question's units live in is granted here.
+		args = append(args, addDirArgs(req.ExtraDirs...)...)
+		args = append(args, "--permission-mode", "dontAsk")
 		args = append(args, "--json-schema", schemaTextFor(req.Step))
 
 	case StepGenerate:
 		args = append(args,
 			"--tools", strings.Join(generateTools, ","),
 			"--disallowedTools", strings.Join(deniedTools, ","),
-			// Grants the scratch directory while cwd stays the sources, so the
-			// agent cannot write into the material it is documenting.
-			"--add-dir", req.ScratchDir,
-			"--permission-mode", "acceptEdits",
 		)
+		// Grants the scratch directory while cwd stays the sources.
+		args = append(args, addDirArgs(req.ScratchDir)...)
+		args = append(args, "--permission-mode", "acceptEdits")
 		if req.FallbackModel != "" {
 			args = append(args, "--fallback-model", req.FallbackModel)
 		}
@@ -242,6 +258,30 @@ func BuildArgs(req Request) []string {
 	}
 
 	return append(args, req.Prompt)
+}
+
+// addDirArgs renders --add-dir for the non-empty, distinct directories given,
+// or nothing when there are none.
+//
+// --add-dir is variadic: it swallows every following argument that is not a
+// flag. The caller therefore has to put another flag after it, never the
+// positional prompt, which would be taken for a directory and leave the CLI
+// with no prompt at all. BuildArgs places a flag after every use, and
+// TestBuildArgsNoVariadicFlagPrecedesThePrompt holds it to that.
+func addDirArgs(dirs ...string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range dirs {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return append([]string{"--add-dir"}, out...)
 }
 
 // sessionNamespace scopes the derivation below. Arbitrary but fixed: changing

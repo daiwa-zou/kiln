@@ -60,6 +60,12 @@ type Request struct {
 	WorkDir string
 	// ScratchDir is the only writable location, granted via --add-dir.
 	ScratchDir string
+	// ExtraDirs are further directories the agent may read, granted via
+	// --add-dir. Under the CLI's --restricted mode the file tools reach only
+	// the working directory and these, so a step whose material spans several
+	// roots (research, across units staged in different places) names them
+	// here rather than relying on reads that wander.
+	ExtraDirs []string
 
 	Model         string
 	FallbackModel string
