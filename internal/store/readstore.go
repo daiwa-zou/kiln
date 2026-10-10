@@ -295,42 +295,47 @@ func (s *WikiStore) Graph(ctx context.Context, workspaceID string, limit int) (n
 	defer rows.Close()
 
 	nodes = []GraphNode{}
-	included := map[string]bool{}
+	included := make([]string, 0, limit)
 	for rows.Next() {
 		var n GraphNode
 		if err := rows.Scan(&n.Slug, &n.Title, &n.Type, &n.Links); err != nil {
 			return nil, nil, 0, fmt.Errorf("store: scan graph node: %w", err)
 		}
 		nodes = append(nodes, n)
-		included[n.Slug] = true
+		included = append(included, n.Slug)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, 0, err
 	}
+	edges = []GraphEdge{}
+	if len(included) == 0 {
+		return nodes, edges, total, nil
+	}
 
+	// Both endpoints are bounded to the nodes that made the cut, in the query
+	// rather than after it. An edge to a page outside the cap would render as
+	// a line to nowhere, and discarding it in Go still means a bench with far
+	// more links than nodes ships its whole link table to drop most of it --
+	// which is the cost the node cap was added to avoid.
 	links, err := s.pool.Query(ctx, `
 		SELECT f.slug, t.slug
 		FROM page_links l
 		JOIN pages f ON f.id = l.from_page_id AND f.deleted_at IS NULL
 		JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL
 		JOIN wikis w ON w.id = f.wiki_id
-		WHERE w.workspace_id = $1 AND l.resolved`, workspaceID)
+		WHERE w.workspace_id = $1 AND l.resolved
+		  AND f.slug = ANY($2) AND t.slug = ANY($2)`, workspaceID, included)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("store: graph edges: %w", err)
 	}
 	defer links.Close()
 
-	edges = []GraphEdge{}
 	for links.Next() {
 		var e GraphEdge
 		if err := links.Scan(&e.From, &e.To); err != nil {
 			return nil, nil, 0, fmt.Errorf("store: scan graph edge: %w", err)
 		}
-		// An edge whose endpoint fell outside the node cap would render as a
-		// line to nowhere.
-		if included[e.From] && included[e.To] {
-			edges = append(edges, e)
-		}
+		edges = append(edges, e)
 	}
 	return nodes, edges, total, links.Err()
 }

@@ -104,3 +104,38 @@ func TestStatusRecorderPreservesResponseWriterCapabilities(t *testing.T) {
 	}
 	sr2.Flush() // must not panic on a writer that supports it
 }
+
+// The search counter is the input to a product decision -- how often lexical
+// matching fails to answer -- so what it counts has to be questions asked, not
+// pages fetched. Paging through one query's results would otherwise report
+// itself as several searches, and a caller scrolling a good result set would
+// look like a caller finding nothing.
+func TestSearchMetricCountsQueriesNotPages(t *testing.T) {
+	base, js, wsID := testServer(t)
+	_ = base
+	seed(t, js, wsID)
+
+	m := observability.NewMetrics()
+	srv := httptest.NewServer((&Server{Store: js, Metrics: m}).Router())
+	defer srv.Close()
+
+	// A query that matches, a query that does not, and a second page of the
+	// first -- which is the same question, already counted.
+	if code := get(t, srv, "/api/v1/workspaces/demo/search?q=dispatch", nil); code != http.StatusOK {
+		t.Fatalf("search = %d", code)
+	}
+	if code := get(t, srv, "/api/v1/workspaces/demo/search?q=zzzznotaword", nil); code != http.StatusOK {
+		t.Fatalf("empty search = %d", code)
+	}
+	if code := get(t, srv, "/api/v1/workspaces/demo/search?q=dispatch&offset=1", nil); code != http.StatusOK {
+		t.Fatalf("paged search = %d", code)
+	}
+
+	body := scrapeServer(t, m)
+	if !strings.Contains(body, `kiln_searches_total{outcome="hit"} 1`) {
+		t.Errorf("want exactly one hit search (the paged request is the same question):\n%s", body)
+	}
+	if !strings.Contains(body, `kiln_searches_total{outcome="empty"} 1`) {
+		t.Errorf("want one empty search recorded:\n%s", body)
+	}
+}

@@ -33,11 +33,15 @@ func (s *WikiStore) LastRunFinishedAt(ctx context.Context, workspaceID string) (
 	var finished *time.Time
 	err := s.pool.QueryRow(ctx, `
 		SELECT max(finished_at) FROM runs WHERE workspace_id = $1`, workspaceID).Scan(&finished)
-	if errors.Is(err, pgx.ErrNoRows) || finished == nil {
-		return time.Time{}, nil
-	}
-	if err != nil {
+	// The error check comes first. A failed query leaves finished nil, so
+	// testing for nil ahead of it would report a database outage as "this
+	// bench has never built" -- which reads as no cooldown owed, and turns a
+	// blip into a build storm the cooldown exists to prevent.
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, fmt.Errorf("store: last run finished: %w", err)
+	}
+	if finished == nil {
+		return time.Time{}, nil
 	}
 	return *finished, nil
 }
