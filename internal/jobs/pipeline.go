@@ -342,7 +342,6 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		ledger:          ledger,
 		estPerCall:      perUnit,
 		figures:         figures,
-		deferLinks:      conc > 1,
 	}, log)
 	if halted != "" {
 		res.Summary.Status = halted
@@ -516,10 +515,11 @@ var errRunBudgetExhausted = errors.New("run budget exhausted")
 // now settled after every unit finishes, in mergeOutcomes.
 type unitScope struct {
 	steering Steering
-	// known resolves wikilinks against pages that existed when the run
-	// started. Pages written by *this* run are not here -- a concurrent unit
-	// cannot see them -- so the link check is deferred to mergeOutcomes,
-	// where the run's full slug set is finally known.
+	// known is the slug set as it stood when the run started. Pages written by
+	// *this* run are not in it, whether the unit that wrote them ran
+	// concurrently or merely earlier: the link check is always deferred to
+	// mergeOutcomes, where the run's full slug set is finally known, so
+	// validation here never judges a wikilink.
 	known map[string]bool
 	// existingBySlug rejects slug collisions against live pages, since slug is
 	// the database's page identity. Collisions between two units of the same
@@ -538,13 +538,6 @@ type unitScope struct {
 	// key. Loaded once for the whole run rather than per unit: it is one
 	// query, and units generate concurrently.
 	figures map[diff.Key][]FigureRecord
-	// deferLinks moves the unresolved-wikilink check out of the retry loop
-	// and into mergeOutcomes. Set only when units actually run concurrently:
-	// at concurrency 1 the sequential pipeline's growing slug set is both
-	// available and strictly better, because a dangling link caught inside
-	// the loop is stated back to the agent and fixed within the run rather
-	// than failing the unit until the next one.
-	deferLinks bool
 }
 
 // costOf reads a call's cost defensively: a runner that fails may return a
@@ -709,7 +702,12 @@ func (p *Pipeline) generateUnit(
 			ExistingBySlug: sc.existingBySlug,
 			Planned:        planned,
 			RequireDates:   true,
-			DeferLinkCheck: sc.deferLinks,
+			// Links are checked in mergeOutcomes against the run's final slug
+			// set. Checking them here against sc.known would fail a page that
+			// links to more than the tolerated few pages an earlier unit wrote
+			// this run, burning every retry (the last on the fallback model) on
+			// a link the merge would have resolved.
+			DeferLinkCheck: true,
 			AllowedFigures: allowedFigures(sc.figures[key]),
 		})...)
 		if len(lastViolations) == 0 {
