@@ -67,7 +67,11 @@ type BuildRequest struct {
 	RunID       string
 	WorkspaceID string
 	Trigger     string
-	Ref         string
+	// Ref is the full SHA of the commit being built, or empty for sources with
+	// no commit. It is what the run record stores as the base of the next
+	// incremental range, so it must stay full; everything a reader sees (the
+	// overview, the log, page freshness) shows shortRef(Ref).
+	Ref string
 	// Connectors attributes each source record to the connector whose sync
 	// produced it, by namespace. Zero value for CLI builds, which have no
 	// connector rows.
@@ -374,7 +378,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	index := wiki.BuildIndex(merged, wiki.IndexOptions{})
 	overview := wiki.BuildOverview(merged, wiki.OverviewInput{
 		Workspace: req.workspaceLabel(),
-		Ref:       req.Ref,
+		Ref:       shortRef(req.Ref),
 		Date:      now.Format(wiki.DateFormat),
 		BuiltAt:   now.Format(wiki.StampFormat),
 		Narrative: findings,
@@ -390,7 +394,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		Date:    now.Format(wiki.DateFormat),
 		Action:  "build",
 		Subject: req.WorkspaceID,
-		Ref:     req.Ref,
+		Ref:     shortRef(req.Ref),
 		Lines:   buildLogLines(res.Summary, res.Summary.CostUSD),
 	})
 
@@ -708,7 +712,7 @@ func (p *Pipeline) generateUnit(
 			return res
 		}
 
-		p.stampDates(collected, sc.existingCreated, req.Ref)
+		p.stampDates(collected, sc.existingCreated, shortRef(req.Ref))
 
 		lastViolations = append(parseViolations, wiki.ValidateBatch(collected, wiki.ValidateOptions{
 			KnownSlugs:     sc.known,

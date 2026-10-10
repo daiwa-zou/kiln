@@ -29,6 +29,16 @@ type RunStore interface {
 
 const defaultRunLimit = 50
 
+// shortRef abbreviates a commit id for display. Runs store the full SHA, because
+// only a full one can be fetched from a remote to anchor an incremental range;
+// the dashboard shows the familiar seven characters.
+func shortRef(ref string) string {
+	if len(ref) > 7 {
+		return ref[:7]
+	}
+	return ref
+}
+
 // RunSummaryJSON is one run as the dashboard consumes it.
 type RunSummaryJSON struct {
 	ID           string  `json:"id"`
@@ -93,7 +103,7 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	for _, run := range rows {
 		p := progress[run.ID]
 		out = append(out, RunSummaryJSON{
-			ID: run.ID, Trigger: run.Trigger, Ref: run.Ref, Status: run.Status,
+			ID: run.ID, Trigger: run.Trigger, Ref: shortRef(run.Ref), Status: run.Status,
 			CostUSD:      run.CostUSD,
 			Tokens:       run.Tokens,
 			PagesCreated: run.PagesCreated, PagesUpdated: run.PagesUpdated,

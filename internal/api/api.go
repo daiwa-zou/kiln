@@ -140,8 +140,12 @@ type Server struct {
 	WebhookSecret   []byte
 	WebhookCooldown time.Duration
 
-	// hookLimit buckets webhook deliveries per remote host; created by Router().
-	hookLimit *limiter
+	// hookLimit buckets webhook deliveries that passed signature verification,
+	// per repository (or installation). hookRejectLimit buckets those that did
+	// not, per remote host. Both are created by Router(); see handleGitHubWebhook
+	// for why the two are keyed differently.
+	hookLimit       *limiter
+	hookRejectLimit *limiter
 
 	// writeLimit buckets mutating requests per caller; created by Router().
 	writeLimit *limiter
@@ -267,12 +271,17 @@ func (s *Server) mountRoutes(r chi.Router) {
 	}
 
 	// Webhook ingress: GitHub cannot carry a kiln token, so this sits outside
-	// auth.Wrap behind its own HMAC check, size cap, and rate limit.
+	// auth.Wrap behind its own HMAC check, size cap, and rate limits. The limits
+	// live inside the handler rather than in middleware because the right key
+	// is only known once the signature has verified.
 	if s.Hooks != nil && len(s.WebhookSecret) > 0 {
 		if s.hookLimit == nil {
 			s.hookLimit = newLimiter()
 		}
-		r.With(writeLimiter(s.hookLimit)).Post("/hooks/github", s.handleGitHubWebhook)
+		if s.hookRejectLimit == nil {
+			s.hookRejectLimit = newLimiter()
+		}
+		r.Post("/hooks/github", s.handleGitHubWebhook)
 	}
 
 	r.Route("/api/v1", func(r chi.Router) {

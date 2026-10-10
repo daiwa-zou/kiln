@@ -59,7 +59,7 @@ func TestCloneRunsGitWithoutTheParentsSecrets(t *testing.T) {
 func TestGitOutputRunsGitWithoutTheParentsSecrets(t *testing.T) {
 	dump := fakeGitDumpingEnv(t)
 
-	_, _ = gitOutput(context.Background(), t.TempDir(), "status")
+	_, _ = gitOutput(context.Background(), t.TempDir(), "", localCmdTimeout, "status")
 
 	for _, kv := range readDump(t, dump) {
 		if strings.HasPrefix(kv, "KILN_") {

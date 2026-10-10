@@ -680,11 +680,12 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 
 		var (
 			resolved string
+			gitToken string
 			err      error
 		)
 		if remoteURL, _ := c.Config["url"].(string); remoteURL != "" && c.Kind == "git" {
 			var clean func()
-			resolved, clean, err = w.cloneRemote(ctx, c, remoteURL)
+			resolved, gitToken, clean, err = w.cloneRemote(ctx, c, remoteURL)
 			if clean != nil {
 				cleanups = append(cleanups, clean)
 			}
@@ -711,6 +712,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 				return fail2(fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug))
 			}
 			spec.Path = resolved
+			spec.GitToken = gitToken
 			ids.Git = c.ID
 		case "upload":
 			if spec.DocsDir != "" {
@@ -851,42 +853,52 @@ func stageBlob(ctx context.Context, blobs blob.Store, root *os.Root, f store.Fil
 // Authentication prefers an App installation token (short-lived, repo-scoped,
 // nothing durable to leak) and falls back to a sealed credential decrypted
 // just-in-time. Either way the plaintext lives only in this frame and the
-// clone subprocess's environment.
-func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteURL string) (dir string, cleanup func(), err error) {
-	token := ""
+// clone subprocess's environment. The token is also returned,
+// because an incremental build must fetch with it again to deepen the clone;
+// the caller keeps it in memory only, for the length of the run.
+func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteURL string) (dir, token string, cleanup func(), err error) {
 	switch {
 	case installationID(c.Config) != 0:
 		if !w.GitHub.AppConfigured() {
-			return "", nil, fmt.Errorf(
+			return "", "", nil, fmt.Errorf(
 				"connector names github installation %d, but no GitHub App is configured (set github.app_id and KILN_GITHUB_PRIVATE_KEY)",
 				installationID(c.Config))
 		}
 		if err := w.checkInstallation(ctx, c); err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 		token, _, err = w.GitHub.InstallationToken(ctx, installationID(c.Config))
 		if err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 	case c.CredentialID != "":
 		token, err = w.openCredential(ctx, c.CredentialID)
 		if err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 	}
 
 	staging, err := os.MkdirTemp("", "kiln-clone-")
 	if err != nil {
-		return "", nil, fmt.Errorf("clone staging: %w", err)
+		return "", "", nil, fmt.Errorf("clone staging: %w", err)
 	}
 	cleanup = func() { os.RemoveAll(staging) }
 
 	if err := gitconn.CloneShallow(ctx, gitconn.CloneOptions{
 		URL: remoteURL, Token: token, Dir: staging,
+		Branch: configuredBranch(c.Config),
 	}); err != nil {
-		return "", cleanup, err
+		return "", "", cleanup, err
 	}
-	return staging, cleanup, nil
+	return staging, token, cleanup, nil
+}
+
+// configuredBranch reads a git connector's optional branch. Empty means the
+// remote's default branch, which is also what its push webhook is matched
+// against (see the api package's connectorBranch).
+func configuredBranch(cfg map[string]any) string {
+	b, _ := cfg["branch"].(string)
+	return strings.TrimSpace(b)
 }
 
 // checkInstallation refuses to mint a token for an installation nobody behind
