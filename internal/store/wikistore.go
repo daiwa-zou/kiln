@@ -527,19 +527,35 @@ func (s *WikiStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 	// A queued run already has its row: the worker passes the database id as
 	// RunID, and the summary finishes that row in place. A CLI run id
 	// ("run-<hex>") is not a UUID, so it takes the insert path below.
+	//
+	// When the context carries a worker's claim, the update is fenced to it: the
+	// row must still be running and still ours. Without that, a worker whose
+	// claim lapsed would mark the run succeeded while the worker that took it
+	// over is mid-build, which frees the workspace's one active-run slot and
+	// lets a third run start alongside it. A fenced miss must not fall through
+	// to the insert below either -- the row exists, it just is not ours.
 	var runID string
+	worker, fenced := claimedBy(ctx)
 	if isUUID(run.RunID) {
+		var owner any // nil leaves the update unfenced, as the CLI path expects
+		if fenced {
+			owner = worker
+		}
 		err := tx.QueryRow(ctx, `
 			UPDATE runs SET status = $2, ref = COALESCE($3, ref), cost_usd = $4,
 			                tokens = $5, pages_created = $6, pages_updated = $7,
 			                pages_deleted = $8, error = $9, finished_at = now()
 			WHERE id = $1
+			  AND ($10::text IS NULL OR (claimed_by = $10::text AND status = 'running'))
 			RETURNING id`,
 			run.RunID, run.Status, nullable(run.Ref), run.CostUSD, run.Tokens,
-			run.Created, run.Updated, run.Deleted, nullable(run.Err),
+			run.Created, run.Updated, run.Deleted, nullable(run.Err), owner,
 		).Scan(&runID)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("store: finish run %s: %w", run.RunID, err)
+		}
+		if runID == "" && fenced {
+			return s.recordLostRun(ctx, tx, run)
 		}
 	}
 	if runID == "" {
@@ -626,6 +642,29 @@ func (s *WikiStore) RecordRun(ctx context.Context, run jobs.RunSummary) error {
 	}
 
 	return tx.Commit(ctx)
+}
+
+// recordLostRun is what a fenced RecordRun does when the run is no longer the
+// caller's. Nothing about the run, its items, its reviews or the wiki's last-run
+// pointer is touched -- those now belong to whoever holds the claim -- but the
+// spend is still ledgered. The model calls were made and billed, and the other
+// worker will ledger only its own; dropping this one would leave every budget
+// window undercounting exactly when a build is being paid for twice.
+func (s *WikiStore) recordLostRun(ctx context.Context, tx pgx.Tx, run jobs.RunSummary) error {
+	if run.CostUSD > 0 {
+		// Guarded by existence: the run may have been swept since, and the
+		// ledger's reference to it must not dangle.
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO spend_ledger (workspace_id, run_id, amount_usd)
+			SELECT $1, id, $3 FROM runs WHERE id = $2`,
+			run.WorkspaceID, run.RunID, run.CostUSD); err != nil {
+			return fmt.Errorf("store: insert spend for lost run: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return ErrClaimLost
 }
 
 // EnsureWorkspace finds or creates the org/workspace/wiki chain for a slug and

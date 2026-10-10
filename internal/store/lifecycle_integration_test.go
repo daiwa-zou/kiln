@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ func TestRequeueRunAfterInterruption(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.RequeueRun(ctx, runID); err != nil {
+	if err := s.RequeueRun(ctx, runID, "w1"); err != nil {
 		t.Fatal(err)
 	}
 	// The same run is claimable again, cleanly.
@@ -41,8 +42,10 @@ func TestRequeueRunAfterInterruption(t *testing.T) {
 		Trigger: "manual", Status: jobs.StatusSucceeded}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RequeueRun(ctx, runID); err != nil {
-		t.Fatal(err)
+	// Refused rather than silently ignored: the caller is told its claim is
+	// not what it thought.
+	if err := s.RequeueRun(ctx, runID, "w2"); !errors.Is(err, ErrClaimLost) {
+		t.Fatalf("requeue of a finished run = %v, want ErrClaimLost", err)
 	}
 	var status string
 	if err := pool.QueryRow(ctx, `SELECT status FROM runs WHERE id = $1`, runID).Scan(&status); err != nil {

@@ -17,12 +17,27 @@ import (
 	"github.com/daiwa-zou/kiln/internal/wiki"
 )
 
+// loopRow is the part of a run row the worker's fencing depends on.
+type loopRow struct {
+	status string
+	owner  string
+}
+
 // loopStore scripts the queue for loop tests: a fixed set of runs to hand
 // out, then empty. It records every state change the worker makes.
+//
+// It models status and claimed_by the way the runs table does, so a terminal
+// write from a worker that is not the owner is refused with ErrClaimLost
+// instead of being appended blindly. A run a test hands straight to process()
+// without claiming it is adopted by the first worker to touch it.
 type loopStore struct {
 	mu      sync.Mutex
 	queue   []*store.QueuedRun
 	claimed []string
+	rows    map[string]*loopRow
+	beats   map[string]int
+	// stale is what the sweeps report as requeued; nil reports one dead pod.
+	stale   []store.StaleRun
 	failed  map[string]string
 	marked  map[string]string
 	requeue int
@@ -52,13 +67,15 @@ type loopStore struct {
 func newLoopStore(runs ...*store.QueuedRun) *loopStore {
 	return &loopStore{
 		queue:  runs,
+		rows:   map[string]*loopRow{},
+		beats:  map[string]int{},
 		failed: map[string]string{},
 		marked: map[string]string{},
 		sealed: map[string]*store.SealedCredential{},
 	}
 }
 
-func (l *loopStore) ClaimNextRun(context.Context, string) (*store.QueuedRun, error) {
+func (l *loopStore) ClaimNextRun(_ context.Context, workerID string) (*store.QueuedRun, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.claimErr != nil {
@@ -70,7 +87,40 @@ func (l *loopStore) ClaimNextRun(context.Context, string) (*store.QueuedRun, err
 	run := l.queue[0]
 	l.queue = l.queue[1:]
 	l.claimed = append(l.claimed, run.ID)
+	l.rows[run.ID] = &loopRow{status: "running", owner: workerID}
 	return run, nil
+}
+
+// owns reports whether workerID holds the claim on the run (and, when
+// wantRunning, that it is still running), adopting a run nobody has claimed
+// yet. Callers hold l.mu.
+func (l *loopStore) owns(runID, workerID string, wantRunning bool) bool {
+	row, ok := l.rows[runID]
+	if !ok {
+		row = &loopRow{status: "running", owner: workerID}
+		l.rows[runID] = row
+	}
+	if row.owner != workerID {
+		return false
+	}
+	return !wantRunning || row.status == "running"
+}
+
+// takeOver simulates another worker winning the run after a stale requeue.
+func (l *loopStore) takeOver(runID, workerID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rows[runID] = &loopRow{status: "running", owner: workerID}
+}
+
+func (l *loopStore) HeartbeatRun(_ context.Context, runID, workerID string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.owns(runID, workerID, true) {
+		return store.ErrClaimLost
+	}
+	l.beats[runID]++
+	return nil
 }
 
 func (l *loopStore) ListFiles(context.Context, string) ([]store.FileRow, error) {
@@ -83,21 +133,28 @@ func (l *loopStore) QueueDepth(context.Context) (map[string]int, error) {
 	return map[string]int{"queued": len(l.queue), "running": 0}, nil
 }
 
-func (l *loopStore) FailRun(_ context.Context, runID, msg string) error {
+func (l *loopStore) FailRun(_ context.Context, runID, workerID, msg string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.owns(runID, workerID, false) {
+		return store.ErrClaimLost
+	}
+	l.rows[runID].status = "failed"
 	l.failed[runID] = msg
 	return nil
 }
 
-func (l *loopStore) RequeueStaleRuns(context.Context, time.Duration) (int, error) {
+func (l *loopStore) RequeueStaleRuns(context.Context, time.Duration) ([]store.StaleRun, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.requeueErr != nil {
-		return 0, l.requeueErr
+		return nil, l.requeueErr
 	}
 	l.requeue++
-	return 1, nil
+	if l.stale != nil {
+		return l.stale, nil
+	}
+	return []store.StaleRun{{ID: "stale-1", WorkspaceID: "ws", PreviousClaimedBy: "dead-pod-1"}}, nil
 }
 
 func (l *loopStore) EnabledConnectors(context.Context, string) ([]store.ConnectorRow, error) {
@@ -144,9 +201,13 @@ func (l *loopStore) EnqueueRun(_ context.Context, workspaceID, trigger, connecto
 
 func (l *loopStore) LastSuccessfulRef(context.Context, string) (string, error) { return "", nil }
 
-func (l *loopStore) RequeueRun(_ context.Context, runID string) error {
+func (l *loopStore) RequeueRun(_ context.Context, runID, workerID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.owns(runID, workerID, true) {
+		return store.ErrClaimLost
+	}
+	l.rows[runID] = &loopRow{status: "queued"}
 	l.requeued = append(l.requeued, runID)
 	return nil
 }

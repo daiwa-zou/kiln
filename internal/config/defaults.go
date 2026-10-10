@@ -83,6 +83,10 @@ func applyDefaults(v setter, role Role) {
 	// Comfortably above agent.timeout, so only a genuinely dead worker's run is
 	// requeued, never one still inside a slow model call.
 	v.SetDefault("worker.stale_after", 45*time.Minute)
+	// A heartbeat is one indexed single-row update. A minute is frequent enough
+	// that stale_after can be tightened to minutes if an operator wants dead
+	// workers recovered quickly, and rare enough to cost nothing.
+	v.SetDefault("worker.heartbeat_interval", time.Minute)
 }
 
 func defaultMaxConns(role Role) int32 {

@@ -329,7 +329,7 @@ func TestFailRunAndRequeueStale(t *testing.T) {
 	}
 
 	// FailRun releases the workspace.
-	if err := s.FailRun(ctx, runID, "connector misconfigured"); err != nil {
+	if err := s.FailRun(ctx, runID, "w1", "connector misconfigured"); err != nil {
 		t.Fatal(err)
 	}
 	var status, msg string
@@ -350,16 +350,16 @@ func TestFailRunAndRequeueStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Fresh claims are not stale.
-	if n, err := s.RequeueStaleRuns(ctx, time.Hour); err != nil || n != 0 {
-		t.Errorf("requeue fresh: n=%d err=%v", n, err)
+	if got, err := s.RequeueStaleRuns(ctx, time.Hour); err != nil || len(got) != 0 {
+		t.Errorf("requeue fresh: %+v err=%v", got, err)
 	}
 	// Backdate the claim, then requeue.
 	if _, err := pool.Exec(ctx,
 		`UPDATE runs SET claimed_at = now() - interval '2 hours' WHERE id = $1`, runID2); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := s.RequeueStaleRuns(ctx, time.Hour); err != nil || n != 1 {
-		t.Errorf("requeue stale: n=%d err=%v", n, err)
+	if got, err := s.RequeueStaleRuns(ctx, time.Hour); err != nil || len(got) != 1 || got[0].ID != runID2 {
+		t.Errorf("requeue stale: %+v err=%v", got, err)
 	}
 	reclaimed, err := s.ClaimNextRun(ctx, "w2")
 	if err != nil || reclaimed == nil || reclaimed.ID != runID2 {
