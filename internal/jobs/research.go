@@ -85,9 +85,13 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 	}
 	defer mat.Close()
 
-	pages, err := p.Store.LoadPages(ctx, req.WorkspaceID)
+	// Pages are chosen from metadata and the link table, and only the few that
+	// are chosen have their bodies loaded. Research renders at most
+	// maxResearchPages of them; reading every page on the bench to pick four
+	// was most of this call's cost on a large wiki.
+	pages, err := p.relevantPagesFor(ctx, req.WorkspaceID, req.Question)
 	if err != nil {
-		return nil, p.failResearch(ctx, summary, fmt.Errorf("jobs: load pages: %w", err))
+		return nil, p.failResearch(ctx, summary, err)
 	}
 	steering, err := p.Store.LoadSteering(ctx, req.WorkspaceID)
 	if err != nil {
@@ -109,7 +113,7 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 		Timeout:          p.Timeout,
 		SystemPrompt:     researchSystemPrompt(steering),
 		CacheableContext: mat.Map.Summary,
-		Prompt:           researchPrompt(req.Question, req.Source.Path, units, relevantPages(req.Question, pages)),
+		Prompt:           researchPrompt(req.Question, req.Source.Path, units, pages),
 		JSONSchema:       ResearchSchema,
 	})
 
@@ -272,11 +276,72 @@ func relevantUnits(q Question, wm *mapper.WorkspaceMap) []mapper.Unit {
 	return out
 }
 
+// relevantPagesFor selects the pages that bear on a question and loads their
+// bodies, and no one else's.
+//
+// Selection needs only what is cheap: titles and slugs from page metadata, and
+// who links to the question's page from the link table. Bodies are fetched last,
+// for the handful of pages that will be rendered. A failed link lookup degrades
+// selection to titles alone rather than failing the pass, since the pages that
+// link to a subject are a refinement of the choice, not its foundation.
+func (p *Pipeline) relevantPagesFor(ctx context.Context, workspaceID string, q Question) ([]wiki.Page, error) {
+	meta, err := p.Store.LoadPageMeta(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("jobs: load pages: %w", err)
+	}
+
+	var linkers map[string]bool
+	if strings.TrimSpace(q.PageSlug) != "" {
+		slugs, lerr := p.Store.LinkingSlugs(ctx, workspaceID, q.PageSlug)
+		if lerr != nil {
+			p.logger().Warn("could not find the pages linking to the question's page; selecting by title only",
+				"slug", q.PageSlug, "err", lerr)
+		}
+		linkers = make(map[string]bool, len(slugs))
+		for _, s := range slugs {
+			linkers[s] = true
+		}
+	}
+
+	chosen := relevantPages(q, meta, linkers)
+	if len(chosen) == 0 {
+		return nil, nil
+	}
+	slugs := make([]string, len(chosen))
+	for i, pg := range chosen {
+		slugs[i] = pg.Slug
+	}
+	full, err := p.Store.LoadPagesBySlug(ctx, workspaceID, slugs)
+	if err != nil {
+		return nil, fmt.Errorf("jobs: load pages: %w", err)
+	}
+
+	// Back into ranked order: the store returns them by path, and the prompt
+	// should lead with the best match, as it did when ranking and loading were
+	// one step. A page deleted between the two reads simply drops out.
+	bySlug := make(map[string]wiki.Page, len(full))
+	for _, pg := range full {
+		bySlug[pg.Slug] = pg
+	}
+	out := make([]wiki.Page, 0, len(chosen))
+	for _, pg := range chosen {
+		if loaded, ok := bySlug[pg.Slug]; ok {
+			out = append(out, loaded)
+		}
+	}
+	return out, nil
+}
+
 // relevantPages picks the wiki's own pages that bear on the question. They
 // matter as much as the sources do: a contradiction is between two things the
 // wiki already says, and a gap is a page other pages have declared they need,
 // so the pages naming it are the statement of what is missing.
-func relevantPages(q Question, pages []wiki.Page) []wiki.Page {
+//
+// It works from metadata alone. linkers is the set of slugs of pages that link
+// to the question's page, which the caller reads from the link table; the old
+// test -- searching every body for the wikilink -- is what made this need every
+// body on the bench.
+func relevantPages(q Question, pages []wiki.Page, linkers map[string]bool) []wiki.Page {
 	terms := terms(q.Title + " " + q.Detail)
 	slug := strings.ToLower(strings.TrimSpace(q.PageSlug))
 
@@ -290,7 +355,7 @@ func relevantPages(q Question, pages []wiki.Page) []wiki.Page {
 		// The page the flag was raised against, and any page linking to the
 		// subject of a gap, are relevant whether or not their titles echo the
 		// question's wording.
-		if slug != "" && (strings.EqualFold(pg.Slug, slug) || strings.Contains(strings.ToLower(pg.Body), "[["+slug+"]]")) {
+		if slug != "" && (strings.EqualFold(pg.Slug, slug) || linkers[pg.Slug]) {
 			s += 10
 		}
 		if s == 0 {

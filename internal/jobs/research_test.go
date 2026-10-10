@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -92,6 +93,77 @@ func TestResearchAnswersAQuestionAndLedgersTheRun(t *testing.T) {
 	}
 	if len(store.imports) != 0 {
 		t.Errorf("research imported %d times; it must write nothing", len(store.imports))
+	}
+}
+
+// withoutBodies is what LoadPageMeta hands back: the same pages, prose absent.
+func withoutBodies(pages []wiki.Page) []wiki.Page {
+	out := make([]wiki.Page, len(pages))
+	for i, p := range pages {
+		p.Body = ""
+		out[i] = p
+	}
+	return out
+}
+
+// TestResearchLoadsBodiesOnlyForThePagesItRenders: choosing four pages must not
+// cost reading all of them. The bench here has many pages; the question picks
+// a few by title and by who links to its subject, and only those bodies may be
+// fetched.
+func TestResearchLoadsBodiesOnlyForThePagesItRenders(t *testing.T) {
+	repo := researchRepo(t)
+	store := newMemStore()
+	add := func(slug, title, body string) {
+		path := "concepts/" + slug + ".md"
+		store.pages[path] = wiki.Page{
+			Path: path, Slug: slug,
+			Meta: wiki.Frontmatter{Type: wiki.TypeConcept, Title: title},
+			Body: body,
+		}
+	}
+	add("retry-policy", "Retry policy", "BODY-RETRY the retry policy page.")
+	add("dispatch", "Dispatch", "BODY-DISPATCH leans on [[retry-policy]] for backoff.")
+	add("scheduler", "Scheduler", "BODY-SCHEDULER also cites [[Concepts/Retry-Policy|retries]].")
+	for i := range 40 {
+		add(fmt.Sprintf("filler-%02d", i), fmt.Sprintf("Unrelated topic %02d", i),
+			fmt.Sprintf("BODY-FILLER-%02d nothing relevant.", i))
+	}
+
+	runner := newScriptedRunner()
+	runner.researchResult = &agent.ResearchResult{Findings: "Not answerable from these sources."}
+	p := testPipeline(store, runner)
+
+	if _, err := p.Research(context.Background(), ResearchRequest{
+		RunID: "run-research", WorkspaceID: "ws-1",
+		Source: SourceSpec{Path: repo, Slug: "bench"},
+		Question: Question{
+			Kind: "gap", Title: "retry-policy is referred to but not written",
+			PageSlug: "retry-policy",
+		},
+	}); err != nil {
+		t.Fatalf("Research: %v", err)
+	}
+
+	if store.pageLoads != 0 {
+		t.Errorf("research loaded every page body %d time(s)", store.pageLoads)
+	}
+	got := append([]string(nil), store.bodiesLoaded...)
+	sort.Strings(got)
+	want := []string{"dispatch", "retry-policy", "scheduler"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("bodies loaded for %v, want only the pages rendered: %v", got, want)
+	}
+
+	// And those are the pages the prompt carries, linkers found through the
+	// link table (including the alias and directory-qualified spelling).
+	prompt := runner.calls[0].Prompt
+	for _, w := range []string{"BODY-RETRY", "BODY-DISPATCH", "BODY-SCHEDULER"} {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("prompt is missing %s:\n%s", w, prompt)
+		}
+	}
+	if strings.Contains(prompt, "BODY-FILLER") {
+		t.Error("an unrelated page's body reached the prompt")
 	}
 }
 
@@ -272,7 +344,7 @@ func TestRelevantPagesPrefersTheSubjectOfAGap(t *testing.T) {
 	got := relevantPages(Question{
 		Kind: "gap", Title: "retry-policy is referred to but not written",
 		PageSlug: "retry-policy",
-	}, pages)
+	}, withoutBodies(pages), map[string]bool{"dispatch": true})
 
 	if len(got) == 0 {
 		t.Fatal("a gap selected no pages; the pages naming it are the statement of what is missing")

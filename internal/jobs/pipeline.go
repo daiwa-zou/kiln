@@ -179,10 +179,6 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	if err != nil {
 		return nil, fmt.Errorf("jobs: load sources: %w", err)
 	}
-	pages, err := p.Store.LoadPages(ctx, req.WorkspaceID)
-	if err != nil {
-		return nil, fmt.Errorf("jobs: load pages: %w", err)
-	}
 
 	// Deletions approved through the review queue join whatever the caller
 	// passed explicitly. The queue is how a human answers the question a
@@ -291,6 +287,17 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	if req.DryRun {
 		res.Summary.Status = StatusPending
 		return res, nil
+	}
+
+	// The pages already on record, without their bodies. Loaded here, past the
+	// no-changes return and the dry run, because those are the common paths and
+	// neither touches pages. What the rest of the run does with them -- resolve
+	// wikilinks, keep each page's created date, rebuild the index and overview,
+	// count creations against updates -- needs identity and metadata only, so
+	// the prose of an established bench is never shipped to do it.
+	pages, err := p.Store.LoadPageMeta(ctx, req.WorkspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("jobs: load pages: %w", err)
 	}
 
 	// The plan becomes visible before it becomes expensive. Until this existed
