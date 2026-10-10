@@ -591,11 +591,22 @@ const triggerChip = {
   poll: ["scheduled check", "The poll schedule came due and re-read the source."],
   continuation: ["leftover pages",
     "The previous run reached its per-run page cap; this run built the pages it had to defer."],
+  research: ["review research",
+    "A reader was sent through the sources to answer a question filed under Reviews. It writes findings, not pages."],
 };
 
 // Each run reads as one sentence about what happened, not a ledger row.
 const runOutcome = (r) => {
   if (r.status === "queued") return "Waiting to start";
+  // A research pass answers a review question and writes no pages, so the
+  // page counts below would describe it as a build that changed nothing.
+  if (r.trigger === "research") {
+    if (r.status === "running") return "Researching a review question…";
+    if (r.status === "failed") return "Research failed";
+    if (r.status === "canceled") return "Research canceled";
+    if (r.status === "over_budget") return "Research stopped at the budget cap";
+    return "Researched a review question";
+  }
   if (r.status === "running") {
     // Before the plan exists there is genuinely nothing to count, and
     // "0 of 0" reads as broken rather than as early.
@@ -605,13 +616,20 @@ const runOutcome = (r) => {
   }
   if (r.status === "failed") return "Failed";
   if (r.status === "over_budget") return "Stopped at the budget cap";
+  if (r.status === "canceled") return "Canceled";
   const parts = [];
   if (r.pagesCreated) parts.push(`${r.pagesCreated} created`);
   if (r.pagesUpdated) parts.push(`${r.pagesUpdated} updated`);
   if (r.pagesDeleted) parts.push(`${r.pagesDeleted} removed`);
-  if (!parts.length) return "Nothing changed — no cost";
+  // "No cost" is only true of a run that cost nothing: a build can spend
+  // tokens and still change no page.
+  if (!parts.length) {
+    if (r.status === "partial") return "Some units failed — no pages changed";
+    return Number(r.costUsd) > 0 ? "Nothing changed" : "Nothing changed — no cost";
+  }
   const n = (r.pagesCreated || 0) + (r.pagesUpdated || 0) + (r.pagesDeleted || 0);
-  return `${n === 1 ? "1 page" : `${n} pages`}: ${parts.join(", ")}`;
+  const lead = r.status === "partial" ? "Partly built — " : "";
+  return `${lead}${n === 1 ? "1 page" : `${n} pages`}: ${parts.join(", ")}`;
 };
 
 // Unit states as the queue's own words. The one being written now is bolded by

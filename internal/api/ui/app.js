@@ -1814,10 +1814,19 @@ let logFilter = "all";
 // says what a build DID ("Imported 6 pages"), where a live feed says what is
 // happening to it now ("Ingesting — 4 of 9 units done").
 function logTitle(r) {
-  if (r.status === "running") return "Firing";
+  if (r.status === "running") return r.trigger === "research" ? "Researching" : "Firing";
   if (r.status === "queued") return "Queued";
+  // A research run answers a review question; it never imports pages, so it
+  // must not be described in the build's terms.
+  if (r.trigger === "research") {
+    if (r.status === "failed") return "Research failed";
+    if (r.status === "canceled") return "Research canceled";
+    if (r.status === "over_budget") return "Research stopped at the budget cap";
+    return "Researched a review question";
+  }
   if (r.status === "failed") return "Failed";
   if (r.status === "over_budget") return "Stopped at the budget cap";
+  if (r.status === "canceled") return "Canceled";
   const n = (r.pagesCreated || 0) + (r.pagesUpdated || 0) + (r.pagesDeleted || 0);
   if (!n) return "Nothing changed";
   return `Imported ${n} page${n === 1 ? "" : "s"}`;
@@ -1833,15 +1842,29 @@ function logSummary(r) {
     return `${total} unit${total === 1 ? "" : "s"} planned; ${done} written so far.`;
   }
   if (r.status === "queued") return "Waiting for a worker to claim it.";
+  if (r.trigger === "research") {
+    if (r.status === "failed") return r.error ? String(r.error).split("\n")[0] : "The research pass did not finish.";
+    if (r.status === "canceled") return "The research pass was canceled before it finished.";
+    if (r.status === "over_budget") return "The run reached its budget cap and stopped before finishing.";
+    return "Read the sources to answer a question filed under Reviews. The findings are on that review item; no pages were written.";
+  }
   if (r.status === "failed") return r.error ? String(r.error).split("\n")[0] : "The build did not finish.";
   if (r.status === "over_budget") return "The run reached its budget cap and stopped before finishing.";
+  if (r.status === "canceled") return "The build was canceled before it finished.";
   const parts = [];
   if (r.pagesCreated) parts.push(`${r.pagesCreated} created`);
   if (r.pagesUpdated) parts.push(`${r.pagesUpdated} updated`);
   if (r.pagesDeleted) parts.push(`${r.pagesDeleted} removed`);
-  if (!parts.length) return "Every unit matched its cached content hash. No model calls were made.";
+  if (!parts.length) {
+    if (r.status === "partial") return "Some units failed and no pages changed; they keep their stale hash and retry next run.";
+    // The cached-hash sentence claims no model calls, which only a free run can say.
+    return Number(r.costUsd) > 0
+      ? "No pages were created, updated or removed, but the run used the model."
+      : "Every unit matched its cached content hash. No model calls were made.";
+  }
   const n = (r.pagesCreated || 0) + (r.pagesUpdated || 0) + (r.pagesDeleted || 0);
-  return `${n === 1 ? "One page" : `${n} pages`} changed: ${parts.join(", ")}.`;
+  const lead = r.status === "partial" ? "Some units failed and will retry next run. " : "";
+  return `${lead}${n === 1 ? "One page" : `${n} pages`} changed: ${parts.join(", ")}.`;
 }
 
 // The footer's three facts. Units read "N planned · M written" -- how many the
