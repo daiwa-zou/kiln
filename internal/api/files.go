@@ -333,7 +333,9 @@ func (s *Server) uploadReadError(w http.ResponseWriter, err error) {
 
 func (s *Server) deleteBlobQuietly(ctx context.Context, key string) {
 	// Best effort on an uncancelable context: the row decision has been made;
-	// a failed blob delete is an orphan for GC, not a request failure.
+	// a failed blob delete is not a request failure. For blobs a committed row
+	// delete orphaned, the store queued the key in the same transaction, so the
+	// worker's blob sweep retries it.
 	if err := s.Blobs.Delete(context.WithoutCancel(ctx), key); err != nil && s.Log != nil {
 		s.Log.Error("deleting blob failed", "key", key, "err", err)
 	}

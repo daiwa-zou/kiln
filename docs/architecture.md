@@ -586,14 +586,21 @@ flowchart TD
     TX --> SR["Upsert source records"]
     TX --> DS["Drop dropped sources"]
     TX --> AR["Replace wiki artifacts"]
+    TX --> PQ["Queue orphaned blobs<br/><i>pending_blob_deletes</i>"]
     TX --> GC["Then: blob GC<br/><i>best effort, idempotent</i>"]
 ```
 
 The derived artifacts are rebuilt from what pages *now* exist, so they cannot
 drift from the content. Blob GC deliberately rides the moment *after* import:
 only once the sources referencing those blobs are durably dropped is deleting
-them safe. A failed delete leaves an orphan for a later sweep, never a dangling
-reference.
+them safe. A failed delete never leaves a dangling reference, and it does not
+leave an unrecorded orphan either: object storage has no list operation, so the
+transaction that removes the last row pointing at a blob also writes the blob's
+key to `pending_blob_deletes` — on a file delete or replacement, a connector or
+workspace delete, a figure no document references any more, and a source
+dropped by an approved deletion. The request path still deletes straight away;
+the queue is what remains if that fails or the process dies first, and the
+worker's hourly sweep drains it (below).
 
 **Import runs on an uncancelable context.** The money is already spent, so a
 canceled run must still persist what it produced and what it cost. If import
@@ -1046,13 +1053,20 @@ survives.
 | Worker dies mid-build | Its run sits `running` and would block the bench via the active-run index. `worker.stale_after` (default 45m) returns it to the queue once its claim has gone that long without a heartbeat; a live worker refreshes the claim every `worker.heartbeat_interval` (default 1m), so a long healthy build is never swept. Terminal and progress writes are fenced to the claiming worker, so a worker that lost its claim can neither finish nor requeue the run that replaced it, and it cancels its own build as soon as a heartbeat finds the claim gone. The pipeline is idempotent from the start. |
 | Import fails | The run is marked failed **and still ledgered**, because the agent calls are already billed. |
 | Blob missing at sync | That document is skipped and reported to the review queue; the rest of the bench builds. |
-| Blob delete fails | Logged; an orphan is left for a later sweep. Never a dangling reference. |
+| Blob delete fails | Logged. The key was queued in `pending_blob_deletes` in the same transaction that orphaned it, so the worker's next sweep retries it. Never a dangling reference. |
+| Process dies between uploading a blob and recording its row | Not recoverable from the queue — nothing was committed to name it — so that blob is a true orphan. Rare, and bounded to one document's pictures or one upload. |
 | Postgres briefly unavailable | Connection is retried with backoff at startup. |
 
 The GC sweep runs roughly hourly inside the worker: soft-deleted pages past
 their window, finished runs past theirs, expired sessions, and dead tokens
 (which linger a week past death so an operator can still see what a failing
-client was presenting).
+client was presenting). It also drains `pending_blob_deletes`: for each queued
+key it first re-checks that no uploaded file or figure references the blob
+again — figure keys are content digests, so a picture one document dropped can
+be claimed by another before the sweep arrives — then deletes the object, then
+the row. A refused delete leaves the row, with the attempt count and error, to
+be retried on the next sweep; a key already absent from the store counts as
+done. A worker with no blob store configured leaves the queue alone.
 
 ---
 

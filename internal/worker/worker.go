@@ -58,6 +58,8 @@ type Store interface {
 	RecordResearch(ctx context.Context, reviewID, findings string, resolved bool) error
 	RequeueRun(ctx context.Context, runID, workerID string) error
 	Sweep(ctx context.Context, softDeleteRetention, runRetention time.Duration) (int64, error)
+	// SweepBlobs deletes the blobs queued for deletion and clears their rows.
+	SweepBlobs(ctx context.Context, blobs store.BlobDeleter) (done, failed int, err error)
 	QueueDepth(ctx context.Context) (map[string]int, error)
 
 	// Publishing reads the finished wiki back out and records where it went.
@@ -1125,6 +1127,28 @@ func (w *Worker) sweep(ctx context.Context, log *slog.Logger) {
 	}
 	if swept > 0 {
 		log.Info("gc sweep removed expired rows", "rows", swept)
+	}
+	w.sweepBlobs(ctx, log)
+}
+
+// sweepBlobs finishes the blob deletes that the request paths queued but did
+// not complete -- a refused object-store call, a process that died between the
+// commit and the delete. Without a blob store there is nothing to delete with,
+// and the queue simply waits for a worker that has one.
+func (w *Worker) sweepBlobs(ctx context.Context, log *slog.Logger) {
+	if w.Blobs == nil {
+		return
+	}
+	done, failed, err := w.Store.SweepBlobs(ctx, w.Blobs)
+	if err != nil {
+		log.Error("blob sweep failed", "error", err)
+		return
+	}
+	if done > 0 {
+		log.Info("blob sweep deleted orphaned blobs", "blobs", done)
+	}
+	if failed > 0 {
+		log.Warn("blob sweep could not delete some blobs; they will be retried", "blobs", failed)
 	}
 }
 

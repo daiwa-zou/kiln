@@ -124,6 +124,9 @@ func (f *fakeStore) RequeueRun(_ context.Context, runID, _ string) error {
 func (f *fakeStore) Sweep(context.Context, time.Duration, time.Duration) (int64, error) {
 	return 0, nil
 }
+func (f *fakeStore) SweepBlobs(context.Context, store.BlobDeleter) (int, int, error) {
+	return 0, 0, nil
+}
 func (f *fakeStore) SpendInWindow(context.Context, string, time.Duration) (float64, error) {
 	return 0, nil
 }

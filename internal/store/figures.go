@@ -135,6 +135,18 @@ func (s *WikiStore) ReplaceFigures(ctx context.Context, workspaceID, sourceKey s
 	if err != nil {
 		return nil, err
 	}
+	// Queued in this transaction, so the decision that these bytes are dead
+	// commits with the rows that made them so. The caller's immediate delete
+	// stays as the fast path; the queue is what is left if it fails.
+	if err := enqueueBlobDeletes(ctx, tx, orphaned); err != nil {
+		return nil, err
+	}
+	// And the reverse: a blob this call records is referenced again, so any
+	// delete queued for it earlier (by another document dropping the same
+	// picture) no longer holds.
+	if err := cancelBlobDeletes(ctx, tx, figureBlobKeys(figs)); err != nil {
+		return nil, err
+	}
 
 	for _, f := range figs {
 		// Everything except identity is refreshed: a document edit can move a
@@ -161,6 +173,14 @@ func (s *WikiStore) ReplaceFigures(ctx context.Context, workspaceID, sourceKey s
 		return nil, fmt.Errorf("store: commit replace figures: %w", err)
 	}
 	return orphaned, nil
+}
+
+func figureBlobKeys(figs []jobs.FigureRecord) []string {
+	out := make([]string, 0, len(figs))
+	for _, f := range figs {
+		out = append(out, f.BlobKey)
+	}
+	return out
 }
 
 func shaList(figs []jobs.FigureRecord) []string {

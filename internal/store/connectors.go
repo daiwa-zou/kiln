@@ -180,6 +180,9 @@ func (s *WikiStore) DeleteConnector(ctx context.Context, workspaceID, id string)
 	if tag.RowsAffected() == 0 {
 		return diff.Cascade{}, ErrNotFound
 	}
+	if err := enqueueBlobDeletes(ctx, tx, c.DeleteBlobs); err != nil {
+		return diff.Cascade{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return diff.Cascade{}, fmt.Errorf("store: commit delete connector: %w", err)
 	}

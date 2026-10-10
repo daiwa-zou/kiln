@@ -262,6 +262,16 @@ func (s *WikiStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 	if err := dropSources(ctx, tx, in.WorkspaceID, in.DropSources); err != nil {
 		return err
 	}
+	// A dropped document's pictures leave with it, as they do for an explicit
+	// delete; without this the approved-deletion path left figure rows (and
+	// their bytes) behind for good.
+	figureBlobs, err := dropFiguresForSources(ctx, tx, in.WorkspaceID, keyStrings(in.DropSources))
+	if err != nil {
+		return err
+	}
+	if err := enqueueBlobDeletes(ctx, tx, append(figureBlobs, in.DeleteBlobs...)); err != nil {
+		return err
+	}
 
 	if err := writeArtifacts(ctx, tx, wikiID, in); err != nil {
 		return err

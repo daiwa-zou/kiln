@@ -2,8 +2,9 @@
 // expect: config, validation, secrets, sources.blob_keys, and the cascade's
 // DeleteBlobs plan all predate it. The interface is the smallest surface the
 // callers need -- streaming put, get, and idempotent delete; there is no list,
-// because everything stored is tracked in Postgres and an untracked blob is
-// garbage by definition.
+// because everything stored is tracked in Postgres. A blob whose last row is
+// going away is tracked too: the same transaction queues its key in
+// pending_blob_deletes, and the worker's sweep deletes it from here.
 //
 // Keys are never user-controlled. Callers build them from server-generated
 // UUIDs via FileKey, so tenant isolation holds by construction; validKey is

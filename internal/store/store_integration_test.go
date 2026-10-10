@@ -107,8 +107,14 @@ func TestMigrateConcurrentlyIsSafe(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != SchemaVersion {
-		t.Errorf("schema_migrations has %d rows, want %d; a migration was applied twice", count, SchemaVersion)
+	// Counted against the embedded files, not SchemaVersion: version numbers
+	// are allowed to skip (parallel branches reserve theirs), rows are not.
+	all, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != len(all) {
+		t.Errorf("schema_migrations has %d rows, want %d; a migration was applied twice", count, len(all))
 	}
 }
 

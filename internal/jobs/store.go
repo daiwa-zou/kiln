@@ -163,6 +163,11 @@ type ImportRequest struct {
 	UpsertSources []diff.SourceRecord
 	// DropSources are source keys removed by an approved cascade.
 	DropSources []diff.Key
+	// DeleteBlobs are the blobs no remaining source references after
+	// DropSources. Import records them for deletion in its own transaction;
+	// the caller still tries the deletes after the commit, and the worker's
+	// sweep finishes whatever that attempt did not.
+	DeleteBlobs []string
 
 	// Index, Overview, and Log are the deterministic artifacts. They are
 	// derived from page frontmatter, never agent-written.

@@ -35,7 +35,9 @@ import (
 // fine.
 //
 // Blob first, row second. A row pointing at bytes that were never written would
-// render as a broken image; an orphaned blob is garbage a sweep collects.
+// render as a broken image; an orphaned blob is invisible garbage. (One a
+// crash between the two strands without a record; the ones superseded later are
+// queued for the worker's sweep by ReplaceFigures.)
 func (p *Pipeline) storeFigures(ctx context.Context, req BuildRequest, log *slog.Logger) {
 	if len(req.Figures) == 0 || p.Blobs == nil {
 		return
@@ -69,7 +71,7 @@ func (p *Pipeline) storeFigures(ctx context.Context, req BuildRequest, log *slog
 		// pointing at nothing.
 		for _, gone := range orphaned {
 			if err := p.Blobs.Delete(ctx, gone); err != nil {
-				log.Warn("superseded figure blob left for GC", "key", gone, "err", err)
+				log.Warn("superseded figure blob left for the blob sweep", "key", gone, "err", err)
 			}
 		}
 	}

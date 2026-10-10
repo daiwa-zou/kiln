@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/jobs"
@@ -55,6 +56,8 @@ type loopStore struct {
 	// requeued and sweeps record drain and GC activity.
 	requeued []string
 	sweeps   int
+	// blobSweeps counts drains of the pending blob delete queue.
+	blobSweeps int
 	// question and researched script and record a research run's question and
 	// its write-back.
 	question   *store.ResearchQuestion
@@ -221,6 +224,13 @@ func (l *loopStore) Sweep(context.Context, time.Duration, time.Duration) (int64,
 	defer l.mu.Unlock()
 	l.sweeps++
 	return 1, nil
+}
+
+func (l *loopStore) SweepBlobs(context.Context, store.BlobDeleter) (int, int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.blobSweeps++
+	return 0, 0, nil
 }
 
 func (l *loopStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) {
@@ -587,6 +597,35 @@ func TestSweepRunsHourlyFromTheLoop(t *testing.T) {
 	defer st.mu.Unlock()
 	if st.sweeps != 1 {
 		t.Errorf("sweeps = %d, want exactly 1 (hourly throttle)", st.sweeps)
+	}
+}
+
+// TestSweepDrainsPendingBlobDeletesOnlyWithABlobStore: the queue is drained by
+// the same hourly sweep, but only a worker that can reach object storage has
+// anything to delete with.
+func TestSweepDrainsPendingBlobDeletesOnlyWithABlobStore(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		blobs blob.Store
+		want  int
+	}{
+		{"with a blob store", memBlobs{}, 1},
+		{"without one", nil, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newLoopStore()
+			w := &Worker{Store: st, Blobs: tt.blobs, Poll: time.Millisecond,
+				SoftDeleteRetention: time.Hour, RunRetention: time.Hour}
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			_ = w.Run(ctx)
+
+			st.mu.Lock()
+			defer st.mu.Unlock()
+			if st.blobSweeps != tt.want {
+				t.Errorf("blob sweeps = %d, want %d", st.blobSweeps, tt.want)
+			}
+		})
 	}
 }
 

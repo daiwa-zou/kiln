@@ -396,6 +396,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		SoftDeletePages: cascade.DeletePages,
 		UpsertSources:   newSources,
 		DropSources:     cascade.DropSources,
+		DeleteBlobs:     cascade.DeleteBlobs,
 		Index:           index,
 		Overview:        overview,
 		LogEntry:        logEntry,
@@ -413,12 +414,13 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	// Blob GC rides the same post-import moment as the page cascade: only
 	// after the sources that referenced these blobs are durably dropped is
 	// deleting them safe. Best effort -- the blob store's deletes are
-	// idempotent, and a failure leaves an orphan for a later sweep, never a
+	// idempotent, and Import queued these keys in pending_blob_deletes, so a
+	// failure leaves them for the worker's sweep to retry, never a
 	// dangling reference.
 	if p.Blobs != nil {
 		for _, key := range cascade.DeleteBlobs {
 			if err := p.Blobs.Delete(importCtx, key); err != nil {
-				log.Error("blob delete failed; orphan left for GC", "key", key, "err", err)
+				log.Error("blob delete failed; left for the blob sweep", "key", key, "err", err)
 			}
 		}
 	}
