@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os/signal"
@@ -198,18 +199,11 @@ processes separately so builds scale independently of the API.`,
 			}
 			fmt.Fprintln(out, "  press ctrl-c to stop")
 
-			err = srv.Serve(ctx, cfg.HTTPAddr, cfg.TLSCert, cfg.TLSKey)
-			if metricsDone != nil {
-				<-metricsDone
-			}
-			if workerDone != nil {
-				// The worker drains: it stops claiming immediately but may
-				// hold an in-flight build for its grace window, and exiting
-				// before it finishes would race the requeue write.
-				fmt.Fprintln(out, "  waiting for the worker to drain…")
-				<-workerDone
-			}
-			return err
+			return serveAndDrain(
+				func() error { return srv.Serve(ctx, cfg.HTTPAddr, cfg.TLSCert, cfg.TLSKey) },
+				stop, metricsDone, workerDone,
+				func() { fmt.Fprintln(out, "  waiting for the worker to drain…") },
+			)
 		},
 	}
 
@@ -217,6 +211,29 @@ processes separately so builds scale independently of the API.`,
 	cmd.Flags().BoolVar(&withWorker, "with-worker", false, "also run a build worker in this process")
 
 	return cmd
+}
+
+// serveAndDrain runs the API listener, then waits for the background
+// goroutines to finish. Those goroutines only exit when the shared context is
+// cancelled, which a signal does but a listener that failed to start (port in
+// use, unreadable TLS key) does not: Serve returns at once and, without the
+// cancel, the waits below would hang forever with the error never printed.
+// Cancelling here is a no-op after a signal and wakes them after a failure.
+//
+// onDrain runs before waiting on workerDone, which may hold an in-flight build
+// for its grace window; exiting before it finishes would race the requeue
+// write. Nil channels (a goroutine that was not started) are skipped.
+func serveAndDrain(serve func() error, cancel context.CancelFunc, metricsDone, workerDone <-chan struct{}, onDrain func()) error {
+	err := serve()
+	cancel()
+	if metricsDone != nil {
+		<-metricsDone
+	}
+	if workerDone != nil {
+		onDrain()
+		<-workerDone
+	}
+	return err
 }
 
 // loopbackAddr reports whether a listen address can only be reached from

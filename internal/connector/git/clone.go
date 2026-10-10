@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/daiwa-zou/kiln/internal/childproc"
+	"github.com/daiwa-zou/kiln/internal/netguard"
 )
 
 // Remote-clone policy. Connector configs are API-writable data, so the URL a
@@ -69,20 +72,11 @@ func ValidateRemoteURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("connector/git: resolve %s: %w", host, err)
 	}
 	for _, ip := range ips {
-		if isForbiddenAddress(ip) {
+		if netguard.Forbidden(ip) {
 			return nil, fmt.Errorf("connector/git: %s resolves to %s, which is not a public address", host, ip)
 		}
 	}
 	return u, nil
-}
-
-func isForbiddenAddress(ip net.IP) bool {
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || // includes 169.254.169.254 cloud metadata
-		ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() ||
-		ip.IsMulticast()
 }
 
 // CloneShallow materializes a depth-1 clone of a validated https remote.
@@ -118,7 +112,10 @@ func CloneShallow(ctx context.Context, opts CloneOptions) error {
 	}
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// The remote is attacker-shaped, so the clone runs with a minimal
+	// environment: the parent's KILN_* secrets stay out of reach, and the token
+	// below is the only one of them the child sees.
+	cmd.Env = childproc.GitEnv()
 
 	if opts.Token != "" {
 		askpass, cleanup, err := WriteAskpass(opts.Dir)
@@ -131,6 +128,8 @@ func CloneShallow(ctx context.Context, opts CloneOptions) error {
 			"KILN_GIT_TOKEN="+opts.Token,
 		)
 	}
+
+	cmd.WaitDelay = childproc.WaitDelay
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if ctx.Err() != nil {

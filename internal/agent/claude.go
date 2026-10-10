@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/daiwa-zou/kiln/internal/childproc"
 )
 
 // Tool sets. Bash is disallowed outright: Read/Grep/Glob/Write/Edit is enough
@@ -58,7 +59,9 @@ func NewClaudeRunner(binary string) *ClaudeRunner {
 // MinimalChildEnv builds the environment for the claude subprocess: enough for
 // the binary to run and authenticate, and nothing else. The child processes
 // untrusted source content, so the parent's KILN_* secrets (master key, session
-// secret, database password) must never be inherited by it.
+// secret, database password) must never be inherited by it. The allow-list
+// itself is childproc.Env, shared with the other children that parse untrusted
+// content; this adds the two variables only the CLI needs.
 //
 // HOME is passed so a logged-in CLI session's credentials still resolve when no
 // API key is configured. USER and LOGNAME go with it, and are not optional
@@ -77,19 +80,14 @@ func NewClaudeRunner(binary string) *ClaudeRunner {
 // silently meant two different things depending on the runner, and a key valid
 // only at a gateway failed to authenticate with no indication why.
 func MinimalChildEnv(apiKey, baseURL string) []string {
-	env := make([]string, 0, 9)
-	for _, k := range []string{"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TERM", "LANG"} {
-		if v, ok := os.LookupEnv(k); ok {
-			env = append(env, k+"="+v)
-		}
-	}
+	var extra []string
 	if apiKey != "" {
-		env = append(env, "ANTHROPIC_API_KEY="+apiKey)
+		extra = append(extra, "ANTHROPIC_API_KEY="+apiKey)
 	}
 	if baseURL != "" {
-		env = append(env, "ANTHROPIC_BASE_URL="+baseURL)
+		extra = append(extra, "ANTHROPIC_BASE_URL="+baseURL)
 	}
-	return env
+	return childproc.Env(extra...)
 }
 
 // Run executes one request and parses the result envelope.
@@ -110,6 +108,7 @@ func (r *ClaudeRunner) Run(ctx context.Context, req Request) (*Result, error) {
 	// There is no --cwd flag on the installed CLI; the working directory is
 	// how the agent is pointed at the materialized sources.
 	cmd.Dir = req.WorkDir
+	cmd.WaitDelay = childproc.WaitDelay
 	if r.Env != nil {
 		cmd.Env = r.Env
 	}

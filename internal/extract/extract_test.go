@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeFile(t *testing.T, name, content string) string {
@@ -246,4 +247,112 @@ func containsFormat(haystack []Format, needle Format) bool {
 		}
 	}
 	return false
+}
+
+// exec.CommandContext kills only the direct child. A converter that forks a
+// helper which inherits stdout leaves Wait blocked on the pipe until the
+// helper exits, so the timeout bounded nothing. WaitDelay is what makes it a
+// wall-clock bound.
+func TestToolTimeoutBoundsWallClockWhenAGrandchildHoldsStdout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script")
+	}
+	old := toolWaitDelay
+	toolWaitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { toolWaitDelay = old })
+
+	// The backgrounded sleeper inherits stdout and outlives the converter.
+	path := filepath.Join(t.TempDir(), "forking-converter")
+	script := "#!/bin/sh\nsleep 20 &\nexec sleep 20\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, err := runTool(context.Background(), path, 200*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want a timeout", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("runTool took %s; the timeout plus WaitDelay should have bounded it well under that", elapsed)
+	}
+}
+
+// A small compressed PDF can expand to gigabytes of text. The converter must
+// be stopped at the cap, not allowed to fill memory and then checked.
+func TestToolOutputOverTheCapIsRefusedAndTheToolStopped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script")
+	}
+
+	// yes never exits on its own, so returning at all proves it was stopped.
+	path := filepath.Join(t.TempDir(), "endless-converter")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec yes 'a line of extracted text'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, err := runTool(context.Background(), path, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "above the") || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("err = %v, want an over-the-limit error", err)
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("the cap should be reported as such, not as a timeout: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Errorf("took %s; the process was not stopped at the cap", elapsed)
+	}
+}
+
+func TestCappedWriterKeepsExactlyTheCap(t *testing.T) {
+	stopped := 0
+	w := &cappedWriter{max: 5, stop: func() { stopped++ }}
+	if n, err := w.Write([]byte("abc")); n != 3 || err != nil || w.exceeded {
+		t.Fatalf("first write: n=%d err=%v exceeded=%v", n, err, w.exceeded)
+	}
+	// Exactly the cap is allowed; only a byte beyond it is too much.
+	if n, err := w.Write([]byte("de")); n != 2 || err != nil || w.exceeded {
+		t.Fatalf("write to the cap: n=%d err=%v exceeded=%v", n, err, w.exceeded)
+	}
+	if n, err := w.Write([]byte("f")); n != 1 || err != nil || !w.exceeded {
+		t.Fatalf("write past the cap: n=%d err=%v exceeded=%v", n, err, w.exceeded)
+	}
+	_, _ = w.Write([]byte("more"))
+	if got := w.buf.String(); got != "abcde" {
+		t.Errorf("buffer = %q, want %q", got, "abcde")
+	}
+	if stopped != 1 {
+		t.Errorf("stop called %d times, want 1", stopped)
+	}
+}
+
+// The converter parses an untrusted document, so it must not inherit the
+// parent's KILN_* secrets.
+func TestToolRunsWithoutTheParentsSecrets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script")
+	}
+	t.Setenv("KILN_MASTER_KEY", "master-secret")
+	t.Setenv("KILN_SESSION_SECRET", "session-secret")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-parent")
+
+	path := filepath.Join(t.TempDir(), "env-dumper")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nenv\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runTool(context.Background(), path, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"KILN_", "ANTHROPIC_"} {
+		if strings.Contains(out, key) {
+			t.Errorf("child environment contains %s*:\n%s", key, out)
+		}
+	}
+	if !strings.Contains(out, "PATH=") {
+		t.Errorf("PATH did not reach the child:\n%s", out)
+	}
 }
