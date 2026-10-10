@@ -4147,7 +4147,9 @@ function renderPalette(q) {
   // The first row that is safe to fire. Spending rows stay in the list and
   // are reached by arrow keys or a click -- an explicit choice -- never by
   // simply pressing Enter.
-  palSelection = Math.max(0, palRows.findIndex((r) => !r.spends));
+  // -1 when every row spends: nothing is selected and Enter does nothing
+  // until an arrow key picks a row.
+  palSelection = palRows.findIndex((r) => !r.spends);
   let i = 0;
   const html = groups.map((g) => `<li class="pal-group" role="presentation">${esc(g.label)}</li>` +
     g.items.map((r) => {
@@ -4161,12 +4163,14 @@ function renderPalette(q) {
   $("palette-list").innerHTML = palRows.length ? html
     : `<li class="pal-empty" role="presentation">Nothing matched.</li>`;
   $("palette-input").setAttribute("aria-activedescendant",
-    palRows.length ? `pal-opt-${palSelection}` : "");
+    palSelection >= 0 ? `pal-opt-${palSelection}` : "");
 }
 
 function movePaletteSelection(delta) {
   if (!palRows.length) return;
-  palSelection = (palSelection + delta + palRows.length) % palRows.length;
+  // From no selection, down lands on the first row and up on the last.
+  const from = palSelection < 0 ? (delta > 0 ? -1 : 0) : palSelection;
+  palSelection = (from + delta + palRows.length) % palRows.length;
   for (const li of $("palette-list").querySelectorAll("li[role=option]")) {
     const on = li.id === `pal-opt-${palSelection}`;
     li.classList.toggle("active", on);
