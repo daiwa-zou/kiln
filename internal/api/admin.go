@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/daiwa-zou/kiln/internal/auth"
+	"github.com/daiwa-zou/kiln/internal/connector"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/crypto"
@@ -44,9 +45,9 @@ type AdminStore interface {
 const maxAdminBodyBytes = 16 << 10
 
 var (
-	connectorKinds    = []string{"git", "upload", "web"}
+	connectorKinds    = []string{connector.KindGit, connector.KindUpload, connector.KindWeb}
 	credentialKinds   = []string{"git_pat"}
-	triggerModes      = []string{"manual", "webhook", "poll"}
+	triggerModes      = []string{string(connector.TriggerManual), string(connector.TriggerWebhook), string(connector.TriggerPoll)}
 	errNotAdmin       = "requires an instance admin or an owner of this bench's org"
 	errNoKeyring      = "credentials are unavailable: no master key is configured (set KILN_MASTER_KEY and restart)"
 	errUnknownKind    = "unknown kind"
@@ -139,7 +140,7 @@ func validateConnectorConfig(kind string, cfg map[string]any) string {
 	path, _ := cfg["path"].(string)
 
 	switch kind {
-	case "git":
+	case connector.KindGit:
 		if rawURL == "" && path == "" {
 			return "git connector config needs url (https remote) or path (local, under worker.permitted_source_roots)"
 		}
@@ -161,12 +162,12 @@ func validateConnectorConfig(kind string, cfg map[string]any) string {
 				}
 			}
 		}
-	case "upload":
+	case connector.KindUpload:
 		// No path means files mode: the connector consumes the workspace's
 		// uploaded files from the blob store, which is the browser-upload
 		// flow. An explicit path stays valid for worker-local directories and
 		// is still gated by worker.permitted_source_roots at run time.
-	case "web":
+	case connector.KindWeb:
 		urls := webconn.URLsFrom(cfg)
 		if len(urls) == 0 {
 			return "web connector config needs urls (an array of https addresses)"

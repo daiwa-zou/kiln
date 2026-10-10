@@ -239,6 +239,29 @@ type ItemSummary struct {
 	Err    string
 }
 
+// Run trigger values: why a run exists, as stored in runs.trigger and carried
+// on RunSummary.Trigger. They are plain strings because the column is text and
+// the queue methods take the trigger as a string. SQL that has to name one
+// (the research-run insert, the queue's merge guard) keeps the literal and
+// points back here.
+const (
+	// TriggerManual is a person asking for a build (the CLI, or the API).
+	TriggerManual = "manual"
+	// TriggerWebhook is a push event from a watched origin.
+	TriggerWebhook = "webhook"
+	// TriggerPoll is the worker's poll scheduler finding a connector due.
+	TriggerPoll = "poll"
+	// TriggerUpload is a browser upload landing on an upload connector that
+	// syncs on events.
+	TriggerUpload = "upload"
+	// TriggerContinuation resumes a build that stopped partway, so the units it
+	// did not reach are picked up without waiting for the next event.
+	TriggerContinuation = "continuation"
+	// TriggerResearch answers one review item's question. It is not a build:
+	// the queue never merges events into it.
+	TriggerResearch = "research"
+)
+
 // Run status values.
 const (
 	StatusPending    = "pending"

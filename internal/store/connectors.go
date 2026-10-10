@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/daiwa-zou/kiln/internal/connector"
 	"github.com/daiwa-zou/kiln/internal/diff"
 )
 
@@ -86,7 +87,7 @@ func (s *WikiStore) CreateConnector(ctx context.Context, c ConnectorRow) (string
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id`,
 		c.WorkspaceID, c.Kind, c.Name, cfg, nullable(c.CredentialID),
-		orDefault(c.TriggerMode, "manual"), c.Enabled).Scan(&id); err != nil {
+		orDefault(c.TriggerMode, string(connector.TriggerManual)), c.Enabled).Scan(&id); err != nil {
 		return "", fmt.Errorf("store: create connector: %w", err)
 	}
 	return id, nil

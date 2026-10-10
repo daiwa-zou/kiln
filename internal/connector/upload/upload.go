@@ -37,11 +37,7 @@ type Connector struct {
 func init() { connector.Register(&Connector{}) }
 
 // Kind implements connector.Connector.
-func (c *Connector) Kind() string { return "upload" }
-
-// Trigger implements connector.Connector. Uploads arrive when a person sends
-// them, so there is nothing to poll and nothing to receive a webhook from.
-func (c *Connector) Trigger() connector.TriggerMode { return connector.TriggerManual }
+func (c *Connector) Kind() string { return connector.KindUpload }
 
 // SkipReason records why a file was not ingested, so a folder with one
 // unreadable PDF still produces a wiki and says what it left out.

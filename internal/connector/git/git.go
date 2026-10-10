@@ -21,13 +21,7 @@ type Connector struct{}
 func init() { connector.Register(&Connector{}) }
 
 // Kind implements connector.Connector.
-func (c *Connector) Kind() string { return "git" }
-
-// Trigger implements connector.Connector.
-//
-// A local path has nothing to push an event, so it is manual. A remote git
-// connector would report webhook instead.
-func (c *Connector) Trigger() connector.TriggerMode { return connector.TriggerManual }
+func (c *Connector) Kind() string { return connector.KindGit }
 
 // Sync validates the path and describes the repository.
 //

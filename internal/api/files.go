@@ -18,8 +18,10 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/daiwa-zou/kiln/internal/blob"
+	"github.com/daiwa-zou/kiln/internal/connector"
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/extract"
+	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/naming"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -302,13 +304,13 @@ func (s *Server) maybeEnqueueUploadBuild(ctx context.Context, ws store.Workspace
 		return "pending"
 	}
 	for _, c := range conns {
-		if c.Kind != "upload" || !c.Enabled || c.TriggerMode != "webhook" {
+		if c.Kind != connector.KindUpload || !c.Enabled || c.TriggerMode != string(connector.TriggerWebhook) {
 			continue
 		}
 		if refused, err := s.refuseOverBudget(ctx, ws); err != nil || refused != "" {
 			return "pending"
 		}
-		if _, _, err := s.Runs.EnqueueRunOpts(ctx, ws.ID, "upload", c.ID,
+		if _, _, err := s.Runs.EnqueueRunOpts(ctx, ws.ID, jobs.TriggerUpload, c.ID,
 			store.EnqueueOptions{NotBefore: time.Now().Add(uploadDebounce)}); err != nil {
 			return "pending"
 		}

@@ -164,6 +164,7 @@ func (s *WikiStore) EnqueueBuild(ctx context.Context, workspaceID, trigger, conn
 		// Conflict path. First try to merge into a waiting build. The status
 		// guard is re-evaluated under the row lock, so a worker that claims the
 		// build between the insert above and this update is not merged into.
+		// ('research' below is jobs.TriggerResearch, kept as a SQL literal.)
 		var mergedTrigger string
 		err = s.pool.QueryRow(ctx, `
 			UPDATE runs SET

@@ -56,11 +56,7 @@ type Connector struct {
 func init() { connector.Register(&Connector{}) }
 
 // Kind implements connector.Connector.
-func (c *Connector) Kind() string { return "web" }
-
-// Trigger implements connector.Connector. The web has no push; freshness
-// comes from the worker's poll scheduler.
-func (c *Connector) Trigger() connector.TriggerMode { return connector.TriggerPoll }
+func (c *Connector) Kind() string { return connector.KindWeb }
 
 // Payload mirrors the upload connector's: extracted documents ready for the
 // doc mapper, plus what was skipped and why.

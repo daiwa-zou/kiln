@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/daiwa-zou/kiln/internal/diff"
 )
 
 // OverviewInput is the deterministic frame an overview is built from.
@@ -32,9 +34,10 @@ type OverviewInput struct {
 
 // SourceTally is one kind of material and how much of it fed the build.
 type SourceTally struct {
-	// Kind is a unit-key namespace: "module", "doc:upload", "doc:web", "doc",
-	// or "arch". Phrasing lives here rather than at the call site so every
-	// surface names a source the same way.
+	// Kind is a unit-key namespace as diff.Namespace reports it
+	// (diff.PrefixModule, diff.NamespaceUpload, diff.NamespaceWeb,
+	// diff.PrefixDoc or diff.PrefixArch). Phrasing lives here rather than at
+	// the call site so every surface names a source the same way.
 	Kind  string
 	Count int
 }
@@ -43,15 +46,15 @@ type SourceTally struct {
 func sourcePhrase(t SourceTally) string {
 	one, many := "unit", "units"
 	switch t.Kind {
-	case "module":
+	case diff.PrefixModule:
 		one, many = "code module", "code modules"
-	case "doc:upload":
+	case diff.NamespaceUpload:
 		one, many = "uploaded document", "uploaded documents"
-	case "doc:web":
+	case diff.NamespaceWeb:
 		one, many = "fetched web page", "fetched web pages"
-	case "doc":
+	case diff.PrefixDoc:
 		one, many = "repository document", "repository documents"
-	case "arch":
+	case diff.PrefixArch:
 		// The synthesis unit is derived from everything else rather than being
 		// material in its own right; it is never a source worth counting.
 		return ""

@@ -20,6 +20,7 @@ import (
 
 	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/config"
+	"github.com/daiwa-zou/kiln/internal/connector"
 	gitconn "github.com/daiwa-zou/kiln/internal/connector/git"
 	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/crypto"
@@ -315,9 +316,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		}
 		if ctx.Err() != nil {
 			// Interrupted while resolving, not misconfigured: requeue.
-			log.Warn("resolution interrupted by shutdown; requeuing")
-			w.requeueRun(ctx, run.ID, log)
-			w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
+			w.requeueInterrupted(ctx, run.ID, log, started, "resolution interrupted by shutdown; requeuing")
 			return
 		}
 		log.Error("run not executable", "error", err)
@@ -343,7 +342,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	// record: stamping last_sync_at here would push every poll-triggered
 	// connector's next refresh out by a full interval, so answering a question
 	// about the bench would quietly delay rebuilding it.
-	if run.Trigger == "research" {
+	if run.Trigger == jobs.TriggerResearch {
 		w.research(ctx, run, spec, started, stopHeartbeat)
 		return
 	}
@@ -391,9 +390,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		// Interrupted by the drain deadline, not broken: back to the queue,
 		// where this or another worker picks it up cleanly.
 		syncErr = "interrupted by shutdown; requeued"
-		log.Warn("build interrupted by shutdown; requeuing")
-		w.requeueRun(ctx, run.ID, log)
-		w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
+		w.requeueInterrupted(ctx, run.ID, log, started, "build interrupted by shutdown; requeuing")
 	case err == nil && res.Summary.Status == jobs.StatusCanceled:
 		// The drain deadline stopped the build part-way. The pipeline imported the
 		// units that finished and recorded the run canceled, so the row is
@@ -557,9 +554,7 @@ func (w *Worker) research(ctx context.Context, run *store.QueuedRun, spec jobs.S
 			// Interrupted by the drain deadline, not broken: back to the
 			// queue, and the item is left untouched because the answer is
 			// still coming -- from whichever worker picks this up next.
-			log.Warn("research interrupted by shutdown; requeuing")
-			w.requeueRun(ctx, run.ID, log)
-			w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
+			w.requeueInterrupted(ctx, run.ID, log, started, "research interrupted by shutdown; requeuing")
 			return
 		}
 		log.Error("research failed", "error", err)
@@ -641,7 +636,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 		// Web connectors carry URLs, not paths: policy is enforced by the
 		// connector's pinned dialer at fetch time (and at config write time),
 		// so nothing needs resolving here.
-		if c.Kind == "web" {
+		if c.Kind == connector.KindWeb {
 			if len(spec.WebURLs) > 0 {
 				return fail2(fmt.Errorf("workspace %s has multiple web connectors; only one is supported", run.WorkspaceSlug))
 			}
@@ -655,7 +650,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 
 		// An upload connector without a path is in files mode: its material
 		// is the workspace's uploaded files, staged from the blob store.
-		if path, _ := c.Config["path"].(string); c.Kind == "upload" && path == "" {
+		if path, _ := c.Config["path"].(string); c.Kind == connector.KindUpload && path == "" {
 			if spec.DocsDir != "" {
 				return fail2(fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug))
 			}
@@ -686,7 +681,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 			gitToken string
 			err      error
 		)
-		if remoteURL, _ := c.Config["url"].(string); remoteURL != "" && c.Kind == "git" {
+		if remoteURL, _ := c.Config["url"].(string); remoteURL != "" && c.Kind == connector.KindGit {
 			var clean func()
 			resolved, gitToken, clean, err = w.cloneRemote(ctx, c, remoteURL)
 			if clean != nil {
@@ -710,14 +705,14 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 		}
 
 		switch c.Kind {
-		case "git":
+		case connector.KindGit:
 			if spec.Path != "" {
 				return fail2(fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug))
 			}
 			spec.Path = resolved
 			spec.GitToken = gitToken
 			ids.Git = c.ID
-		case "upload":
+		case connector.KindUpload:
 			if spec.DocsDir != "" {
 				return fail2(fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug))
 			}
@@ -980,12 +975,17 @@ func (w *Worker) failRun(ctx context.Context, runID string, cause error, log *sl
 	}
 }
 
-// requeueRun hands this worker's interrupted run back to the queue. The write
-// is fenced: if the run is no longer ours -- it went stale and was claimed
-// again while we were draining -- requeueing would pull the new owner's live
-// build out from under it, so the store refuses, and the refusal is logged as
-// what it is rather than as a database failure.
-func (w *Worker) requeueRun(ctx context.Context, runID string, log *slog.Logger) {
+// requeueInterrupted is the end of a run the drain deadline stopped: it logs
+// msg, hands the run back to the queue and records the outcome as "requeued".
+// Callers have already ruled out a lost claim (lostClaim), which is answered
+// with abandon instead.
+//
+// The queue write is fenced: if the run is no longer ours -- it went stale and
+// was claimed again while we were draining -- requeueing would pull the new
+// owner's live build out from under it, so the store refuses, and the refusal
+// is logged as what it is rather than as a database failure.
+func (w *Worker) requeueInterrupted(ctx context.Context, runID string, log *slog.Logger, started time.Time, msg string) {
+	log.Warn(msg)
 	err := w.Store.RequeueRun(context.WithoutCancel(ctx), runID, w.ID)
 	switch {
 	case errors.Is(err, store.ErrClaimLost):
@@ -993,6 +993,7 @@ func (w *Worker) requeueRun(ctx context.Context, runID string, log *slog.Logger)
 	case err != nil:
 		log.Error("requeue after interruption failed", "error", err)
 	}
+	w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
 }
 
 // lostClaim reports whether the run's context was canceled because the
@@ -1095,7 +1096,7 @@ func (w *Worker) heartbeatInterval() time.Duration {
 // exactly the case where the next round is provably identical to this one,
 // so it is where the chain has to stop and ask for a human.
 func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, res *jobs.BuildResult, log *slog.Logger) {
-	retryPartial := res.Summary.Status == jobs.StatusPartial && run.Trigger != "continuation"
+	retryPartial := res.Summary.Status == jobs.StatusPartial && run.Trigger != jobs.TriggerContinuation
 	continueDeferred := res.Deferred > 0 && progressed(res)
 	if res.Deferred > 0 && !continueDeferred {
 		log.Warn("run deferred work but completed no unit; not continuing",
@@ -1104,7 +1105,7 @@ func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, 
 	if !continueDeferred && !retryPartial {
 		return
 	}
-	if _, created, err := w.Store.EnqueueRun(ctx, run.WorkspaceID, "continuation", run.ConnectorID); err != nil {
+	if _, created, err := w.Store.EnqueueRun(ctx, run.WorkspaceID, jobs.TriggerContinuation, run.ConnectorID); err != nil {
 		log.Error("continuation enqueue failed", "error", err)
 	} else if created {
 		log.Info("continuation enqueued", "deferred", res.Deferred, "retry_partial", retryPartial)
@@ -1122,7 +1123,7 @@ func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, 
 // canceled by definition on this path, and a write through it would fail and
 // leave the unreached units waiting for some later trigger.
 func (w *Worker) continueInterrupted(ctx context.Context, run *store.QueuedRun, log *slog.Logger) {
-	id, created, err := w.Store.EnqueueRun(context.WithoutCancel(ctx), run.WorkspaceID, "continuation", run.ConnectorID)
+	id, created, err := w.Store.EnqueueRun(context.WithoutCancel(ctx), run.WorkspaceID, jobs.TriggerContinuation, run.ConnectorID)
 	switch {
 	case err != nil:
 		log.Error("continuation after interruption not enqueued; the unreached units wait for the next trigger",
@@ -1194,7 +1195,7 @@ func (w *Worker) pollSources(ctx context.Context, log *slog.Logger) {
 	for _, c := range due {
 		// The active-run index makes this idempotent: a connector already
 		// building debounces onto its waiting run.
-		if _, created, err := w.Store.EnqueueRun(ctx, c.WorkspaceID, "poll", c.ID); err != nil {
+		if _, created, err := w.Store.EnqueueRun(ctx, c.WorkspaceID, jobs.TriggerPoll, c.ID); err != nil {
 			log.Error("poll enqueue failed", "connector", c.Name, "error", err)
 		} else if created {
 			log.Info("poll enqueued run", "connector", c.Name, "workspace", c.WorkspaceID)

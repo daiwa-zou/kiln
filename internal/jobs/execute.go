@@ -32,9 +32,9 @@ type SourceConnectors struct {
 // For returns the connector id owning a unit key's namespace.
 func (c SourceConnectors) For(key diff.Key) string {
 	switch diff.Namespace(key) {
-	case "doc:upload":
+	case diff.NamespaceUpload:
 		return c.Upload
-	case "doc:web":
+	case diff.NamespaceWeb:
 		return c.Web
 	}
 	return c.Git
@@ -157,7 +157,7 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 	// registry rather than calling the scanner directly, so the abstraction is
 	// exercised by the path that uses it rather than assumed to work.
 	if src.Path != "" {
-		conn, err := connector.Get("git")
+		conn, err := connector.Get(connector.KindGit)
 		if err != nil {
 			return fail(err)
 		}
@@ -197,17 +197,9 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 		if err != nil {
 			return fail(err)
 		}
-		merged, err := mapper.Merge(src.Path, m.Map, doc.Map)
-		if err != nil {
+		if err := m.absorb(src.Path, doc); err != nil {
 			return fail(err)
 		}
-		m.Map = merged
-		maps.Copy(m.Router.DocPaths, doc.Routes)
-		// Section units have no path of their own; register them under their
-		// parent so routing a document also routes its chapters.
-		m.Router.DocSections = sectionsByParent(doc.Map)
-		m.DocNames = doc.Names
-		m.Figures = doc.Figures
 	}
 
 	// Web pages merge the same way: a third source kind, one wiki.
@@ -219,33 +211,59 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 		if err != nil {
 			return fail(err)
 		}
-		merged, err := mapper.Merge(src.Path, m.Map, web.Map)
-		if err != nil {
+		if err := m.absorb(src.Path, web); err != nil {
 			return fail(err)
-		}
-		m.Map = merged
-		maps.Copy(m.Router.DocPaths, web.Routes)
-		for parent, sections := range sectionsByParent(web.Map) {
-			if m.Router.DocSections == nil {
-				m.Router.DocSections = map[diff.Key][]diff.Key{}
-			}
-			m.Router.DocSections[parent] = sections
-		}
-		// Carried generically, but empty in practice: a fetched page's images
-		// are remote URLs rather than embedded bytes, and retrieving them
-		// would have to go back through the connector's address guard as a
-		// second class of request. Until that exists the web connector
-		// recovers no figures, and this copy keeps the seam ready rather than
-		// pretending the case is handled.
-		if len(web.Figures) > 0 {
-			if m.Figures == nil {
-				m.Figures = map[string][]extract.Figure{}
-			}
-			maps.Copy(m.Figures, web.Figures)
 		}
 	}
 
 	return m, nil
+}
+
+// absorb merges one document source's sync into the material: its units into
+// the map, its documents and their sections into the router, and its figures
+// and document names into the lists the pipeline reads. Every document source
+// goes through here so none can drift from the others -- they used to be two
+// copies, one of which replaced the router's sections and the figures where
+// the other merged into them, and that only worked because the documents block
+// happened to run first.
+//
+// root is the repository directory the map is merged against, empty when
+// there is none.
+func (m *material) absorb(root string, s docSync) error {
+	merged, err := mapper.Merge(root, m.Map, s.Map)
+	if err != nil {
+		return err
+	}
+	m.Map = merged
+	maps.Copy(m.Router.DocPaths, s.Routes)
+
+	// Section units have no path of their own; register them under their
+	// parent so routing a document also routes its chapters.
+	if m.Router.DocSections == nil {
+		m.Router.DocSections = map[diff.Key][]diff.Key{}
+	}
+	maps.Copy(m.Router.DocSections, sectionsByParent(s.Map))
+
+	if len(s.Names) > 0 {
+		if m.DocNames == nil {
+			m.DocNames = map[string]string{}
+		}
+		maps.Copy(m.DocNames, s.Names)
+	}
+
+	// Figures are carried generically even for sources that recover none. A
+	// fetched page's images are remote URLs rather than embedded bytes, and
+	// retrieving them would have to go back through the connector's address
+	// guard as a second class of request; until that exists the web connector
+	// recovers no figures, and merging here keeps the seam ready rather than
+	// pretending the case is handled.
+	if len(s.Figures) > 0 {
+		if m.Figures == nil {
+			m.Figures = map[string][]extract.Figure{}
+		}
+		maps.Copy(m.Figures, s.Figures)
+	}
+	return nil
 }
 
 // Execute syncs sources through the connector registry, maps and routes them,
@@ -291,13 +309,13 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	// deletion review for every repo-derived source it never looked at.
 	var syncedNS []string
 	if req.Source.Path != "" {
-		syncedNS = append(syncedNS, "module", "entry", "arch", "doc")
+		syncedNS = append(syncedNS, diff.PrefixModule, diff.PrefixEntry, diff.PrefixArch, diff.PrefixDoc)
 	}
 	if req.Source.DocsDir != "" {
-		syncedNS = append(syncedNS, "doc:upload")
+		syncedNS = append(syncedNS, diff.NamespaceUpload)
 	}
 	if len(req.Source.WebURLs) > 0 {
-		syncedNS = append(syncedNS, "doc:web")
+		syncedNS = append(syncedNS, diff.NamespaceWeb)
 	}
 
 	breq := BuildRequest{
@@ -342,6 +360,10 @@ type docSource struct {
 	prefix  string           // staging directory prefix
 	noun    string           // what one unit of material is called in output
 	config  connector.Config // connector-specific location of the material
+	// renames says a doc's Origin is the path a stored row is keyed on, so the
+	// title ingest derived is worth writing back to that row. True for uploads
+	// only: a repository file or a fetched page has no row to rename.
+	renames bool
 	// origin namespaces a doc's origin into the change-routing key space
 	// (diff.UploadOrigin / diff.WebOrigin).
 	origin func(string) string
@@ -423,7 +445,7 @@ func syncDocSource(ctx context.Context, out io.Writer, src docSource) (res docSy
 		// Keyed on Origin, the path the file is stored under, because that is
 		// what the row is keyed on. Path here is the staged copy, which exists
 		// only for the length of this run.
-		if d.Origin != "" && d.Title != "" {
+		if src.renames && d.Origin != "" && d.Title != "" {
 			names[d.Origin] = d.Title
 		}
 		if len(d.Figures) > 0 {
@@ -442,11 +464,12 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (docSync, error) {
 		return docSync{}, err
 	}
 	return syncDocSource(ctx, out, docSource{
-		kind:    "upload",
+		kind:    connector.KindUpload,
 		subject: absDocs,
 		prefix:  "kiln-docs-",
 		noun:    "document(s)",
 		config:  connector.Config{"path": absDocs},
+		renames: true,
 		origin:  diff.UploadOrigin,
 		payload: func(set *connector.SourceSet) ([]docmap.Doc, [][2]string, bool) {
 			p := upload.PayloadOf(set)
@@ -465,7 +488,7 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (docSync, error) {
 // syncWeb ingests fetched pages through the web connector.
 func syncWeb(ctx context.Context, out io.Writer, urls []string) (docSync, error) {
 	return syncDocSource(ctx, out, docSource{
-		kind:    "web",
+		kind:    connector.KindWeb,
 		subject: fmt.Sprintf("%d url(s)", len(urls)),
 		prefix:  "kiln-web-",
 		noun:    "page(s)",

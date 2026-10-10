@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
 
@@ -196,7 +197,7 @@ func (s *Server) handlePushEvent(w http.ResponseWriter, ctx context.Context, bod
 			}
 		}
 
-		if _, _, err := s.Hooks.EnqueueRunOpts(ctx, c.WorkspaceID, "webhook", c.ID, opts); err != nil {
+		if _, _, err := s.Hooks.EnqueueRunOpts(ctx, c.WorkspaceID, jobs.TriggerWebhook, c.ID, opts); err != nil {
 			s.fail(w, err)
 			return
 		}
