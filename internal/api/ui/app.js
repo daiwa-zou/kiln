@@ -2528,7 +2528,9 @@ async function showGraph() {
                toolbar's own flow, so a bar that wraps pushes it down. -->
           <div class="graph-pill" id="graph-pill" hidden></div>
         </div>
-        <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>
+        <!-- A group, not an img: an img makes its focusable descendants presentational,
+             and every node in here is a labelled, focusable stop. -->
+        <svg id="graph-svg" role="group" aria-label="Page link graph"></svg>
         <!-- A query that matches nothing greys the graph rather than emptying
              it: an empty rectangle reads as a broken view, and the thing the
              reader wants back is still there behind this. -->

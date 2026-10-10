@@ -61,6 +61,15 @@ Six more defects were found and fixed:
   always `<h2>`.
 - The graph's only heading was the selection rail's `<h2>`. It now opens with a
   visually-hidden `<h1>`.
+- The graph's controls were not all held to the floor after all: the hop
+  buttons (18px), the neighbour switch (17px), the filter pill's clear button
+  (19px) and the search box's clear button (20px) are now 24px. Its canvas was
+  `role="img"`, which makes the focusable nodes inside it presentational; it is
+  a `group`. A switched-off type chip is struck through, dashed and drawn in
+  `--ink-faint` rather than faded to 40% opacity (1.81:1). The search field,
+  which draws no outline of its own, shows the 2px `--ember` ring on the field.
+  The graph honours `prefers-reduced-motion`: the layout runs to rest before the
+  first paint, and a dragged node carries no momentum.
 - Two grids (`.stats`, `.type-cards`) used `1fr` tracks, whose automatic minimum
   is their content: one long page title pushed the document past 375px and the
   whole page scrolled sideways. Every track is `minmax(0, 1fr)`.
