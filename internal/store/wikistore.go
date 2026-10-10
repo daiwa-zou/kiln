@@ -20,6 +20,12 @@ import (
 // here and the pipeline stays testable against an in-memory fake.
 type WikiStore struct {
 	pool *pgxpool.Pool
+
+	// onLinkResolve, when set, is told how many page_links rows each import
+	// rewrote while resolving and unresolving. It exists so a test can prove
+	// resolveLinks writes only the rows whose value changes; production code
+	// leaves it nil.
+	onLinkResolve func(resolved, unresolved int64)
 }
 
 // NewWikiStore wraps a pool.
@@ -222,16 +228,18 @@ func (s *WikiStore) Import(ctx context.Context, in jobs.ImportRequest) error {
 		return err
 	}
 
-	for _, p := range in.UpsertPages {
-		if err := upsertPage(ctx, tx, wikiID, p); err != nil {
-			return err
-		}
+	if err := upsertPages(ctx, tx, wikiID, in.UpsertPages); err != nil {
+		return err
 	}
 	if err := softDeletePages(ctx, tx, wikiID, in.SoftDeletePages); err != nil {
 		return err
 	}
-	if err := resolveLinks(ctx, tx, wikiID); err != nil {
+	resolved, unresolved, err := resolveLinksCounted(ctx, tx, wikiID)
+	if err != nil {
 		return err
+	}
+	if s.onLinkResolve != nil {
+		s.onLinkResolve(resolved, unresolved)
 	}
 	for _, src := range in.UpsertSources {
 		if err := upsertSource(ctx, tx, in.WorkspaceID, src); err != nil {
@@ -357,16 +365,25 @@ func ensureWiki(ctx context.Context, tx pgx.Tx, workspaceID string) (string, err
 	return id, nil
 }
 
-func upsertPage(ctx context.Context, tx pgx.Tx, wikiID string, p wiki.Page) error {
-	fm, err := json.Marshal(p.Meta)
-	if err != nil {
-		return fmt.Errorf("store: encode frontmatter for %s: %w", p.Path, err)
+// upsertBatchSize bounds how many page upserts travel in one pgx batch, so a
+// build of thousands of pages does not queue every body in memory at once.
+const upsertBatchSize = 200
+
+// upsertPages writes the run's pages and replaces their outbound links.
+//
+// This runs inside the import's advisory-locked transaction, so every round
+// trip is time other writers wait. Page upserts therefore go out in pgx
+// batches (the page ids come back in order), and the links of all pages are
+// replaced with one DELETE and one INSERT rather than a pair per page plus one
+// statement per link.
+func upsertPages(ctx context.Context, tx pgx.Tx, wikiID string, pages []wiki.Page) error {
+	if len(pages) == 0 {
+		return nil
 	}
 
-	var pageID string
 	// created_at is preserved on update: a regenerated page keeps the date it
 	// first appeared, which is what the frontmatter contract promises.
-	if err := tx.QueryRow(ctx, `
+	const upsertSQL = `
 		INSERT INTO pages (wiki_id, path, type, slug, title, frontmatter, body, content_hash, provenance, built_at_ref)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (wiki_id, slug) WHERE deleted_at IS NULL
@@ -380,61 +397,134 @@ func upsertPage(ctx context.Context, tx pgx.Tx, wikiID string, p wiki.Page) erro
 			provenance = EXCLUDED.provenance,
 			built_at_ref = EXCLUDED.built_at_ref,
 			updated_at = now()
-		RETURNING id`,
-		wikiID, p.Path, string(p.Meta.Type), p.Slug, p.Meta.Title, fm, p.Body,
-		p.ContentHash(), provenanceOf(p), nullable(p.Meta.BuiltAtRef),
-	).Scan(&pageID); err != nil {
-		return fmt.Errorf("store: upsert page %s: %w", p.Path, err)
+		RETURNING id`
+
+	// Two pages in one run can share a slug and so land on one row; the later
+	// page wins, links included, exactly as when each page was written in turn.
+	// Keyed by page id, kept in first-seen order for deterministic SQL.
+	var (
+		order   []string
+		targets = map[string][]string{}
+	)
+	for start := 0; start < len(pages); start += upsertBatchSize {
+		chunk := pages[start:min(start+upsertBatchSize, len(pages))]
+
+		batch := &pgx.Batch{}
+		for _, p := range chunk {
+			fm, err := json.Marshal(p.Meta)
+			if err != nil {
+				return fmt.Errorf("store: encode frontmatter for %s: %w", p.Path, err)
+			}
+			batch.Queue(upsertSQL,
+				wikiID, p.Path, string(p.Meta.Type), p.Slug, p.Meta.Title, fm, p.Body,
+				p.ContentHash(), provenanceOf(p), nullable(p.Meta.BuiltAtRef))
+		}
+
+		ids, err := sendUpserts(ctx, tx, batch, chunk)
+		if err != nil {
+			return err
+		}
+		for i, id := range ids {
+			if _, seen := targets[id]; !seen {
+				order = append(order, id)
+			}
+			targets[id] = wiki.LinkTargets(chunk[i].Body)
+		}
 	}
 
 	// Links are replaced wholesale rather than diffed: a page's outbound links
 	// are entirely determined by its current body.
-	if _, err := tx.Exec(ctx, `DELETE FROM page_links WHERE from_page_id = $1`, pageID); err != nil {
-		return fmt.Errorf("store: clear links for %s: %w", p.Path, err)
+	if _, err := tx.Exec(ctx, `DELETE FROM page_links WHERE from_page_id = ANY($1::uuid[])`, order); err != nil {
+		return fmt.Errorf("store: clear links: %w", err)
 	}
-	for _, target := range wiki.LinkTargets(p.Body) {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO page_links (from_page_id, to_slug, resolved)
-			VALUES ($1,$2,false)
-			ON CONFLICT (from_page_id, to_slug) DO NOTHING`, pageID, target); err != nil {
-			return fmt.Errorf("store: insert link %s -> %s: %w", p.Path, target, err)
+
+	var fromIDs, toSlugs []string
+	for _, id := range order {
+		for _, target := range targets[id] {
+			fromIDs = append(fromIDs, id)
+			toSlugs = append(toSlugs, target)
 		}
+	}
+	if len(fromIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO page_links (from_page_id, to_slug, resolved)
+		SELECT f, t, false FROM unnest($1::uuid[], $2::text[]) AS u(f, t)
+		ON CONFLICT (from_page_id, to_slug) DO NOTHING`, fromIDs, toSlugs); err != nil {
+		return fmt.Errorf("store: insert links: %w", err)
 	}
 	return nil
 }
 
+// sendUpserts runs one batch of page upserts and returns the page ids in the
+// order the pages were queued.
+func sendUpserts(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, pages []wiki.Page) ([]string, error) {
+	br := tx.SendBatch(ctx, batch)
+	ids := make([]string, 0, len(pages))
+	for _, p := range pages {
+		var id string
+		if err := br.QueryRow().Scan(&id); err != nil {
+			_ = br.Close()
+			return nil, fmt.Errorf("store: upsert page %s: %w", p.Path, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := br.Close(); err != nil {
+		return nil, fmt.Errorf("store: upsert pages: %w", err)
+	}
+	return ids, nil
+}
+
 // resolveLinks points every link at its target where one exists.
+func resolveLinks(ctx context.Context, tx pgx.Tx, wikiID string) error {
+	_, _, err := resolveLinksCounted(ctx, tx, wikiID)
+	return err
+}
+
+// resolveLinksCounted is resolveLinks, also reporting how many rows each of its
+// two statements rewrote.
 //
 // Unresolved rows are left in place deliberately: a link to a page that does
 // not exist is the cheapest and most precise gap signal available, since the
 // wiki has explicitly declared it wants that page.
-func resolveLinks(ctx context.Context, tx pgx.Tx, wikiID string) error {
-	_, err := tx.Exec(ctx, `
+//
+// Both statements write only rows whose value would change. Postgres writes a
+// new tuple version for every row an UPDATE matches, whether or not any column
+// differs, so without the predicate each import would rewrite every link in the
+// wiki -- WAL, bloat, and vacuum work proportional to the whole graph, inside
+// the advisory-locked transaction, for an import that touched one page.
+func resolveLinksCounted(ctx context.Context, tx pgx.Tx, wikiID string) (resolved, unresolved int64, err error) {
+	tag, err := tx.Exec(ctx, `
 		UPDATE page_links l
 		SET to_page_id = t.id, resolved = true
 		FROM pages t
 		WHERE t.wiki_id = $1
 		  AND t.deleted_at IS NULL
 		  AND t.slug = l.to_slug
-		  AND l.from_page_id IN (SELECT id FROM pages WHERE wiki_id = $1)`, wikiID)
+		  AND l.from_page_id IN (SELECT id FROM pages WHERE wiki_id = $1)
+		  AND (NOT l.resolved OR l.to_page_id IS DISTINCT FROM t.id)`, wikiID)
 	if err != nil {
-		return fmt.Errorf("store: resolve links: %w", err)
+		return 0, 0, fmt.Errorf("store: resolve links: %w", err)
 	}
+	resolved = tag.RowsAffected()
 
 	// A target that has since been deleted must not stay marked resolved.
 	// Scoped to this wiki's own links: without the wiki_id predicate this
 	// statement would scan and lock page_links for every tenant on every import.
-	if _, err := tx.Exec(ctx, `
+	// Already restricted to resolved rows, so every match is a real change.
+	tag, err = tx.Exec(ctx, `
 		UPDATE page_links l
 		SET to_page_id = NULL, resolved = false
 		WHERE l.resolved
 		  AND l.from_page_id IN (SELECT id FROM pages WHERE wiki_id = $1)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM pages t
-		      WHERE t.id = l.to_page_id AND t.deleted_at IS NULL)`, wikiID); err != nil {
-		return fmt.Errorf("store: unresolve dead links: %w", err)
+		      WHERE t.id = l.to_page_id AND t.deleted_at IS NULL)`, wikiID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: unresolve dead links: %w", err)
 	}
-	return nil
+	return resolved, tag.RowsAffected(), nil
 }
 
 // softDeletePages marks pages removed without destroying them.
