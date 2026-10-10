@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,14 +35,50 @@ type fakeStore struct {
 	installOK      bool
 	installErr     error
 	installChecked []int64
+
+	// mu guards what the heartbeat goroutine and the test both touch.
+	mu sync.Mutex
+	// beats counts heartbeats; beatErr, when set, is returned from the nth
+	// beat on (beatErrAt, one-based), scripting a claim that is lost mid-run.
+	beats     int
+	beatErr   error
+	beatErrAt int
+	// failed and requeued record the terminal writes the worker attempted.
+	failed   []string
+	requeued []string
+	// onBudget runs when the worker looks up the budget, which it does only
+	// after the pipeline has finished -- a stand-in for post-build work.
+	onBudget func()
+}
+
+func (f *fakeStore) beatCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.beats
 }
 
 func (f *fakeStore) ClaimNextRun(context.Context, string) (*store.QueuedRun, error) {
 	return nil, nil
 }
-func (f *fakeStore) FailRun(context.Context, string, string) error                { return nil }
-func (f *fakeStore) RequeueStaleRuns(context.Context, time.Duration) (int, error) { return 0, nil }
-func (f *fakeStore) MarkConnectorSync(context.Context, string, string) error      { return nil }
+func (f *fakeStore) FailRun(_ context.Context, runID, _, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failed = append(f.failed, runID)
+	return nil
+}
+func (f *fakeStore) HeartbeatRun(context.Context, string, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.beats++
+	if f.beatErr != nil && f.beats >= f.beatErrAt {
+		return f.beatErr
+	}
+	return nil
+}
+func (f *fakeStore) RequeueStaleRuns(context.Context, time.Duration) ([]store.StaleRun, error) {
+	return nil, nil
+}
+func (f *fakeStore) MarkConnectorSync(context.Context, string, string) error { return nil }
 func (f *fakeStore) EnabledConnectors(_ context.Context, _ string) ([]store.ConnectorRow, error) {
 	return f.connectors, nil
 }
@@ -71,9 +108,19 @@ func (f *fakeStore) ListFiles(context.Context, string) ([]store.FileRow, error) 
 func (f *fakeStore) QueueDepth(context.Context) (map[string]int, error) {
 	return map[string]int{"queued": 0, "running": 0}, nil
 }
-func (f *fakeStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) { return nil, nil }
-func (f *fakeStore) LastSuccessfulRef(context.Context, string) (string, error)    { return "", nil }
-func (f *fakeStore) RequeueRun(context.Context, string) error                     { return nil }
+func (f *fakeStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) {
+	if f.onBudget != nil {
+		f.onBudget()
+	}
+	return nil, nil
+}
+func (f *fakeStore) LastSuccessfulRef(context.Context, string) (string, error) { return "", nil }
+func (f *fakeStore) RequeueRun(_ context.Context, runID, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requeued = append(f.requeued, runID)
+	return nil
+}
 func (f *fakeStore) Sweep(context.Context, time.Duration, time.Duration) (int64, error) {
 	return 0, nil
 }

@@ -195,12 +195,23 @@ func (s *WikiStore) SeedRunItems(ctx context.Context, runID string, keys []diff.
 	//
 	// DO NOTHING rather than an update: a retried seed must not reset an item
 	// that has already started, which is what a resumed or debounced run does.
+	//
+	// Under a worker's claim the plan is only seeded onto a run that is still
+	// the worker's. It cannot report the miss -- a seed that conflicts on every
+	// row also inserts nothing -- but it need not: the next fenced write says so.
+	owner, fenced := claimedBy(ctx)
+	var fence any
+	if fenced {
+		fence = owner
+	}
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO run_items (run_id, kind, cache_key, status, est_cost_usd)
-		SELECT $1, k.kind, k.cache_key, 'pending', $4
+		SELECT $1::uuid, k.kind, k.cache_key, 'pending', $4::numeric
 		FROM unnest($2::text[], $3::text[]) AS k(kind, cache_key)
+		WHERE $5::text IS NULL OR EXISTS (
+		    SELECT 1 FROM runs WHERE id = $1::uuid AND claimed_by = $5::text AND status = 'running')
 		ON CONFLICT (run_id, cache_key) DO NOTHING`,
-		runID, kinds, cacheKeys, estCostUSD); err != nil {
+		runID, kinds, cacheKeys, estCostUSD, fence); err != nil {
 		return fmt.Errorf("store: seed run items: %w", err)
 	}
 	return nil
@@ -212,14 +223,25 @@ func (s *WikiStore) SeedRunItems(ctx context.Context, runID string, keys []diff.
 // or the plan grew after it: the item is the record of the unit either way.
 // finished_at stays null while the unit is still in flight, which is what lets
 // a reader tell "started three minutes ago" from "took three minutes".
+//
+// Under a worker's claim (see WithClaim) the write only lands while the run is
+// still that worker's, so a displaced worker cannot overwrite the progress of
+// the one that took over; ErrClaimLost reports the miss.
 func (s *WikiStore) MarkRunItem(ctx context.Context, runID string, item jobs.ItemSummary) error {
 	if !isUUID(runID) {
 		return nil
 	}
-	if _, err := s.pool.Exec(ctx, `
+	owner, fenced := claimedBy(ctx)
+	var fence any
+	if fenced {
+		fence = owner
+	}
+	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO run_items (run_id, kind, cache_key, status, cost_usd, turns, tokens, error, finished_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-		        CASE WHEN $4 IN ('pending', 'running') THEN NULL ELSE now() END)
+		SELECT $1::uuid, $2::text, $3::text, $4::text, $5::numeric, $6::int, $7::bigint, $8::text,
+		       CASE WHEN $4::text IN ('pending', 'running') THEN NULL ELSE now() END
+		WHERE $9::text IS NULL OR EXISTS (
+		    SELECT 1 FROM runs WHERE id = $1::uuid AND claimed_by = $9::text AND status = 'running')
 		ON CONFLICT (run_id, cache_key) DO UPDATE SET
 		    status      = EXCLUDED.status,
 		    cost_usd    = EXCLUDED.cost_usd,
@@ -228,8 +250,12 @@ func (s *WikiStore) MarkRunItem(ctx context.Context, runID string, item jobs.Ite
 		    error       = EXCLUDED.error,
 		    finished_at = EXCLUDED.finished_at`,
 		runID, item.Key.Prefix(), string(item.Key), item.Status,
-		item.CostUSD, item.Turns, item.Tokens, nullable(item.Err)); err != nil {
+		item.CostUSD, item.Turns, item.Tokens, nullable(item.Err), fence)
+	if err != nil {
 		return fmt.Errorf("store: mark run item %s: %w", item.Key, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClaimLost
 	}
 	return nil
 }

@@ -45,6 +45,12 @@ x-kiln-env: &kiln-env
   KILN_AGENT_RUN_BUDGET_USD: ${KILN_AGENT_RUN_BUDGET_USD:-}
   KILN_AGENT_MAX_PAGES_PER_RUN: ${KILN_AGENT_MAX_PAGES_PER_RUN:-}
   KILN_AGENT_BUDGET_WINDOW: ${KILN_AGENT_BUDGET_WINDOW:-}
+  # How long a worker lets its in-flight build run after SIGTERM before
+  # interrupting and requeueing it. Pinned here because the compiled-in default
+  # (15m) is longer than the worker's stop_grace_period below: Docker would
+  # SIGKILL the worker mid-drain, and the run would sit 'running' until the
+  # stale deadline. Keep it under that stop_grace_period.
+  KILN_WORKER_DRAIN_GRACE: ${KILN_WORKER_DRAIN_GRACE:-4m}
   # Prometheus metrics on a second listener, deliberately not published to the
   # host: scrape it from inside the compose network, or publish it yourself
   # once you know who can reach it.
@@ -170,8 +176,9 @@ services:
       minio-init:
         condition: service_completed_successfully
     # SIGTERM starts the drain: the worker stops claiming immediately and the
-    # in-flight build gets its grace window before being requeued. Give it
-    # room, or a deploy turns paid-for work into a requeue.
+    # in-flight build gets KILN_WORKER_DRAIN_GRACE (4m, above) before being
+    # requeued. This must stay above that grace, or Docker's SIGKILL lands
+    # mid-drain and the run is left 'running' until it goes stale.
     stop_grace_period: 5m
     restart: unless-stopped
 

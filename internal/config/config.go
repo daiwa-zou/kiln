@@ -85,9 +85,14 @@ type GitHub struct {
 type Worker struct {
 	// PollInterval is how often an idle worker checks the queue.
 	PollInterval time.Duration `mapstructure:"poll_interval"`
-	// StaleAfter is how long a claimed run may hold 'running' before it is
-	// assumed orphaned by a dead worker and returned to the queue.
+	// StaleAfter is how long a claimed run may go without a heartbeat before
+	// it is assumed orphaned by a dead worker and returned to the queue. It is
+	// a silence deadline, not a run-length limit: a worker refreshes its claim
+	// every HeartbeatInterval for as long as the build lives.
 	StaleAfter time.Duration `mapstructure:"stale_after"`
+	// HeartbeatInterval is how often a worker refreshes the claim on the run
+	// it is building. It must leave StaleAfter room for missed beats.
+	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
 	// SourcePollInterval is how often trigger_mode='poll' connectors are due
 	// for a refresh. Zero disables the poll scheduler.
 	SourcePollInterval time.Duration `mapstructure:"source_poll_interval"`

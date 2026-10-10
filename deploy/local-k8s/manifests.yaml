@@ -454,8 +454,11 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: __NODE__
-      # Above worker.drain_grace, so SIGTERM lets an in-flight build land
-      # instead of requeueing work the model was already paid for.
+      # Above KILN_WORKER_DRAIN_GRACE (4m, set on the worker below), so SIGTERM
+      # lets an in-flight build land -- or be requeued cleanly once the grace
+      # runs out -- before the kubelet's SIGKILL arrives. The compiled-in grace
+      # is 15m, far past this window; left unset, the worker would be killed
+      # mid-drain and its run would sit 'running' until the stale deadline.
       terminationGracePeriodSeconds: 300
       securityContext:
         runAsNonRoot: true
@@ -536,6 +539,9 @@ spec:
               value: /sources
             - name: KILN_WORKER_POLL_INTERVAL
               value: 2s
+            # Must stay under terminationGracePeriodSeconds above.
+            - name: KILN_WORKER_DRAIN_GRACE
+              value: 4m
             - name: KILN_DATABASE_MAX_CONNS
               value: "6"
             - name: KILN_DATABASE_URL

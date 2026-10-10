@@ -66,6 +66,9 @@ config:
 
   worker:
     pollInterval: 5s
+    # How long a claimed run may go without a heartbeat before it is presumed
+    # orphaned and requeued. Workers heartbeat every minute for as long as a
+    # build lives, so this bounds dead-worker recovery, not build length.
     staleAfter: 15m
     # SIGTERM starts a drain rather than an abort; give an in-flight build
     # room to land. Keep terminationGracePeriodSeconds above this.

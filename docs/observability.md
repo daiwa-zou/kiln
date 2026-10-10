@@ -58,6 +58,7 @@ is bucketed by class (`2xx`, `4xx`, `5xx`) for the same reason.
 | `kiln_runs_finished_total` | counter | `status` |
 | `kiln_run_duration_seconds` | histogram | `status` |
 | `kiln_run_cost_usd_total` | counter | — |
+| `kiln_runs_stale_requeued_total` | counter | — |
 | `kiln_pages_total` | counter | `action` |
 | `kiln_active_runs` | gauge | — |
 | `kiln_queue_depth` | gauge | `status` |
@@ -70,6 +71,15 @@ worth alerting on; they finish with status `unresolvable`.
 `kiln_run_cost_usd_total` is a first-class metric because kiln spends real
 money per run. A build platform whose spend is visible only in a database table
 cannot be alerted on, and the cheapest outage to prevent is a budget one.
+
+`kiln_runs_stale_requeued_total` counts running builds returned to the queue
+because their worker stopped refreshing its claim. A worker heartbeats for as
+long as its build lives, so a long build never lands here; a non-zero rate means
+workers are dying or losing the database mid-build, and the requeued build is
+paid for again. The worker's log names each run and the claim it lapsed from.
+The displaced worker, if it is still alive, finishes its side with status
+`claim_lost` on `kiln_runs_finished_total`: it wrote nothing to the run, which
+now belongs to the worker that took it.
 
 `no_changes` is the content-hash gate working: the run found nothing to
 regenerate and cost nothing. A healthy incremental deployment shows many of

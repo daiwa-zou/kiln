@@ -9,6 +9,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,8 +35,13 @@ import (
 // is testable against a fake while the SQL stays in internal/store.
 type Store interface {
 	ClaimNextRun(ctx context.Context, workerID string) (*store.QueuedRun, error)
-	FailRun(ctx context.Context, runID, message string) error
-	RequeueStaleRuns(ctx context.Context, olderThan time.Duration) (int, error)
+	// FailRun, RequeueRun and HeartbeatRun are fenced to the worker holding the
+	// claim and return store.ErrClaimLost when it no longer does. RecordRun and
+	// MarkRunItem are fenced the same way, through the claim process() puts on
+	// the pipeline's context.
+	FailRun(ctx context.Context, runID, workerID, message string) error
+	HeartbeatRun(ctx context.Context, runID, workerID string) error
+	RequeueStaleRuns(ctx context.Context, olderThan time.Duration) ([]store.StaleRun, error)
 	EnabledConnectors(ctx context.Context, workspaceID string) ([]store.ConnectorRow, error)
 	ConnectorByID(ctx context.Context, id string) (*store.ConnectorRow, error)
 	MarkConnectorSync(ctx context.Context, id, syncErr string) error
@@ -50,7 +56,7 @@ type Store interface {
 	FileReview(ctx context.Context, workspaceID, kind, title, detail string) error
 	ResearchQuestionFor(ctx context.Context, runID string) (*store.ResearchQuestion, error)
 	RecordResearch(ctx context.Context, reviewID, findings string, resolved bool) error
-	RequeueRun(ctx context.Context, runID string) error
+	RequeueRun(ctx context.Context, runID, workerID string) error
 	Sweep(ctx context.Context, softDeleteRetention, runRetention time.Duration) (int64, error)
 	QueueDepth(ctx context.Context) (map[string]int, error)
 
@@ -78,6 +84,10 @@ type Worker struct {
 	// presumed orphaned and requeued. Zero values take the config defaults.
 	Poll       time.Duration
 	StaleAfter time.Duration
+
+	// HeartbeatInterval is how often the claim on a running build is refreshed.
+	// Zero derives it from StaleAfter; see heartbeatInterval.
+	HeartbeatInterval time.Duration
 
 	// SourcePollInterval is how often trigger_mode='poll' connectors are due
 	// for a refresh, for origins with no useful webhook. Zero disables the
@@ -158,6 +168,7 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 		ID:                   fmt.Sprintf("%s-%d", host, os.Getpid()),
 		Poll:                 cfg.Worker.PollInterval,
 		StaleAfter:           cfg.Worker.StaleAfter,
+		HeartbeatInterval:    cfg.Worker.HeartbeatInterval,
 		SourcePollInterval:   cfg.Worker.SourcePollInterval,
 		BudgetWindow:         cfg.Agent.BudgetWindow,
 		DrainGrace:           cfg.Worker.DrainGrace,
@@ -258,6 +269,18 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	log := w.logger().With("run", run.ID, "workspace", run.WorkspaceSlug)
 	log.Info("claimed run", "trigger", run.Trigger)
 
+	// Everything below runs under this worker's claim. Marking the context
+	// fences each write the pipeline makes for the run (its record, its item
+	// progress) to this worker, so a claim that lapsed cannot overwrite the
+	// worker that took the run over. The heartbeat keeps the claim from lapsing
+	// in the first place, and cancels the run if it nonetheless has: a build
+	// nobody owns any more is spend nobody can use.
+	ctx = store.WithClaim(ctx, w.ID)
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	stopHeartbeat := w.heartbeat(ctx, cancel, run.ID, log)
+	defer stopHeartbeat()
+
 	// Counted at claim rather than at execution: a run that fails to resolve
 	// its sources never reaches the pipeline, and those are precisely the
 	// failures worth alerting on (a bad connector, unreachable storage).
@@ -270,12 +293,14 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		defer cleanup()
 	}
 	if err != nil {
+		if lostClaim(ctx) {
+			w.abandon(log, started)
+			return
+		}
 		if ctx.Err() != nil {
 			// Interrupted while resolving, not misconfigured: requeue.
 			log.Warn("resolution interrupted by shutdown; requeuing")
-			if rerr := w.Store.RequeueRun(context.WithoutCancel(ctx), run.ID); rerr != nil {
-				log.Error("requeue after interruption failed", "error", rerr)
-			}
+			w.requeueRun(ctx, run.ID, log)
 			w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
 			return
 		}
@@ -303,7 +328,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	// connector's next refresh out by a full interval, so answering a question
 	// about the bench would quietly delay rebuilding it.
 	if run.Trigger == "research" {
-		w.research(ctx, run, spec, started)
+		w.research(ctx, run, spec, started, stopHeartbeat)
 		return
 	}
 
@@ -329,17 +354,29 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		Connectors:  connectors,
 		BaseRef:     baseRef,
 	})
+	// The pipeline has recorded the run, so its row is no longer 'running' and
+	// a further beat would be refused as a lost claim -- canceling the publish
+	// and bookkeeping below over a claim that was in fact fulfilled. Heartbeat
+	// covers the build, which is the part that can outlast stale_after; what
+	// follows is short and happens on an already-settled row.
+	stopHeartbeat()
 
 	syncErr := ""
 	switch {
+	// Judged by the outcome, not the context alone: a build that returned
+	// cleanly recorded its run under our claim, whatever a late beat said.
+	case errors.Is(err, store.ErrClaimLost) || (err != nil && lostClaim(ctx)):
+		// Not this worker's run any more: there is nothing to requeue, fail, or
+		// record, and the connector bookkeeping below belongs to whoever holds
+		// the claim now.
+		w.abandon(log, started)
+		return
 	case err != nil && ctx.Err() != nil:
 		// Interrupted by the drain deadline, not broken: back to the queue,
 		// where this or another worker picks it up cleanly.
 		syncErr = "interrupted by shutdown; requeued"
 		log.Warn("build interrupted by shutdown; requeuing")
-		if rerr := w.Store.RequeueRun(context.WithoutCancel(ctx), run.ID); rerr != nil {
-			log.Error("requeue after interruption failed", "error", rerr)
-		}
+		w.requeueRun(ctx, run.ID, log)
 		w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
 	case err != nil:
 		syncErr = err.Error()
@@ -384,7 +421,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 // of the queue -- so what a failure owes the reader is the reason there are no
 // findings attached, which is not something they would otherwise find without
 // going to the runs list and matching timestamps.
-func (w *Worker) research(ctx context.Context, run *store.QueuedRun, spec jobs.SourceSpec, started time.Time) {
+func (w *Worker) research(ctx context.Context, run *store.QueuedRun, spec jobs.SourceSpec, started time.Time, stopHeartbeat func()) {
 	log := w.logger().With("run", run.ID, "workspace", run.WorkspaceSlug)
 
 	q, err := w.Store.ResearchQuestionFor(ctx, run.ID)
@@ -408,6 +445,7 @@ func (w *Worker) research(ctx context.Context, run *store.QueuedRun, spec jobs.S
 			PageSlug: q.PageSlug,
 		},
 	})
+	stopHeartbeat() // see process: the run row is settled, so a beat would only fail
 
 	// Write-back outlives cancellation for the same reason the run record
 	// does: the call is already billed, and findings nobody can read are the
@@ -415,14 +453,18 @@ func (w *Worker) research(ctx context.Context, run *store.QueuedRun, spec jobs.S
 	writeCtx := context.WithoutCancel(ctx)
 
 	if err != nil {
+		if lostClaim(ctx) {
+			// The item is left untouched for the same reason as below: whoever
+			// holds the run now is answering it.
+			w.abandon(log, started)
+			return
+		}
 		if ctx.Err() != nil {
 			// Interrupted by the drain deadline, not broken: back to the
 			// queue, and the item is left untouched because the answer is
 			// still coming -- from whichever worker picks this up next.
 			log.Warn("research interrupted by shutdown; requeuing")
-			if rerr := w.Store.RequeueRun(writeCtx, run.ID); rerr != nil {
-				log.Error("requeue after interruption failed", "error", rerr)
-			}
+			w.requeueRun(ctx, run.ID, log)
 			w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
 			return
 		}
@@ -822,9 +864,113 @@ func (w *Worker) openCredential(ctx context.Context, id string) (string, error) 
 func (w *Worker) failRun(ctx context.Context, runID string, cause error, log *slog.Logger) {
 	// The run row must not stay 'running' even when the caller's context is
 	// gone, or the workspace stays blocked until the stale deadline.
-	if err := w.Store.FailRun(context.WithoutCancel(ctx), runID, cause.Error()); err != nil {
+	err := w.Store.FailRun(context.WithoutCancel(ctx), runID, w.ID, cause.Error())
+	switch {
+	case errors.Is(err, store.ErrClaimLost):
+		log.Error("run failure not recorded: the run is no longer claimed by this worker",
+			"cause", cause.Error())
+	case err != nil:
 		log.Error("recording run failure failed", "error", err)
 	}
+}
+
+// requeueRun hands this worker's interrupted run back to the queue. The write
+// is fenced: if the run is no longer ours -- it went stale and was claimed
+// again while we were draining -- requeueing would pull the new owner's live
+// build out from under it, so the store refuses, and the refusal is logged as
+// what it is rather than as a database failure.
+func (w *Worker) requeueRun(ctx context.Context, runID string, log *slog.Logger) {
+	err := w.Store.RequeueRun(context.WithoutCancel(ctx), runID, w.ID)
+	switch {
+	case errors.Is(err, store.ErrClaimLost):
+		log.Error("run not requeued: it is no longer claimed by this worker")
+	case err != nil:
+		log.Error("requeue after interruption failed", "error", err)
+	}
+}
+
+// lostClaim reports whether the run's context was canceled because the
+// heartbeat found the run no longer belongs to this worker. It is read from the
+// cancellation cause, not inferred from ctx.Err(), so a lost claim cannot be
+// mistaken for a drain interruption and answered with a requeue.
+func lostClaim(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), store.ErrClaimLost)
+}
+
+// abandon is the end of a run this worker no longer owns. It writes nothing:
+// the run's row, items and connector bookkeeping are the current owner's, and a
+// loser touching them is the corruption fencing exists to prevent.
+func (w *Worker) abandon(log *slog.Logger, started time.Time) {
+	log.Error("run claim lost; abandoning without recording a result -- another worker may have taken this run, and this build's spend is not part of it",
+		"worker", w.ID)
+	w.metrics().RunFinished("claim_lost", time.Since(started), 0, 0, 0, 0)
+}
+
+// heartbeat keeps this worker's claim on a run alive while it builds, and
+// returns the function that stops it.
+//
+// Without it a claim is only as fresh as the moment it was made, and a run is
+// many sequential paid agent calls: a healthy long build would cross
+// stale_after, be requeued, and be built a second time by another worker while
+// the first is still spending.
+//
+// If a beat finds the run is no longer ours, the run's context is canceled with
+// store.ErrClaimLost as its cause. Transient database errors only log: one
+// missed beat is what stale_after's headroom is for, and abandoning a healthy
+// build over a hiccup would waste exactly the money this protects.
+func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelCauseFunc, runID string, log *slog.Logger) (stop func()) {
+	interval := w.heartbeatInterval()
+	beatCtx, stopBeats := context.WithCancel(ctx)
+	finished := make(chan struct{})
+
+	go func() {
+		defer close(finished)
+		tick := time.NewTicker(interval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-beatCtx.Done():
+				return
+			case <-tick.C:
+			}
+			// Bounded by the interval so a hung query cannot hold up the next
+			// beat, nor the stop.
+			callCtx, done := context.WithTimeout(beatCtx, interval)
+			err := w.Store.HeartbeatRun(callCtx, runID, w.ID)
+			done()
+			switch {
+			case err == nil:
+			case errors.Is(err, store.ErrClaimLost):
+				log.Error("heartbeat found the run no longer claimed by this worker; canceling it",
+					"worker", w.ID)
+				cancel(store.ErrClaimLost)
+				return
+			case beatCtx.Err() != nil:
+				return
+			default:
+				log.Warn("heartbeat failed; will retry", "error", err)
+			}
+		}
+	}()
+
+	return func() {
+		stopBeats()
+		<-finished
+	}
+}
+
+// heartbeatInterval is how often the claim is refreshed. Left unset it is a
+// third of StaleAfter, capped at a minute: frequent enough that several beats
+// fit inside the deadline, and rare enough that the update is invisible.
+func (w *Worker) heartbeatInterval() time.Duration {
+	const ceiling = time.Minute
+	if w.HeartbeatInterval > 0 {
+		return w.HeartbeatInterval
+	}
+	if w.StaleAfter > 0 {
+		return min(max(w.StaleAfter/3, time.Millisecond), ceiling)
+	}
+	return ceiling
 }
 
 // enqueueContinuation keeps a bench converging without operator attention.
@@ -934,14 +1080,20 @@ func (w *Worker) requeueStale(ctx context.Context, log *slog.Logger) {
 	if stale <= 0 {
 		return
 	}
-	n, err := w.Store.RequeueStaleRuns(ctx, stale)
+	requeued, err := w.Store.RequeueStaleRuns(ctx, stale)
 	if err != nil {
 		log.Error("requeue stale runs failed", "error", err)
 		return
 	}
-	if n > 0 {
-		log.Warn("requeued stale runs from dead workers", "count", n)
+	// Named one by one: a stale requeue means a claim went unrefreshed for
+	// stale_after, which is either a dead worker or a live one cut off from the
+	// database, and the previous owner is how an operator tells which.
+	for _, r := range requeued {
+		log.Warn("requeued a stale run; its worker stopped heartbeating",
+			"run", r.ID, "workspace_id", r.WorkspaceID,
+			"previous_worker", r.PreviousClaimedBy, "stale_after", stale.String())
 	}
+	w.metrics().StaleRequeued(len(requeued))
 }
 
 func (w *Worker) poll() time.Duration {

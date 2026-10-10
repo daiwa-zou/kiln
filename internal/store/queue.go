@@ -197,11 +197,21 @@ func (s *WikiStore) LastSuccessfulRef(ctx context.Context, workspaceID string) (
 // FailRun finishes a claimed run that never reached the pipeline -- a sync or
 // configuration error. Errors inside the pipeline are recorded by RecordRun
 // with per-item detail instead.
-func (s *WikiStore) FailRun(ctx context.Context, runID, message string) error {
-	if _, err := s.pool.Exec(ctx, `
-		UPDATE runs SET status = 'failed', error = $2, finished_at = now()
-		WHERE id = $1`, runID, message); err != nil {
+//
+// Fenced to the claiming worker: without that, a worker whose claim went stale
+// would fail a run that another worker is, at that moment, building. The fence
+// is claimed_by alone, not status, because the pipeline may already have
+// finished the row as failed with item detail, and restating the cause on top
+// of it is not a lost claim. ErrClaimLost means no row matched.
+func (s *WikiStore) FailRun(ctx context.Context, runID, workerID, message string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runs SET status = 'failed', error = $3, finished_at = now()
+		WHERE id = $1 AND claimed_by = $2`, runID, workerID, message)
+	if err != nil {
 		return fmt.Errorf("store: fail run: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClaimLost
 	}
 	return nil
 }
@@ -209,12 +219,44 @@ func (s *WikiStore) FailRun(ctx context.Context, runID, message string) error {
 // RequeueRun returns one claimed run to the queue, for a worker draining at
 // shutdown: interrupted is not failed, and the pipeline is idempotent from
 // the start.
-func (s *WikiStore) RequeueRun(ctx context.Context, runID string) error {
-	if _, err := s.pool.Exec(ctx, `
+//
+// Fenced to the claiming worker and to status 'running'. A draining worker
+// whose run was meanwhile requeued and claimed elsewhere must not drag that
+// other worker's live claim back to the queue, and a run that already finished
+// stays finished. ErrClaimLost means no row matched.
+func (s *WikiStore) RequeueRun(ctx context.Context, runID, workerID string) error {
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE runs
 		SET status = 'queued', claimed_by = NULL, claimed_at = NULL, started_at = NULL, error = NULL
-		WHERE id = $1 AND status = 'running'`, runID); err != nil {
+		WHERE id = $1 AND claimed_by = $2 AND status = 'running'`, runID, workerID)
+	if err != nil {
 		return fmt.Errorf("store: requeue run: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClaimLost
+	}
+	return nil
+}
+
+// HeartbeatRun refreshes the liveness of a run this worker has claimed.
+//
+// claimed_at doubles as the heartbeat rather than a new column. The stale sweep
+// already reads it, so every worker in a mixed-version rolling deploy agrees on
+// what "alive" means; a separate heartbeat_at would leave an old worker's sweep
+// requeueing a new worker's healthy run for the length of the rollout. The
+// claim's start is still recoverable from started_at.
+//
+// ErrClaimLost means the run is no longer this worker's, which is the signal to
+// stop spending on it.
+func (s *WikiStore) HeartbeatRun(ctx context.Context, runID, workerID string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runs SET claimed_at = now()
+		WHERE id = $1 AND claimed_by = $2 AND status = 'running'`, runID, workerID)
+	if err != nil {
+		return fmt.Errorf("store: heartbeat run: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClaimLost
 	}
 	return nil
 }
@@ -272,18 +314,49 @@ func (s *WikiStore) Sweep(ctx context.Context, softDeleteRetention, runRetention
 	return total, nil
 }
 
-// RequeueStaleRuns returns runs claimed longer ago than the deadline to the
-// queue. A worker that died mid-build leaves a 'running' row that would
-// otherwise block its workspace forever via the active-run index; the pipeline
-// is idempotent from the start, so re-running a half-finished build is safe.
-func (s *WikiStore) RequeueStaleRuns(ctx context.Context, olderThan time.Duration) (int, error) {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE runs
+// StaleRun is a run the stale sweep returned to the queue.
+type StaleRun struct {
+	ID          string
+	WorkspaceID string
+	// PreviousClaimedBy is the worker whose claim lapsed, so an operator can
+	// tell a dead pod from a live one that stopped heartbeating.
+	PreviousClaimedBy string
+}
+
+// RequeueStaleRuns returns runs whose claim has not been refreshed within the
+// deadline to the queue, and says which. A worker that died mid-build leaves a
+// 'running' row that would otherwise block its workspace forever via the
+// active-run index; the pipeline is idempotent from the start, so re-running a
+// half-finished build is safe.
+//
+// A live worker keeps claimed_at fresh with HeartbeatRun, so only a run whose
+// worker has stopped is swept. Rows are locked with SKIP LOCKED: one being
+// heartbeat at this instant is alive by definition and is left alone rather
+// than waited on.
+func (s *WikiStore) RequeueStaleRuns(ctx context.Context, olderThan time.Duration) ([]StaleRun, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH stale AS (
+		    SELECT id, claimed_by FROM runs
+		    WHERE status = 'running' AND claimed_at < now() - make_interval(secs => $1)
+		    FOR UPDATE SKIP LOCKED)
+		UPDATE runs r
 		SET status = 'queued', claimed_by = NULL, claimed_at = NULL, started_at = NULL
-		WHERE status = 'running' AND claimed_at < now() - make_interval(secs => $1)`,
+		FROM stale
+		WHERE r.id = stale.id
+		RETURNING r.id, r.workspace_id, coalesce(stale.claimed_by, '')`,
 		olderThan.Seconds())
 	if err != nil {
-		return 0, fmt.Errorf("store: requeue stale runs: %w", err)
+		return nil, fmt.Errorf("store: requeue stale runs: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	defer rows.Close()
+
+	var out []StaleRun
+	for rows.Next() {
+		var r StaleRun
+		if err := rows.Scan(&r.ID, &r.WorkspaceID, &r.PreviousClaimedBy); err != nil {
+			return nil, fmt.Errorf("store: scan stale run: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

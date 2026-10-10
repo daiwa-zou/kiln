@@ -137,7 +137,7 @@ func bindEnv(v *viper.Viper) error {
 		"agent.fake_cost_usd", "agent.fake_fail_units", "agent.fake_latency",
 		"auth.mode",
 		"worker.poll_interval", "worker.stale_after", "worker.permitted_source_roots",
-		"worker.source_poll_interval", "worker.drain_grace",
+		"worker.source_poll_interval", "worker.drain_grace", "worker.heartbeat_interval",
 		"github.client_id", "github.app_id", "github.app_slug",
 		"github.base_url", "github.api_base_url", "github.session_ttl",
 		"github.webhook_cooldown",

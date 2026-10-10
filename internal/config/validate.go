@@ -143,6 +143,19 @@ func (c *Config) Validate() error {
 			"worker: stale_after (%s) must exceed agent.timeout (%s), or an in-flight run would be requeued mid-build",
 			c.Worker.StaleAfter, c.Agent.Timeout))
 	}
+	if c.Worker.HeartbeatInterval < 0 {
+		problems = append(problems, "worker: heartbeat_interval cannot be negative")
+	}
+	// A heartbeat is what keeps a healthy long build from looking dead, so the
+	// deadline has to survive a missed beat or two (a slow query, a brief
+	// network partition) before another worker takes the run and builds it a
+	// second time. Three intervals is two misses of slack.
+	if c.Worker.StaleAfter != 0 && c.Worker.HeartbeatInterval > 0 &&
+		c.Worker.StaleAfter < 3*c.Worker.HeartbeatInterval {
+		problems = append(problems, fmt.Sprintf(
+			"worker: stale_after (%s) must be at least three times heartbeat_interval (%s), or one missed heartbeat would let a second worker claim a live run",
+			c.Worker.StaleAfter, c.Worker.HeartbeatInterval))
+	}
 
 	switch c.Auth.Mode {
 	case AuthToken, AuthNone:

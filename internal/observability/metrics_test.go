@@ -92,6 +92,19 @@ func TestRunMetrics(t *testing.T) {
 	}
 }
 
+func TestStaleRequeuedCountsRunsNotSweeps(t *testing.T) {
+	m := NewMetrics()
+	m.StaleRequeued(0) // a sweep that found nothing is not an event
+	m.StaleRequeued(2)
+	m.StaleRequeued(1)
+	if got := testutil.ToFloat64(m.staleRuns); got != 3 {
+		t.Errorf("stale requeued = %v, want 3 runs", got)
+	}
+	if !strings.Contains(scrape(t, m), "kiln_runs_stale_requeued_total 3") {
+		t.Error("stale requeue counter not exposed")
+	}
+}
+
 func TestQueueDepthZeroesStaleStatuses(t *testing.T) {
 	m := NewMetrics()
 	m.SetQueueDepth(map[string]int{"queued": 7, "running": 2})
