@@ -853,6 +853,15 @@ const runRow = (r, activeUnits) => `
 // headers are gone -- the gutter says when, on every row.
 function renderRunsHTML(runs, activeUnits) {
   if (!runs.length) {
+    // Pages with no runs were written outside the queue -- "No runs yet" beside
+    // them would read as the wiki not existing. Say where they came from.
+    const n = state.pages.length, written = lastWritten();
+    if (n) {
+      return `<div class="empty">Nothing has run through the queue yet. Your ${n}
+        page${n === 1 ? " was" : "s were"} ${written ? `last written ${timeTag(written)},` : "written"}
+        outside it (for example by <span class="mono">kiln build</span> from the CLI).
+        Press Ingest now to queue a build.</div>`;
+    }
     return `<div class="empty">No runs yet. Press Ingest now, or build from the
       CLI with <span class="mono">kiln build</span>.</div>`;
   }
@@ -1131,7 +1140,7 @@ async function showSources() {
           canAdmin ? `${liveSources} enabled` : "needs an owner to see")}
         ${stat("Documents", String(files.length), files.length ? "uploaded to this bench" : "none uploaded yet")}
         ${stat("Spend", `$${spend.toFixed(2)}`,
-          runs.length ? `across the last ${runs.length} run${runs.length === 1 ? "" : "s"}` : "no runs yet")}
+          runs.length ? `across the last ${runs.length} run${runs.length === 1 ? "" : "s"}` : "no queued runs")}
       </div>
 
       <div id="connector-note" class="hint" role="status"></div>

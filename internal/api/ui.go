@@ -61,8 +61,8 @@ type uiAsset struct {
 // request every reader's browser makes on render, to a host and with a query
 // string the author chose -- a zero-click way to carry data out of the wiki.
 // Nothing in the UI needs a foreign image: figures recovered from documents
-// are served from /api/v1/ (same origin), the avatar is initials drawn in CSS,
-// and the favicon is a data: URI. The renderer turns off-origin markdown
+// are served from /api/v1/ (same origin), the avatar is initials or an inline
+// SVG glyph, and the favicon is a data: URI. The renderer turns off-origin markdown
 // images into links; this is the backstop if it ever stops doing so.
 const uiCSP = "default-src 'none'; script-src 'self'; style-src 'self'; " +
 	"img-src 'self' data:; connect-src 'self'; " +

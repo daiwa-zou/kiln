@@ -6,6 +6,12 @@ const state = {
   // popover, and -- through the ordered list of distinct refs below -- how far
   // behind its sources each page has fallen.
   runs: [], runUnits: [], refs: [],
+  // pagesLoaded is false while a bench's pages are still on their way: until
+  // then an empty run feed cannot be told apart from a bench built outside the
+  // queue, so the pill says nothing. runsUnavailable is a feed that cannot be
+  // read -- a read-only deployment has no run routes -- where the pill has
+  // nothing true to say. runsFor is the bench state.runs was read for.
+  pagesLoaded: false, runsUnavailable: false, runsFor: null,
 };
 
 const TOKEN_KEY = "kiln.token";
@@ -74,6 +80,9 @@ const REDUCED = matchMedia("(prefers-reduced-motion: reduce)");
 // The width below which Reviews shows the list or the detail, never both.
 // Mirrors the 860px breakpoint in style.css.
 const NARROW = matchMedia("(max-width: 860px)");
+// The phone breakpoint (760px in style.css), where the run pill has room for a
+// few words and takes a shorter label.
+const PHONE = matchMedia("(max-width: 760px)");
 const scrollBehavior = () => (REDUCED.matches ? "auto" : "smooth");
 
 // localStorage that survives private-mode Safari, where setItem throws.
@@ -89,6 +98,37 @@ const lsSet = (key, val) => {
 
 // byTitle is THE page ordering: the tree and the prev/next pager must agree.
 const byTitle = (a, b) => (a.title || a.slug).localeCompare(b.title || b.slug);
+
+// titleOf names a page by its title, which is what a reader knows it as; the
+// slug is plumbing. The map is rebuilt only when state.pages is replaced, so a
+// page full of wikilinks costs one pass over the corpus, not one per link.
+let titleMap = new Map(), titleMapFor = null;
+function titleOf(slug) {
+  if (titleMapFor !== state.pages) {
+    titleMap = new Map(state.pages.map((p) => [p.slug, p.title]));
+    titleMapFor = state.pages;
+  }
+  return titleMap.get(slug) || "";
+}
+
+// lastWritten is when this bench's pages were last written: the newest of
+// their frontmatter dates, which is a day rather than a moment, or null when
+// no page carries one. Only the date is kept: frontmatter is model-written,
+// and whatever trails a date there is not something the pill should repeat.
+function lastWritten() {
+  let max = null;
+  for (const p of state.pages) {
+    const d = typeof p.updated === "string" ? p.updated.slice(0, 10) : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || isNaN(new Date(`${d}T00:00:00`))) continue;
+    if (!max || d > max) max = d;
+  }
+  return max;
+}
+
+// pagesNoRuns is a bench whose pages were written outside the queue -- by
+// `kiln build` from the CLI, say -- so it has a wiki and no run history.
+// "No builds yet" beside pages written months ago would be false.
+const pagesNoRuns = () => state.pages.length > 0 && !state.runs.length;
 
 // ---- freshness --------------------------------------------------------------
 // A page records the source revision it was written from (built_at_ref, on the
@@ -488,7 +528,11 @@ const api = async (path, opts = {}) => {
       const j = await res.json();
       if (j.error) msg = j.error;
     } catch { /* not JSON; keep the status line */ }
-    throw new Error(msg);
+    // The status rides along so a caller can tell "not there" from "could
+    // not ask": a missing page offers a way on, a failed fetch offers Reload.
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
 
   const data = await res.json();
@@ -581,8 +625,20 @@ function externalImageHTML(alt, url) {
 // A very small markdown subset: enough to read a generated page without
 // shipping a parser. Everything is escaped first, so page content is data.
 // headingOffset shifts markdown headings: 0 for artifacts (whose # is the
-// page title), 1 for pages (whose <h1> is rendered by the chrome).
-function renderMarkdown(src, headingOffset = 1) {
+// page title), 1 for pages (whose <h1> is rendered by the chrome). cites
+// collects the files the body cites, for the reader's Sources list; a caller
+// with no list to fill gets a private one, so markers still number from 1.
+function renderMarkdown(src, headingOffset = 1, cites = newCites()) {
+  const outer = citeSink;
+  citeSink = cites;
+  try {
+    return markdownHTML(src, headingOffset);
+  } finally {
+    citeSink = outer;
+  }
+}
+
+function markdownHTML(src, headingOffset) {
   // Artifacts arrive with their frontmatter fence intact; metadata is chrome
   // here, not prose, and the --- fences would otherwise render as rules.
   src = src.replace(/^﻿?\s*---\n[\s\S]*?\n---\n/, "");
@@ -630,7 +686,10 @@ function renderMarkdown(src, headingOffset = 1) {
     if (heading) {
       flushPara(); closeList();
       const level = Math.min(heading[1].length + headingOffset, 6);
-      html += `<h${level}>${inline(heading[2])}</h${level}>`;
+      // No marker in a heading: the contents list is built from its text, and
+      // a stray digit there would read as part of the title. The file still
+      // counts as cited.
+      html += `<h${level}>${inline(heading[2], false)}</h${level}>`;
       continue;
     }
     if (/^\s*(---+|\*\*\*+)\s*$/.test(raw)) { flushPara(); closeList(); html += "<hr>"; continue; }
@@ -695,17 +754,343 @@ function autoHeadingOffset(src) {
   return min === 7 ? 1 : 2 - min;
 }
 
-// inline runs the span-level transforms on non-code text only: code spans are
-// carved out first so `**ptr` stays literal and paths in backticks are never
-// linkified -- paths and shas are load-bearing here.
-function inline(text) {
-  return text.split(/(`[^`]+`)/).map((seg) => {
-    if (seg.startsWith("`") && seg.endsWith("`") && seg.length > 1) {
-      return `<code>${seg.slice(1, -1)}</code>`;
+// ---- citations ----------------------------------------------------------------
+// Generated pages cite their sources inline, in several dialects: backticked
+// (`File Name.md:236-239`), bare (File Name.md:356-363), quoted
+// ("Name.md":734-761), with line lists (:39, 82-113), and grouped with
+// path-less refs that inherit the file before them (`x.md:12-16`, `:25-29`).
+// Rendered as written, several to a paragraph, they read as plumbing. The
+// reader draws each as a numbered superscript marker and lists the files under
+// Provenance.
+//
+// The pass tokenises rather than substitutes: findCites returns the spans that
+// are citation groups, inline() renders the text between them exactly as
+// before, and the marker markup is built from parsed fields. Nothing in-band
+// marks where a marker goes, so there is no placeholder a page could forge,
+// and no marker ever passes through the link or emphasis transforms. A group
+// is all refs or it is left alone: "(a.md:3; see [[read-ai]])" is prose.
+
+// CITE_SPAN bounds a group. It is also what keeps the scan linear: each "("
+// looks at most this far ahead, so hostile input cannot make it quadratic.
+const CITE_SPAN = 300;
+// A cited path names a file: it ends in an extension. "(ratio 3:1)" does not.
+const CITE_EXT = /\.[a-z][a-z0-9]{0,7}$/i;
+
+// citeLeadIn says whether a would-be path opens with prose: "(see Report.md:3)",
+// "(per the Q3 deck.pptx:4)", "(Source: report.md:3)", "(Fig. 2.b:3)". Such a
+// group is a sentence that mentions a file, and turning it into a marker would
+// file "see Report.md" as a source. Lowercase words only, for the plain ones --
+// file names are written capitalised far more often than prose is -- while a
+// label ending in a colon, or a reference abbreviation, is prose in any case.
+const CITE_LEAD_WORDS = new Set(["see", "per", "in", "from", "via", "also", "and", "or",
+  "compare", "citing", "quoting", "source", "sources", "the", "a", "an", "at", "on",
+  "page", "table", "figure", "chapter", "section"]);
+const CITE_LEAD_ABBR = /^(?:cf|e\.g|i\.e|fig|figs|p|pp|ch|sec|vol|no|eq|esp|viz)\.,?$/i;
+function citeLeadIn(path) {
+  const first = path.split(" ", 1)[0];
+  if (first === path) return false; // a single word is the file name itself
+  return CITE_LEAD_WORDS.has(first) || /:$/.test(first) || CITE_LEAD_ABBR.test(first);
+}
+
+let citeSink = null;
+const newCites = () => ({ files: [], byKey: new Map(), next: 1 });
+
+// citeKey is the identity of a cited file: its whole path, normalised. Two
+// files that share a basename in different folders are two sources.
+const citeKey = (path) => path.replace(/\s+/g, " ").trim().replace(/^\.\//, "").toLowerCase();
+
+// noteCite records a citation. Numbers go to files in the order a marker first
+// names them; a file cited only where no marker is drawn (a heading, the deck)
+// is listed without one.
+function noteCite(cites, path, ranges, numbered) {
+  const key = citeKey(path);
+  let f = cites.byKey.get(key);
+  if (!f) {
+    // ranges keeps first-seen order for display; seen makes the duplicate
+    // check constant-time, so a page citing one file thousands of times
+    // stays linear.
+    f = { key, path, ranges: [], seen: new Set(), num: 0 };
+    cites.byKey.set(key, f);
+    cites.files.push(f);
+  }
+  for (const r of ranges) {
+    if (!f.seen.has(r)) { f.seen.add(r); f.ranges.push(r); }
+  }
+  if (numbered && !f.num) f.num = cites.next++;
+  return f;
+}
+
+// parseCites reads the inside of one parenthesised group, as raw text, into
+// refs -- [{path, ranges}] -- or answers null if anything in it is not a ref.
+// A hand-rolled scanner rather than one regex: the grammar has a comma that
+// either continues a line list or starts the next file, and only what follows
+// it can tell which.
+function parseCites(inner) {
+  const n = inner.length;
+  const refs = [];
+  let i = 0, path = "";
+  const isDigit = (c) => c >= "0" && c <= "9";
+  const skipWS = () => { while (i < n && /\s/.test(inner[i])) i++; };
+  const digits = () => {
+    const s = i;
+    while (i < n && isDigit(inner[i])) i++;
+    return inner.slice(s, i);
+  };
+  // A range is N or N-M, written with a hyphen or an en dash; it is shown with
+  // the dash, so "1-8" and "1–8" read the same.
+  const range = () => {
+    const a = digits();
+    if (!a) return "";
+    const save = i;
+    skipWS();
+    if (inner[i] === "-" || inner[i] === "–") {
+      i++;
+      skipWS();
+      const b = digits();
+      if (b) return `${a}–${b}`;
     }
-    return inlineText(seg);
+    i = save;
+    return a;
+  };
+  for (;;) {
+    skipWS();
+    const tick = inner[i] === "`";
+    if (tick) i++;
+    let p = null;
+    // "Name.md":12 quotes the path and leaves the lines outside.
+    if (inner[i] === '"') {
+      let q = inner.indexOf('"', i + 1);
+      while (q !== -1 && !(inner[q + 1] === ":" && isDigit(inner[q + 2]))) q = inner.indexOf('"', q + 1);
+      if (q !== -1) { p = inner.slice(i + 1, q); i = q + 1; }
+    }
+    if (p === null) {
+      const s = i;
+      while (i < n && inner[i] !== "`" && !(inner[i] === ":" && isDigit(inner[i + 1]))) i++;
+      p = inner.slice(s, i);
+    }
+    if (inner[i] !== ":") return null;
+    i++;
+    p = p.replace(/\s+/g, " ").trim();
+    if (p) {
+      // A URL with a port ("host.com:8080") is not a file.
+      if (!CITE_EXT.test(p) || p.includes("://") || /[[\]]/.test(p) || citeLeadIn(p)) return null;
+      path = p;
+    } else if (!path) {
+      return null; // a path-less ref needs a file before it to inherit
+    }
+    const first = range();
+    if (!first) return null;
+    const ranges = [first];
+    // ", 82-113" continues the line list only if a separator or the end comes
+    // next; ", b.md:3" is the next ref.
+    for (;;) {
+      const save = i;
+      skipWS();
+      if (inner[i] !== ",") { i = save; break; }
+      i++;
+      skipWS();
+      const r = range();
+      const after = i;
+      skipWS();
+      if (r && (i === n || inner[i] === "," || inner[i] === ";" || inner[i] === "`")) {
+        ranges.push(r);
+        i = after;
+        continue;
+      }
+      i = save;
+      break;
+    }
+    skipWS();
+    if (tick) {
+      if (inner[i] !== "`") return null;
+      i++;
+      skipWS();
+    }
+    refs.push({ path, ranges });
+    if (i >= n) return refs;
+    if (inner[i] !== "," && inner[i] !== ";") return null;
+    i++;
+  }
+}
+
+// insideLink says whether the group at [open, close) sits in a link's text, a
+// link's URL, an image's alt or a wikilink's alias. Those stay plain text: a
+// marker there would nest a button inside a link, and an alt attribute cannot
+// hold markup at all. Bounded scans both ways, like the rest of the pass.
+function insideLink(text, open, close) {
+  // In a URL: walking back over URL characters reaches the "](" that opened it.
+  for (let i = open - 1, stop = Math.max(0, open - CITE_SPAN); i > stop; i--) {
+    const c = text[i];
+    if (c === ")" || /\s/.test(c)) break;
+    if (c === "(" && text[i - 1] === "]") return true;
+  }
+  // In brackets: an unclosed "[" before, and a "]" after with no "[" between.
+  for (let i = open - 1, stop = Math.max(0, open - CITE_SPAN); i >= stop; i--) {
+    if (text[i] === "]") return false;
+    if (text[i] === "[") {
+      for (let j = close, end = Math.min(text.length, close + CITE_SPAN); j < end; j++) {
+        if (text[j] === "[") return false;
+        if (text[j] === "]") return true;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
+// findCites lists the citation groups in text as {start, end, refs}, start at
+// the "(" and end past the ")". decode turns a group's text back into what was
+// written: inline() sees entity-escaped source and passes unesc.
+//
+// One pass, left to right, with every indexOf result reused until the scan
+// moves past it, so the whole thing is linear in the input. A group inside a
+// code span (an odd number of backticks before it) is code, not a citation.
+function findCites(text, decode = (s) => s) {
+  const out = [];
+  let ticks = 0, counted = 0;
+  let open = text.indexOf("("), close = -1, nextOpen = -1;
+  while (open !== -1) {
+    if (close <= open) close = text.indexOf(")", open + 1);
+    if (close === -1) break;
+    if (nextOpen <= open) nextOpen = text.indexOf("(", open + 1);
+    // Only the innermost parentheses can be a group.
+    if (nextOpen !== -1 && nextOpen < close) { open = nextOpen; continue; }
+    for (; counted < open; counted++) if (text[counted] === "`") ticks++;
+    if (close - open <= CITE_SPAN && ticks % 2 === 0 && !insideLink(text, open, close)) {
+      const refs = parseCites(decode(text.slice(open + 1, close)));
+      if (refs) out.push({ start: open, end: close + 1, refs });
+    }
+    open = nextOpen;
+  }
+  return out;
+}
+
+// citeMarkers records one group and draws its markers: one per file, so a
+// group citing two places in the same file is one marker. The marker is a
+// button, not a link -- a hash link would route -- and its accessible name is
+// short; the path is in the card it opens.
+function citeMarkers(refs, markers) {
+  const sink = citeSink || newCites();
+  const perFile = new Map();
+  for (const r of refs) {
+    const f = noteCite(sink, r.path, r.ranges, markers);
+    if (!perFile.has(f)) perFile.set(f, new Set());
+    for (const x of r.ranges) perFile.get(f).add(x);
+  }
+  if (!markers) return "";
+  return [...perFile].map(([f, set]) => {
+    const ranges = [...set];
+    const one = ranges.length === 1 && !ranges[0].includes("–");
+    const spoken = ranges.map((x) => x.split("–").join(" to ")).join(", ");
+    return `<sup class="cite"><button type="button" class="cite-btn" data-src="${esc(f.path)}"`
+      + ` data-lines="${esc(ranges.join(", "))}"`
+      + ` aria-label="Source ${f.num}, line${one ? "" : "s"} ${esc(spoken)}">${f.num}</button></sup>`;
   }).join("");
 }
+
+// inline renders one block's text. Citation groups are cut out first and drawn
+// as markers (markers=false drops them, still counting the file as cited); the
+// space before a group goes with it, so "a claim (x.md:1)." reads "a claim¹.".
+function inline(text, markers = true) {
+  const groups = findCites(text, unesc);
+  if (!groups.length) return inlineSpans(text, markers);
+  const piece = emphasisPieces(text, groups);
+  let html = "";
+  groups.forEach((c, k) => {
+    html += inlineSpans(piece(k).trimEnd(), markers) + citeMarkers(c.refs, markers);
+  });
+  return html + inlineSpans(piece(groups.length), markers);
+}
+
+// emphasisPieces returns piece(k): the text before group k (or after the last
+// group), with any emphasis that spans a group closed before it and reopened
+// after it. Cutting "**Revenue grew 20% (r.md:3).**" at the group would leave
+// each half an unpaired "**" that renders as literal asterisks; instead the
+// halves read "**Revenue grew 20%**" and "**.**", and the marker sits between
+// them. Only delimiter characters move -- nothing is inserted that a page could
+// also write -- and the spans are found the way inlineSpans would find them:
+// outside code spans, which are blanked to keep the offsets.
+const EMPHASIS = [
+  [/\*\*([^*]+)\*\*/g, "**", 0],
+  [/~~([^~]+)~~/g, "~~", 0],
+  [/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, "*", 1], // group 1 is the char before
+];
+function emphasisPieces(text, groups) {
+  const masked = text.replace(/`[^`]+`/g, (m) => " ".repeat(m.length));
+  // before(p) counts the groups that end at or before p: the index of the
+  // piece holding p. Binary search, so the work stays near-linear however
+  // many groups and spans a block holds.
+  const before = (p) => {
+    let lo = 0, hi = groups.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (groups[mid].end <= p) lo = mid + 1; else hi = mid; }
+    return lo;
+  };
+  const spans = [];
+  for (const [re, d, lead] of EMPHASIS) {
+    for (const m of masked.matchAll(re)) {
+      const a = m.index + (lead ? m[1].length : 0), b = m.index + m[0].length, L = d.length;
+      const k = before(a + L - 1); // first group that could lie inside
+      if (k < groups.length && groups[k].start >= a + L && groups[k].end <= b - L) {
+        spans.push({ a, b, d, L, first: before(a), last: before(b - 1) });
+      }
+    }
+  }
+  spans.sort((x, y) => x.a - y.a || y.b - x.b); // outer spans first
+  // Each piece sees only the spans that reach into it.
+  const reach = Array.from({ length: groups.length + 1 }, () => []);
+  for (const sp of spans) for (let k = sp.first; k <= sp.last; k++) reach[k].push(sp);
+  const bounds = (k) => [k ? groups[k - 1].end : 0, k < groups.length ? groups[k].start : text.length];
+  return (k) => {
+    const [s, e] = bounds(k);
+    if (!reach[k].length) return text.slice(s, e);
+    const ins = new Array(e - s + 1).fill(""), drop = new Array(e - s).fill(false);
+    for (const { a, b, d, L } of reach[k]) {
+      for (let i = Math.max(a, s); i < Math.min(a + L, e); i++) drop[i - s] = true;
+      for (let i = Math.max(b - L, s); i < Math.min(b, e); i++) drop[i - s] = true;
+      // Wrap the non-blank part of this piece that lies inside the span.
+      let lo = Math.max(s, a + L), hi = Math.min(e, b - L);
+      while (lo < hi && /\s/.test(text[lo])) lo++;
+      while (hi > lo && /\s/.test(text[hi - 1])) hi--;
+      if (lo >= hi) continue;
+      ins[lo - s] += d;          // outer opens first
+      ins[hi - s] = d + ins[hi - s]; // inner closes first
+    }
+    let out = "";
+    for (let i = s; i < e; i++) out += ins[i - s] + (drop[i - s] ? "" : text[i]);
+    return out + ins[e - s];
+  };
+}
+
+// inlineSpans runs the span-level transforms on non-code text only: code spans
+// are carved out first so `**ptr` stays literal and paths in backticks are
+// never linkified -- paths and shas are load-bearing here.
+//
+// A code span that is nothing but a citation -- "Evidence `Notes.md:27-34` --
+// ..." with no parentheses, which list items write constantly -- is one, and
+// gets a marker like a parenthesised group (the space before it goes too). It
+// must parse whole under the same rules: `foo.md` alone, `x:1` or
+// `main.go:42 extra` stay code.
+function inlineSpans(text, markers = true) {
+  const out = [];
+  for (const seg of text.split(/(`[^`]+`)/)) {
+    if (seg.startsWith("`") && seg.endsWith("`") && seg.length > 1) {
+      const body = seg.slice(1, -1);
+      const refs = body.length <= CITE_SPAN ? parseCites(unesc(body)) : null;
+      if (refs) {
+        if (out.length) out[out.length - 1] = out[out.length - 1].trimEnd();
+        out.push(citeMarkers(refs, markers));
+      } else {
+        out.push(`<code>${body}</code>`);
+      }
+      continue;
+    }
+    out.push(inlineText(seg));
+  }
+  return out.join("");
+}
+
+// wikiSlug is the slug a [[target]] names: its last path segment, less ".md".
+const wikiSlug = (target) => target.split("/").pop().replace(/\.md$/, "");
 
 function inlineText(text) {
   return text
@@ -729,8 +1114,10 @@ function inlineText(text) {
       // The captured target is entity-encoded (the whole source was escaped
       // first); decode before comparing with real slugs or any page whose
       // name contains & or an apostrophe renders as a false dead link.
-      const slug = unesc(target.split("/").pop().replace(/\.md$/, ""));
-      const label = alias || esc(slug);
+      const slug = unesc(wikiSlug(target));
+      // An unaliased link reads as its target's title; a dead one has no
+      // title to show, so it keeps the slug it asked for.
+      const label = alias || esc(state.slugs.has(slug) ? titleOf(slug) || slug : slug);
       // A link to a page that does not exist is drawn as a gap rather than
       // hidden: it is the wiki saying what it wants and does not have.
       return state.slugs.has(slug)
@@ -763,7 +1150,11 @@ function rememberRecent(slug) {
 function treeLink(p, active, idx) {
   const current = p.slug === active ? ' aria-current="page"' : "";
   const label = idx ? fuzzyHi(p.title || p.slug, idx) : esc(p.title || p.slug);
-  return `<a href="#/page/${encodeURIComponent(p.slug)}"${current}>${freshDot(p)}<span>${label}</span></a>`;
+  // The rail truncates long titles; the title attribute is how a pointer reads
+  // the rest, and it names the freshness the dot only colours.
+  const f = freshnessOf(p);
+  const tip = `${p.title || p.slug}${f === FRESH_UNKNOWN ? "" : ` — ${f.word}`}`;
+  return `<a href="#/page/${encodeURIComponent(p.slug)}" title="${esc(tip)}"${current}>${freshDot(p)}<span>${label}</span></a>`;
 }
 
 function treeGroup(type, label, links, collapsed) {
@@ -894,6 +1285,7 @@ function beginView(title, view, activeSlug) {
   // Tear down the departing view's observers and timers BEFORE the token
   // moves: nothing stale may ever touch the incoming view's DOM.
   runViewCleanups();
+  hideCite(); // its marker is about to leave the DOM, by hash or by refresh
   const my = ++nav;
   setTitle(title);
   setNav(view);
@@ -1044,7 +1436,7 @@ function plainText(md) {
   return md
     .replace(/^﻿?\s*---\n[\s\S]*?\n---\n/, "")
     .replace(/```[\s\S]*?```/g, " ")
-    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, t, a) => a || t.split("/").pop().replace(/\.md$/, ""))
+    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, t, a) => a || titleOf(wikiSlug(t)) || wikiSlug(t))
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/[#>*`~_|-]+/g, " ")
     .replace(/\s+/g, " ")
@@ -1089,6 +1481,58 @@ function showPreviewFor(link) {
   }, 350);
 }
 
+// ---- citation cards ---------------------------------------------------------
+// A marker opens one shared card naming the file and the lines. Unlike the
+// wikilink preview this is not pointer-only: hover, keyboard focus and a tap
+// all open it, because on a phone a tap is the only way in. A click never
+// toggles it shut -- Enter on an open marker keeps it open -- and it closes on
+// Escape, on losing focus, on a click elsewhere, on navigation, and shortly
+// after the pointer leaves both the marker and the card. The card itself is
+// hoverable, so it can be read without it vanishing (WCAG 1.4.13).
+let citeFor = null, citeHideTimer = null;
+
+// hideCite returns whether a card was actually dismissed, so the global Escape
+// handler can consume the key press.
+function hideCite() {
+  clearTimeout(citeHideTimer);
+  citeHideTimer = null;
+  const card = $("cite-card");
+  const had = Boolean(card && !card.hidden);
+  if (card) card.hidden = true;
+  citeFor?.removeAttribute("aria-describedby");
+  citeFor = null;
+  return had;
+}
+
+function hideCiteSoon() {
+  clearTimeout(citeHideTimer);
+  citeHideTimer = setTimeout(hideCite, 150);
+}
+
+function showCite(btn) {
+  clearTimeout(citeHideTimer);
+  const card = $("cite-card");
+  if (!card || (citeFor === btn && !card.hidden)) return;
+  citeFor?.removeAttribute("aria-describedby");
+  // textContent only: the path came out of a model-written page.
+  card.textContent = "";
+  const path = document.createElement("div");
+  path.className = "cite-path";
+  path.textContent = btn.dataset.src || "";
+  const where = document.createElement("div");
+  where.className = "cite-where";
+  where.textContent = `Lines ${btn.dataset.lines || ""}`;
+  card.append(path, where);
+
+  const r = btn.getBoundingClientRect();
+  card.hidden = false;
+  const below = r.bottom + 12 + card.offsetHeight < innerHeight;
+  card.style.top = `${below ? r.bottom + 6 : Math.max(8, r.top - card.offsetHeight - 6)}px`;
+  card.style.left = `${Math.min(Math.max(12, r.left - 12), innerWidth - card.offsetWidth - 12)}px`;
+  btn.setAttribute("aria-describedby", "cite-card");
+  citeFor = btn;
+}
+
 // ---- the top bar ------------------------------------------------------------
 // Build state is the one piece of state that changes while you are somewhere
 // else in the app, so it lives in chrome that persists rather than on the
@@ -1116,6 +1560,13 @@ function renderRunPill() {
   const live = state.runs.find((r) => r.status === "running");
   const queued = state.runs.find((r) => r.status === "queued");
   $("ingest-live").hidden = !(live || queued);
+  // Nothing to say, rather than something untrue: a read-only deployment has
+  // no run routes at all, and until the pages arrive an empty feed cannot be
+  // told apart from a bench built outside the queue.
+  if (state.runsUnavailable || (!state.runs.length && !state.pagesLoaded)) {
+    pill.hidden = true;
+    return;
+  }
 
   if (live) {
     const done = live.unitsDone || 0, total = live.unitsTotal || 0;
@@ -1138,10 +1589,18 @@ function renderRunPill() {
   // schedule and a bad label for a button whose popover is about a run that
   // already happened. The schedule moved into the popover, where it sits
   // beside the run it is the sequel to.
+  //
+  // A bench with pages and no runs was written outside the queue, and says
+  // so. The accessible name always begins with the visible label, so speech
+  // input can say what it sees; the longer story is in the popover.
   const last = state.runs[0];
+  const written = lastWritten();
   const label = queued ? "Build queued"
     : last ? `Last build · ${relTime(last.created)}`
-    : "No builds yet";
+    : !pagesNoRuns() ? "No builds yet"
+    : PHONE.matches ? "Outside queue"
+    : written ? `Written ${relTime(written)} · outside the queue`
+    : "Written outside the queue";
   pill.className = `run-pill${queued ? "" : " idle"}`;
   pill.hidden = false;
   pill.title = `${label} — open build detail`;
@@ -1169,7 +1628,7 @@ function renderRunPop() {
   const next = nextBuildLine(state.runs, state.connectors || [],
     state.sourcePollIntervalSeconds || 0);
   if (!run) {
-    box.innerHTML = `<div class="empty">No builds yet.</div>
+    box.innerHTML = `<div class="empty">${pagesNoRuns() ? outsideQueueHTML() : "No builds yet."}</div>
       <div class="run-pop-next">${esc(next)}</div>
       <div class="run-pop-foot"><span></span><a href="#/ingest">Open Ingest →</a></div>`;
     return;
@@ -1226,6 +1685,17 @@ function renderRunPop() {
   if (fill) fill.style.width = `${pct}%`;
 }
 
+// outsideQueueHTML is the popover's account of a bench with pages and no runs:
+// where the pages came from and when, which the pill has no room to say.
+function outsideQueueHTML() {
+  const n = state.pages.length, written = lastWritten();
+  const pages = `This bench's ${n} page${n === 1 ? "" : "s"}`;
+  return `Nothing has run through the queue. ${written
+    ? `${pages} ${n === 1 ? "was" : "were"} last written ${timeTag(written)}, outside it`
+    : `${pages} ${n === 1 ? "was" : "were"} written outside it, and ${n === 1 ? "its date is" : "their dates are"} unknown`}
+    — for example by <span class="mono">kiln build</span> from the CLI.`;
+}
+
 function toggleRunPop() {
   if (closeRunPop()) return;
   runPopOpen = true;
@@ -1244,6 +1714,7 @@ function toggleRunPop() {
 // be watched while a build runs.
 function adoptRunFeed(runs, activeUnits) {
   state.runs = runs;
+  state.runsFor = state.workspace;
   // Newest first, deduplicated: the position of a page's ref in this list is
   // how many builds it is behind.
   state.refs = [...new Set(runs.map((r) => r.ref).filter(Boolean))];
@@ -1257,11 +1728,21 @@ async function refreshRunState() {
   try {
     const { runs, activeUnits } = await fetchRunFeed(encodeURIComponent(ws));
     if (ws !== state.workspace) return; // raced a bench switch
+    state.runsUnavailable = false;
     adoptRunFeed(runs, activeUnits);
-  } catch {
-    // The run routes are unmounted on a read-only deployment. That is not an
-    // error to paint: the pill simply has nothing to say.
-    if (ws === state.workspace) adoptRunFeed([], []);
+  } catch (err) {
+    // The run routes are unmounted on a read-only deployment, which answers
+    // 404. That is not an error to paint: the pill simply has nothing to say,
+    // and hides. Any other failure is transient and keeps the pill as it was
+    // told last, so a blip cannot make a bench claim it was never built.
+    // A failure before this bench's feed was ever read leaves nothing true to
+    // say either -- state.runs would still be the previous bench's -- so the
+    // pill hides until a read succeeds.
+    if (ws !== state.workspace) return;
+    if (err?.status === 404 || state.runsFor !== ws) {
+      state.runsUnavailable = true;
+      adoptRunFeed([], []);
+    }
   }
 }
 
@@ -1334,16 +1815,131 @@ async function pollTick() {
   }
 }
 
-// deckOf is the standfirst: one sentence saying what the page is. Pages carry
-// no summary field, so it is lifted from the prose -- the first sentence of a
-// generated page is written to be exactly this. Nothing is invented: if the
-// body opens with something too long to be a sentence, there is no deck.
-function deckOf(body) {
-  const flat = plainText(body || "");
-  const end = flat.search(/[.!?](\s|$)/);
-  if (end < 0) return "";
-  const first = flat.slice(0, end + 1).trim();
-  return first.length >= 20 && first.length <= 220 ? first : "";
+// liftDeck takes the standfirst out of the body: one sentence saying what the
+// page is. Pages carry no summary field, so it is lifted from the prose -- the
+// first sentence of a generated page is written to be exactly this -- and then
+// dropped from the body, which would otherwise repeat it a line later. Nothing
+// is invented: a page that opens with a list, a table, a quote or a sentence
+// too long to be a standfirst has no deck, and its body is left as written.
+//
+// Returns {deck, rest, cites}: the deck as plain text (the caller escapes it),
+// the body to render, and the refs the deck's own citations named.
+function liftDeck(body) {
+  const none = { deck: "", rest: body || "", cites: [] };
+  const src = String(body || "").replace(/^﻿?\s*---\n[\s\S]*?\n---\n/, "");
+  const lines = src.split("\n");
+  // Leading headings stay in the body; the deck comes from the first prose.
+  const heads = [];
+  let i = 0;
+  while (i < lines.length && (!lines[i].trim() || /^#{1,6}\s+/.test(lines[i]))) {
+    if (lines[i].trim()) heads.push(i);
+    i++;
+  }
+  if (i >= lines.length || deckBlockStart(lines[i])) return none;
+  let j = i + 1;
+  while (j < lines.length && lines[j].trim() && !deckBlockStart(lines[j])) j++;
+
+  // One space per run of whitespace, as renderMarkdown joins a paragraph: a
+  // hard wrap can fall inside a wikilink alias or a citation, and the
+  // patterns below read a paragraph, not its line breaks.
+  const para = lines.slice(i, j).join(" ").replace(/\s+/g, " ").trim();
+  const end = sentenceEnd(para);
+  if (end < 0) return none;
+  const { text, cites } = flattenDeck(para.slice(0, end));
+  if (text.length < 20 || text.length > 220) return none;
+
+  const left = para.slice(end).trim();
+  const out = [...lines.slice(0, i), ...(left ? [left] : []), ...lines.slice(j)];
+  // A heading whose only prose was the deck now introduces nothing: it is
+  // followed by a heading of its own rank or higher, or by the end.
+  if (!left) {
+    for (let k = heads.length - 1; k >= 0; k--) {
+      const h = heads[k];
+      const level = lines[h].match(/^#+/)[0].length;
+      let n = h + 1;
+      while (n < out.length && !out[n].trim()) n++;
+      const next = n < out.length ? out[n].match(/^(#{1,6})\s+/) : null;
+      if (n >= out.length || (next && next[1].length <= level)) out.splice(h, 1);
+    }
+  }
+  return { deck: text, rest: out.join("\n"), cites };
+}
+
+// deckBlockStart is a line that renderMarkdown would not set as prose: a deck
+// is never lifted out of one, and a paragraph ends at one.
+const deckBlockStart = (line) =>
+  /^#{1,6}\s+/.test(line) || /^\s*(```|>|\||[-*]\s|\d+\.\s)/.test(line)
+  || /^\s*(---+|\*\*\*+)\s*$/.test(line) || /^!\[[^\]]*\]\([^)\s]+\)$/.test(line.trim());
+
+const DECK_ABBR = /[\s(](?:e\.g|i\.e|etc|vs|cf|al|Dr|Mr|Mrs|Ms|Jr|Sr|St|Inc|Ltd|Co|No|Fig|U\.S|U\.K)$/;
+
+// sentenceEnd finds where the paragraph's first sentence ends, or -1. A full
+// stop counts only outside citations, code, links and wikilinks (".md" is not
+// the end of anything), not after a common abbreviation, and not before a
+// lowercase word. A citation group right after the stop belongs to the
+// sentence it cites. A sentence too long to be a deck is not looked for.
+function sentenceEnd(para) {
+  const groups = findCites(para);
+  const guarded = groups.map((g) => [g.start, g.end]);
+  for (const re of [/`[^`\n]*`/g, /\[\[[^\]\n]{0,300}\]\]/g, /!?\[[^\]\n]{0,300}\]\([^)\s]{0,300}\)/g]) {
+    for (const m of para.matchAll(re)) guarded.push([m.index, m.index + m[0].length]);
+  }
+  // Scanned with one pointer over the spans in start order, so a paragraph of
+  // thousands of citations costs a sort, not a search per full stop.
+  guarded.sort((x, y) => x[0] - y[0]);
+  let g = 0, reach = -1; // reach: the furthest end among spans started so far
+  const limit = Math.min(para.length, 2000);
+  for (let k = 0; k < limit; k++) {
+    while (g < guarded.length && guarded[g][0] <= k) reach = Math.max(reach, guarded[g++][1]);
+    const c = para[k];
+    if (c !== "." && c !== "!" && c !== "?") continue;
+    if (k < reach) continue;
+    let e = k + 1;
+    while (e < para.length && "\"'”’*_)]".includes(para[e])) e++;
+    if (e < para.length && !/\s/.test(para[e])) continue;
+    if (c === "." && DECK_ABBR.test(k >= 9 ? para.slice(k - 9, k) : ` ${para.slice(0, k)}`)) continue;
+    let n = e;
+    while (n < para.length && /\s/.test(para[n])) n++;
+    if (n < para.length && /[a-z]/.test(para[n])) continue;
+    const next = groups.find((x) => x.start === n);
+    return next ? next.end : e;
+  }
+  return -1;
+}
+
+// flattenDeck turns the lifted sentence into plain text: citations out (their
+// refs returned, so the file still counts as cited), links and wikilinks to
+// their labels -- an unaliased wikilink to its target's title -- and emphasis
+// marks dropped. Hyphens and dashes are words here and stay.
+function flattenDeck(sentence) {
+  const cites = [];
+  let text = "", from = 0;
+  for (const g of findCites(sentence)) {
+    text += sentence.slice(from, g.start).trimEnd();
+    cites.push(...g.refs);
+    from = g.end;
+  }
+  text += sentence.slice(from);
+  text = text
+    // A code span that is wholly a citation goes the same way.
+    .replace(/\s?`([^`\n]{1,300})`/g, (m, body) => {
+      const refs = parseCites(body);
+      if (!refs) return m;
+      cites.push(...refs);
+      return "";
+    })
+    .replace(/!\[([^\]\n]{0,300})\]\([^)\s]{0,300}\)/g, (_, alt) => alt)
+    .replace(/\[\[([^\]|\n]{1,300})(?:\|([^\]\n]{1,300}))?\]\]/g, (_, t, a) => {
+      if (a) return a;
+      const slug = wikiSlug(t);
+      return state.slugs.has(slug) ? titleOf(slug) || slug : slug;
+    })
+    .replace(/\[([^\]\n]{1,300})\]\([^)\s]{0,300}\)/g, (_, label) => label)
+    .replace(/\*\*|~~|[`*]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/ ([.,;:!?])/g, (_, p) => p)
+    .trim();
+  return { text, cites };
 }
 
 async function showPage(slug) {
@@ -1363,8 +1959,12 @@ async function showPage(slug) {
     rememberRecent(p.slug);
 
     const fresh = freshnessOf(p);
-    const deck = deckOf(p.body);
-    const sources = p.sources || [];
+    const { deck, rest, cites: deckCites } = liftDeck(p.body);
+    // The body renders first so its markers number in reading order; the
+    // deck's citations are listed after, unnumbered, since it draws none.
+    const cites = newCites();
+    const bodyHTML = renderMarkdown(rest, autoHeadingOffset(rest), cites);
+    for (const r of deckCites) noteCite(cites, r.path, r.ranges, false);
 
     if (!view.done(`<div class="reader">
       <article>
@@ -1379,7 +1979,7 @@ async function showPage(slug) {
           ${(p.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join("")}
           ${p.updated ? `<span class="meta-when">written ${timeTag(p.updated)}</span>` : ""}
         </div>
-        <div class="prose">${renderMarkdown(p.body, autoHeadingOffset(p.body))}</div>
+        <div class="prose">${bodyHTML}</div>
         ${pagerFor(p)}
       </article>
       <div class="context-rail">
@@ -1387,15 +1987,7 @@ async function showPage(slug) {
           <div class="group-label">Contents</div>
           <div class="rail-rows" id="toc-rows"></div>
         </div>
-        ${p.builtAtRef || sources.length ? `<div>
-          <div class="group-label">Provenance</div>
-          <div class="prov">
-            ${p.builtAtRef ? `<div class="prov-row"><span>Written from</span><span class="mono">${esc(p.builtAtRef)}</span></div>` : ""}
-            ${sources.length ? `<div class="prov-row"><span>Sources</span><span>${sources.length} file${sources.length === 1 ? "" : "s"}</span></div>` : ""}
-            ${sources.length ? `<div class="prov-files">${sources.map((s) =>
-              `<span>${esc(s)}</span>`).join("")}</div>` : ""}
-          </div>
-        </div>` : ""}
+        ${provenancePanel(p, cites)}
         ${backlinks === null ? "" : `<div>
           <div class="group-label">Linked from · ${backlinks.length}</div>
           ${backlinks.length
@@ -1413,8 +2005,110 @@ async function showPage(slug) {
     wirePageDelete(p.slug);
   } catch (err) {
     if (err.handled || !view.current()) return;
-    view.done(`<div class="banner" role="alert">Could not load that page: ${esc(err.message)}</div>`);
+    // A page that is not there is a dead end only if the view makes it one.
+    // Anything else -- the server down, a 500 -- is a failure to ask, and
+    // Reload is the honest offer.
+    if (err.status === 404) {
+      setTitle("Page not found");
+      view.done(missingPageHTML(slug));
+      return;
+    }
+    if (view.done(banner({ message: `Could not load that page: ${err.message}` }, true))) wireBannerRetry();
   }
+}
+
+// provenancePanel lists where the page came from: the ref it was written from,
+// then every file it cites, numbered as its markers are, then any file its
+// frontmatter declares that the prose never cites. Most generated pages
+// declare nothing, so the cited files are often the whole list.
+function provenancePanel(p, cites) {
+  const declared = p.sources || [];
+  const cited = [
+    ...cites.files.filter((f) => f.num).sort((a, b) => a.num - b.num),
+    ...cites.files.filter((f) => !f.num),
+  ];
+  // A declared file is already listed when it is cited by its full path, or
+  // by its bare name when that name is unique among the declared files.
+  const byName = (s) => citeKey(s).split("/").pop();
+  const nameCount = new Map();
+  for (const s of declared) nameCount.set(byName(s), (nameCount.get(byName(s)) || 0) + 1);
+  const citedKeys = new Set(cited.map((f) => f.key));
+  const uncited = declared.filter((s) => !citedKeys.has(citeKey(s))
+    && !(nameCount.get(byName(s)) === 1 && citedKeys.has(byName(s))));
+
+  const lines = (rs) => rs.length > 4
+    ? `lines ${rs.slice(0, 4).join(", ")} +${rs.length - 4} more`
+    : `line${rs.length === 1 && !rs[0].includes("–") ? "" : "s"} ${rs.join(", ")}`;
+  const rows = [
+    ...cited.map((f) => `<li>${f.num
+      ? `<span class="cite-num"><span class="sr-only">Source </span>${f.num}</span>`
+      : `<span class="cite-num"></span>`}<span class="mono">${esc(f.path)}</span>${
+      f.ranges.length ? `<span class="cite-lines">${esc(lines(f.ranges))}</span>` : ""}</li>`),
+    ...uncited.map((s) => `<li><span class="cite-num"></span><span class="mono">${esc(s)}</span></li>`),
+  ];
+  if (!rows.length && !p.builtAtRef) return "";
+  // Past eight rows the rest fold away; a page citing thirty files would
+  // otherwise push corrections and backlinks off the bottom of the rail.
+  const shown = rows.slice(0, 8), more = rows.slice(8);
+  return `<div>
+    <div class="group-label">Provenance</div>
+    <div class="prov">
+      ${p.builtAtRef ? `<div class="prov-row"><span>Written from</span><span class="mono">${esc(p.builtAtRef)}</span></div>` : ""}
+      ${rows.length ? `<div class="prov-row"><span>Sources</span><span>${rows.length} file${rows.length === 1 ? "" : "s"}</span></div>
+        <ul class="prov-cites">${shown.join("")}</ul>` : ""}
+      ${more.length ? `<details class="prov-more"><summary>Show ${more.length} more</summary>
+        <ul class="prov-cites">${more.join("")}</ul></details>` : ""}
+    </div>
+  </div>`;
+}
+
+// missingPageHTML answers a hash naming no page with somewhere to go: a
+// search for what the slug says, the titles nearest to it, and the index. The
+// slug came from the address bar, so it is escaped wherever it lands.
+function missingPageHTML(slug) {
+  const query = slug.replace(/[-_]+/g, " ").trim() || slug;
+  const near = nearestPages(slug, 5);
+  return `<h1>Page not found</h1>
+    <div class="prose">
+      <p>Nothing in this bench is called <span class="mono">${esc(slug)}</span>. It may have
+        been renamed, deleted, or not written yet.</p>
+      <p><a href="#/search/${encodeURIComponent(query)}">Search every page for “${esc(query)}”</a>
+        · <a href="#/index">Browse the Index</a></p>
+    </div>
+    <div class="sec-head"><div class="group-label">Similar titles</div></div>
+    ${near.length
+      ? `<ul class="missing-near">${near.map((p) =>
+          `<li><a href="#/page/${encodeURIComponent(p.slug)}">${esc(p.title || p.slug)}</a></li>`).join("")}</ul>`
+      : `<div class="empty">No similar titles.</div>`}`;
+}
+
+// nearestPages ranks pages by how much of the missing slug their slug or title
+// shares: whole words first (a word counts when one is a prefix of the other,
+// so "acquisition" finds "acquisitions"), then a loose match on the title, then
+// a shared slug prefix. Anything sharing nothing is not offered.
+//
+// The slug comes from the address bar, so it is cut down before the work
+// scales with it: eighty characters and eight words are plenty to rank by.
+function nearestPages(slug, limit) {
+  slug = slug.slice(0, 80);
+  const words = (s) => String(s || "").toLowerCase().split(/[-_/.\s]+/).filter((w) => w.length > 1);
+  const want = words(slug).slice(0, 8);
+  const lower = slug.toLowerCase();
+  const scored = [];
+  for (const p of state.pages) {
+    const have = [...words(p.slug), ...words(p.title)];
+    let score = 0;
+    for (const w of want) {
+      if (have.some((h) => h.startsWith(w) || w.startsWith(h))) score += 10;
+    }
+    if (slug.length <= 64 && fuzzy(slug.replace(/[-_]+/g, " "), p.title || p.slug)) score += 3;
+    let common = 0;
+    while (common < lower.length && lower[common] === p.slug[common]) common++;
+    if (common >= 3) score += Math.min(common, 12) / 4;
+    if (score > 0) scored.push({ p, score });
+  }
+  return scored.sort((a, b) => b.score - a.score || byTitle(a.p, b.p))
+    .slice(0, limit).map((x) => x.p);
 }
 
 // correctionsPanel renders pinned corrections and the form to add one. Pages
@@ -1572,6 +2266,7 @@ async function refreshPages() {
   state.pages = await loadAllPages(state.workspace);
   state.slugs = new Set(state.pages.map((p) => p.slug));
   renderTree(lastActiveSlug);
+  renderRunPill(); // the last page gone turns "written outside the queue" into "no builds"
 }
 
 function wirePageDelete(slug) {
@@ -1815,17 +2510,26 @@ async function showIndex() {
       written by the first ingest. <a href="#/overview">Start here</a>.</div>`);
     return;
   }
+  // The freshness word is written out, not left to the dot's hover title: a
+  // touch screen has no hover, and colour alone names nothing. A page whose
+  // freshness is unknown gets no word -- every page would carry the same one.
+  const known = state.pages.some((p) => freshnessOf(p) !== FRESH_UNKNOWN);
+  const row = (p) => {
+    const f = freshnessOf(p);
+    return `<a href="#/page/${encodeURIComponent(p.slug)}">${freshDot(p)}<span>${esc(p.title || p.slug)}</span>${
+      f === FRESH_UNKNOWN ? "" : `<span class="fresh-word">${esc(f.word)}</span>`}</a>`;
+  };
   if (!view.done(`<h1>Index</h1>
-    <p class="view-deck">Every page, grouped by type. The dot is freshness — hover
-      one for the word.</p>
+    <p class="view-deck">${known
+      ? "Every page, grouped by type. Each page’s freshness — Fired, Cooling or Stale — is written beside its title."
+      : "Every page, grouped by type. Freshness shows here once a build has recorded one."}</p>
     <div class="type-cards">
       ${types.map((t) => `<div class="type-card">
         <div class="type-card-head">
           <div class="group-label">${esc(TYPE_LABELS[t] || t)}</div>
           <span class="count">${byType[t].length}</span>
         </div>
-        ${[...byType[t]].sort(byTitle).map((p) =>
-          `<a href="#/page/${encodeURIComponent(p.slug)}">${freshDot(p)}<span>${esc(p.title || p.slug)}</span></a>`).join("")}
+        ${[...byType[t]].sort(byTitle).map(row).join("")}
       </div>`).join("")}
     </div>
     ${deletedPagesSection(deleted)}`)) return;
@@ -4370,6 +5074,9 @@ async function loadWorkspace(id) {
   // A filter is about the bench that was open, not the one being opened.
   treeFilter = "";
   $("filter").value = "";
+  // Until this bench's pages arrive the pill cannot tell "never built" from
+  // "built outside the queue", so it waits rather than guessing.
+  state.pagesLoaded = false;
 
   // The run feed comes first: every freshness dot in the tree is measured
   // against the refs it publishes, so loading it after the pages would paint
@@ -4380,6 +5087,8 @@ async function loadWorkspace(id) {
   if (state.workspace !== id) return; // raced a bench switch
   state.pages = await loadAllPages(id);
   state.slugs = new Set(state.pages.map((p) => p.slug));
+  state.pagesLoaded = true;
+  renderRunPill();
   route();
   armRunPoll();
 
@@ -4640,13 +5349,27 @@ function initialsOf(name) {
   return (letters.slice(0, 2).join("") || "·").toUpperCase();
 }
 
+// PERSON_GLYPH stands in for initials when there is no name to take them from
+// -- a token, or authentication switched off -- where a bare dot read as a
+// loading indicator rather than as the account.
+const PERSON_GLYPH = `<svg class="avatar-glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a3 3 0 1 1 0 6 3 3 0 0 1 0-6zM2.6 14.2c0-2.6 2.4-4.6 5.4-4.6s5.4 2 5.4 4.6z"/></svg>`;
+
 async function showAccount() {
   const who = $("account-who");
   if (!who) return;
-  const setAvatar = (label, name) => {
+  // The button shows initials (or a person glyph) and, on desktop, a word:
+  // the login when there is one, "Account" when there is not. Its accessible
+  // name always contains that word, so what is seen is what can be said.
+  const setAvatar = (label, name, shown = "Account") => {
     const a = $("avatar");
     if (!a) return;
-    a.textContent = initialsOf(name);
+    const dot = a.querySelector(".avatar-dot"), word = a.querySelector(".avatar-label");
+    const initials = initialsOf(name);
+    if (dot) {
+      if (initials === "·") dot.innerHTML = PERSON_GLYPH;
+      else dot.textContent = initials;
+    }
+    if (word) word.textContent = shown;
     a.setAttribute("aria-label", label);
     a.title = label;
   };
@@ -4659,7 +5382,8 @@ async function showAccount() {
     }
     who.textContent = me?.login || me?.name || "Signed in";
     if (me?.name && me?.login) who.title = me.name;
-    setAvatar(`Account — ${me?.login || me?.name || "signed in"}`, me?.name || me?.login);
+    setAvatar(`Account — ${me?.login || me?.name || "signed in"}`, me?.name || me?.login,
+      me?.login || me?.name || "Account");
   } catch (err) {
     if (err?.handled) return;
     // /me is absent on a deployment without browser sign-in. What that means
@@ -4775,11 +5499,12 @@ async function boot() {
       return;
     }
     // Escape priority: palette (handled inside its own overlay) -> menus ->
-    // run popover -> hover preview -> drawer.
+    // run popover -> citation card -> hover preview -> drawer.
     if (e.key === "Escape") {
       const openMenu = document.querySelector(".footer-menu[open], #bench[open]");
       if (openMenu) { openMenu.open = false; openMenu.querySelector("summary")?.focus(); return; }
       if (closeRunPop()) { $("run-pill").focus(); return; }
+      if (hideCite()) return;
       if (hidePreview()) return;
       if (document.body.classList.contains("nav-open")) setDrawer(false);
       return;
@@ -4828,6 +5553,30 @@ async function boot() {
   }
   // Navigation always dismisses a lingering preview card or pending timer.
   window.addEventListener("hashchange", hidePreview);
+
+  // Citation markers: hover, focus and tap all open the card, on every device.
+  // A pointer leaving a marker that also holds focus leaves the card up --
+  // focus is still there, so the card stays until focus moves (WCAG 1.4.13).
+  const citeBtn = (e) => e.target.closest?.(".cite-btn");
+  $("main").addEventListener("mouseover", (e) => { const b = citeBtn(e); if (b) showCite(b); });
+  $("main").addEventListener("mouseout", (e) => {
+    const b = citeBtn(e);
+    if (b && !b.contains(e.relatedTarget) && b !== document.activeElement) hideCiteSoon();
+  });
+  $("main").addEventListener("focusin", (e) => { const b = citeBtn(e); if (b) showCite(b); });
+  $("main").addEventListener("focusout", (e) => { if (citeBtn(e)) hideCite(); });
+  $("main").addEventListener("click", (e) => { const b = citeBtn(e); if (b) showCite(b); });
+  // Pressing inside the card would otherwise move focus off its marker, and
+  // the focusout would close the card under the pointer reading it.
+  $("cite-card").addEventListener("mousedown", (e) => e.preventDefault());
+  $("cite-card").addEventListener("mouseenter", () => clearTimeout(citeHideTimer));
+  $("cite-card").addEventListener("mouseleave", () => { if (citeFor !== document.activeElement) hideCiteSoon(); });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest?.(".cite-btn, #cite-card")) hideCite();
+  });
+  window.addEventListener("hashchange", hideCite);
+  // The pill's label is shorter on a phone; crossing the breakpoint redraws it.
+  PHONE.addEventListener("change", renderRunPill);
 
   // Back-to-top after ~2 viewports; focus returns to main to keep tab order.
   const toTop = $("to-top");
