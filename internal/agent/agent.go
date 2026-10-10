@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -55,11 +56,23 @@ type Request struct {
 	// it). The API runner is stateless and ignores it; the pipeline compensates
 	// by passing the analysis plan explicitly in the generate prompt.
 	SessionID string
-	// WorkDir is the process working directory: the materialized sources. The
-	// installed CLI has no --cwd flag, so this is set on the command itself.
+	// WorkDir is the materialized sources: the tree the agent reads and must
+	// never write. It is the process working directory only when there is no
+	// ScratchDir (see CWD); otherwise the CLI is started in ScratchDir and the
+	// sources are granted read-only, with an explicit deny on edits beneath them.
 	WorkDir string
-	// ScratchDir is the only writable location, granted via --add-dir.
+	// ScratchDir is the only writable location. On the CLI runner it is also
+	// the process working directory, for analyze as well as generate so that
+	// the generate step's --resume finds the analyze session in the same
+	// project directory. The installed CLI has no --cwd flag, so the directory
+	// is set on the command itself.
 	ScratchDir string
+	// ExtraDirs are further directories the agent may read, granted via
+	// --add-dir. Under the CLI's --restricted mode the file tools reach only
+	// the working directory and these, so a step whose material spans several
+	// roots (research, across units staged in different places) names them
+	// here rather than relying on reads that wander.
+	ExtraDirs []string
 
 	Model         string
 	FallbackModel string
@@ -95,6 +108,22 @@ type Request struct {
 	MaxTokens int64
 }
 
+// CWD is the directory a file-working runner starts the agent in: the scratch
+// directory when there is one, so relative paths the agent writes land where
+// they are collected and not in the sources, and the sources otherwise.
+func (req Request) CWD() string {
+	if req.ScratchDir != "" {
+		return req.ScratchDir
+	}
+	return req.WorkDir
+}
+
+// within reports whether path is dir or lies beneath it, lexically.
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // Validate checks the request against the contract every runner shares, as
 // adjusted for what this kind of runner needs, which it states through c.
 //
@@ -126,6 +155,10 @@ func (req Request) Validate(c Capabilities) error {
 		return errors.New("agent: ScratchDir is required for the generate step")
 	case !req.Step.Valid():
 		return fmt.Errorf("agent: unknown step %q", req.Step)
+	case c.WritesFiles && req.WorkDir != "" && req.ScratchDir != "" && within(req.ScratchDir, req.WorkDir):
+		// The sources carry an edit deny, so a scratch directory beneath them
+		// would be unwritable, and a write to it would read as tampering.
+		return errors.New("agent: ScratchDir must not be inside WorkDir")
 	}
 	return nil
 }

@@ -86,7 +86,8 @@ type BuildRequest struct {
 	SyncedNamespaces []string
 
 	// SourceDir is the materialized tree the agent reads. It is never written
-	// to; validation re-checks it afterwards to prove that held.
+	// to; the CLI runner is sandboxed against it, and sourceGuard re-checks the
+	// part of it each unit uses after every agent call to prove that held.
 	SourceDir string
 	// ScratchDir is the only writable location granted to the agent.
 	ScratchDir string
@@ -624,6 +625,15 @@ func (p *Pipeline) generateUnit(
 	// Read and Grep at the repository while asking it about a PDF.
 	workDir := unitRoot(req.SourceDir, unit)
 
+	// Only a runner that writes files has an agent that could write the
+	// sources; the API runner has no tools and no checkout to guard. The
+	// snapshot is taken once, before the agent runs, and every call after is
+	// held to it. See sourceGuard for what it covers and what it costs.
+	var guard *sourceGuard
+	if scratch != "" {
+		guard = newSourceGuard(workDir, unit)
+	}
+
 	// Reserved before the call, settled after. A unit that cannot reserve its
 	// analyze call has not spent anything, so it is not a failure -- the
 	// scheduler reads the sentinel and simply stops launching work, leaving
@@ -641,7 +651,11 @@ func (p *Pipeline) generateUnit(
 
 	analyzeRes, aerr := p.Runner.Run(ctx, agent.Request{
 		Step: agent.StepAnalyze, SessionID: sessionID,
-		WorkDir: workDir, Model: p.AnalyzeModel,
+		// The same scratch directory generate gets, though analyze writes
+		// nothing: it is the CLI's working directory, and the session analyze
+		// opens is stored per working directory, so generate's --resume finds
+		// it only if both steps start in the same one.
+		WorkDir: workDir, ScratchDir: scratch, Model: p.AnalyzeModel,
 		BudgetUSD: p.Budget.AnalyzeUSD, Timeout: p.Timeout,
 		SystemPrompt: system,
 		// The rendered map is identical for every unit in the run, so it
@@ -655,6 +669,13 @@ func (p *Pipeline) generateUnit(
 	})
 	sc.ledger.settle(want, costOf(analyzeRes))
 	p.account(&res, key, analyzeRes)
+	// Before the call's own outcome: a call that failed may still have written,
+	// and the modification is the finding that matters. It also stops the unit
+	// before generation is paid for.
+	if terr := p.checkSources(guard, key, agent.StepAnalyze); terr != nil {
+		res.Err = terr
+		return res
+	}
 	if aerr != nil {
 		res.Err = aerr
 		return res
@@ -702,6 +723,12 @@ func (p *Pipeline) generateUnit(
 		})
 		sc.ledger.settle(want, costOf(genRes))
 		p.account(&res, key, genRes)
+		// Before anything is collected, so a unit that touched the sources
+		// contributes no pages at all, however valid they look.
+		if terr := p.checkSources(guard, key, agent.StepGenerate); terr != nil {
+			res.Err = terr
+			return res
+		}
 		if gerr != nil {
 			res.Err = gerr
 			return res
@@ -766,6 +793,21 @@ func (p *Pipeline) generateUnit(
 
 	res.Violations = lastViolations
 	return res
+}
+
+// checkSources looks at the unit's sources again after an agent call and
+// returns errSourcesModified if they changed. It is logged here, at error
+// level and with the paths, because a failed unit is one line in a run summary
+// and this is a security event: the sandbox was meant to make it impossible.
+func (p *Pipeline) checkSources(g *sourceGuard, key diff.Key, step agent.Step) error {
+	changes, err := g.verify()
+	if err == nil {
+		return nil
+	}
+	p.logger().Error("the agent modified the source tree; failing the unit and importing none of its pages",
+		"key", key, "step", step, "root", g.root,
+		"changed", len(changes), "paths", changes[:min(len(changes), 10)])
+	return err
 }
 
 // planFrom extracts the analysis for the generate prompt: the serialized plan,

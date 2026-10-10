@@ -150,8 +150,10 @@ func TestBuildArgsGenerate(t *testing.T) {
 		}
 	}
 
-	if got := flagVal(args, "--add-dir"); got != "/scratch" {
-		t.Errorf("--add-dir = %q, want the scratch dir", got)
+	// The scratch directory is the working directory (see TestRunStartsInTheScratchDir),
+	// so it is no longer something to grant; the sources are what --add-dir carries.
+	if got := flagVal(args, "--add-dir"); got != "/src" {
+		t.Errorf("--add-dir = %q, want the sources, read-only", got)
 	}
 	if got := flagVal(args, "--permission-mode"); got != "acceptEdits" {
 		t.Errorf("--permission-mode = %q", got)
@@ -563,4 +565,286 @@ func flagVal(args []string, name string) string {
 		}
 	}
 	return ""
+}
+
+func flagValOK(args []string, name string) (string, bool) {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+func indexOf(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// sandboxRequests has one request per step the pipeline can make, each carrying
+// everything any step reads, for the sandbox assertions below.
+func sandboxRequests() map[Step]Request {
+	reqs := map[Step]Request{}
+	for _, step := range []Step{StepAnalyze, StepGenerate, StepResearch} {
+		reqs[step] = Request{
+			Step: step, WorkDir: "/src", ScratchDir: "/scratch", SessionID: "abc",
+			ExtraDirs: []string{"/other"}, Model: "sonnet", FallbackModel: "haiku",
+			BudgetUSD: 1, SystemPrompt: "sys", Prompt: "go",
+		}
+	}
+	return reqs
+}
+
+// --restricted is what confines Read, Grep and Glob to the working directories.
+// Without it they reach /proc/<ppid>/environ, the blob store and ~/.claude, so
+// it has to be on every step: research and analyze read untrusted content just
+// as generate does.
+func TestBuildArgsEveryStepIsRestricted(t *testing.T) {
+	for step, req := range sandboxRequests() {
+		args := BuildArgs(req)
+		if !containsArg(args, "--restricted") {
+			t.Errorf("%s: --restricted missing: %v", step, args)
+		}
+		// It adds to the isolation flags; it does not replace them.
+		if v, ok := flagValOK(args, "--setting-sources"); !ok || v != "" {
+			t.Errorf("%s: --setting-sources = %q (present %v), want the empty source list", step, v, ok)
+		}
+		if !containsArg(args, "--strict-mcp-config") {
+			t.Errorf("%s: --strict-mcp-config missing", step)
+		}
+	}
+}
+
+// Analyze used to pass no --disallowedTools at all, leaning on --tools alone.
+func TestBuildArgsEveryStepCarriesTheDenyList(t *testing.T) {
+	for step, req := range sandboxRequests() {
+		args := BuildArgs(req)
+		got := strings.Split(flagVal(args, "--disallowedTools"), ",")
+		for _, want := range deniedTools {
+			if !containsArg(got, want) {
+				t.Errorf("%s: --disallowedTools = %v, missing %s", step, got, want)
+			}
+		}
+	}
+}
+
+// --add-dir (and --tools, --disallowedTools) take any number of values, so a
+// prompt that follows one of them is read as one more value and the CLI is left
+// with no prompt. Every step, with and without a session, must end in a flag
+// that takes a fixed number of values.
+func TestBuildArgsNoVariadicFlagPrecedesThePrompt(t *testing.T) {
+	variadic := map[string]bool{"--add-dir": true, "--tools": true, "--disallowedTools": true, "--allowedTools": true}
+	for step, req := range sandboxRequests() {
+		for _, withSession := range []bool{true, false} {
+			r := req
+			if !withSession {
+				r.SessionID = ""
+			}
+			args := BuildArgs(r)
+			if args[len(args)-1] != "go" {
+				t.Fatalf("%s: prompt is not last: %v", step, args)
+			}
+			last := ""
+			for _, a := range args[:len(args)-1] {
+				if strings.HasPrefix(a, "--") {
+					last = a
+				}
+			}
+			if variadic[last] {
+				t.Errorf("%s (session %v): the prompt follows %s and would be swallowed by it: %v", step, withSession, last, args)
+			}
+		}
+	}
+}
+
+// flagVals is every value a variadic flag takes: the arguments after it up to
+// the next flag.
+func flagVals(args []string, name string) []string {
+	i := indexOf(args, name)
+	if i < 0 {
+		return nil
+	}
+	var vals []string
+	for _, a := range args[i+1:] {
+		if strings.HasPrefix(a, "--") {
+			break
+		}
+		vals = append(vals, a)
+	}
+	return vals
+}
+
+// The working directory is where relative paths land and where the pages are
+// collected from, so it is the scratch directory; the sources are reachable
+// but are not it. Generate used to run with the sources as its working
+// directory, which --acceptEdits treats as writable.
+func TestRunStartsInTheScratchDir(t *testing.T) {
+	for _, step := range []Step{StepAnalyze, StepGenerate} {
+		t.Run(string(step), func(t *testing.T) {
+			sources, scratch := t.TempDir(), t.TempDir()
+			record := filepath.Join(t.TempDir(), "argv.json")
+			setScript(t, map[string]any{"record_args_to": record})
+
+			r := &ClaudeRunner{Binary: fakeClaude(t)}
+			req := Request{
+				Step: step, WorkDir: sources, ScratchDir: scratch,
+				SessionID: "s-1", Prompt: "p", Timeout: 30 * time.Second,
+			}
+			if _, err := r.Run(context.Background(), req); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			var got struct {
+				Args []string `json:"args"`
+				Cwd  string   `json:"cwd"`
+			}
+			raw, err := os.ReadFile(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+
+			wantCwd, _ := filepath.EvalSymlinks(scratch)
+			gotCwd, _ := filepath.EvalSymlinks(got.Cwd)
+			if gotCwd != wantCwd {
+				t.Errorf("cwd = %q, want the scratch dir %q", gotCwd, wantCwd)
+			}
+			if dirs := flagVals(got.Args, "--add-dir"); len(dirs) != 1 || dirs[0] != sources {
+				t.Errorf("--add-dir = %v, want only the sources %q", dirs, sources)
+			}
+		})
+	}
+}
+
+// The path-scoped half of the sandbox: generate may not edit the sources even
+// though --add-dir makes them a working directory and acceptEdits approves
+// edits in working directories.
+func TestBuildArgsGenerateCannotEditTheSources(t *testing.T) {
+	args := BuildArgs(Request{
+		Step: StepGenerate, WorkDir: "/src/my repo", ScratchDir: "/scratch/unit",
+		SessionID: "abc", Prompt: "write",
+	})
+
+	denied := flagVals(args, "--disallowedTools")
+	// "//" is the CLI's spelling of an absolute path; "/src/..." would anchor
+	// at the settings source and guard nothing.
+	const rule = "Edit(//src/my repo/**)"
+	if !containsArg(denied, rule) {
+		t.Errorf("--disallowedTools = %q, want the rule %q", denied, rule)
+	}
+	for _, d := range denied {
+		// A Write(path) rule is accepted by the CLI and never consulted.
+		if strings.HasPrefix(d, "Write(") {
+			t.Errorf("%q is a path rule on Write, which the CLI ignores; use Edit", d)
+		}
+		if strings.Contains(d, "scratch") {
+			t.Errorf("the scratch dir is denied (%q); the agent could write no pages", d)
+		}
+	}
+	// The tool-level deny list is still the first value, as one comma list.
+	if got := denied[0]; got != strings.Join(deniedTools, ",") {
+		t.Errorf("first --disallowedTools value = %q, want the tool deny list", got)
+	}
+
+	// Reading the sources needs the grant; writing the scratch dir needs none.
+	if dirs := flagVals(args, "--add-dir"); len(dirs) != 1 || dirs[0] != "/src/my repo" {
+		t.Errorf("--add-dir = %v, want only the sources", dirs)
+	}
+	if got := flagVal(args, "--permission-mode"); got != "acceptEdits" {
+		t.Errorf("--permission-mode = %q", got)
+	}
+	if args[len(args)-1] != "write" {
+		t.Errorf("the deny rules displaced the prompt: %v", args)
+	}
+}
+
+// Analyze and research have no tool that writes, so they carry no edit rule;
+// they do need the sources to be readable now that they are not the cwd.
+func TestBuildArgsAnalyzeReadsTheSourcesFromTheScratchDir(t *testing.T) {
+	args := BuildArgs(Request{
+		Step: StepAnalyze, WorkDir: "/src", ScratchDir: "/scratch/unit", SessionID: "abc", Prompt: "go",
+	})
+	if dirs := flagVals(args, "--add-dir"); len(dirs) != 1 || dirs[0] != "/src" {
+		t.Errorf("--add-dir = %v, want the sources", dirs)
+	}
+	for _, d := range flagVals(args, "--disallowedTools") {
+		if strings.HasPrefix(d, "Edit(") {
+			t.Errorf("analyze carries a path rule %q; it has no tool that edits", d)
+		}
+	}
+}
+
+// A request with no scratch directory (research) keeps the sources as its
+// working directory and so needs no grant for them.
+func TestBuildArgsWithoutScratchGrantsNothingForTheSources(t *testing.T) {
+	args := BuildArgs(Request{Step: StepResearch, WorkDir: "/src", Prompt: "q"})
+	if containsArg(args, "--add-dir") {
+		t.Errorf("--add-dir passed for the working directory itself: %v", args)
+	}
+}
+
+func TestBuildArgsKeepsTheSystemPromptCwdIndependent(t *testing.T) {
+	for step, req := range sandboxRequests() {
+		if !containsArg(BuildArgs(req), "--exclude-dynamic-system-prompt-sections") {
+			t.Errorf("%s: the working directory would be part of the system prompt, "+
+				"which differs per unit and defeats the cache", step)
+		}
+	}
+}
+
+func TestEditDenyRules(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	realResolved, _ := filepath.EvalSymlinks(real)
+
+	got := editDenyRules([]string{link})
+	want := []string{"Edit(/" + link + "/**)", "Edit(/" + realResolved + "/**)"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("rules = %q, want the path as given and as it resolves: %q", got, want)
+	}
+
+	// Pattern syntax in a directory name must not widen or break the rule.
+	odd := editDenyRules([]string{"/data/[2024] notes*/a?b"})
+	if len(odd) != 1 || odd[0] != `Edit(//data/\[2024\] notes\*/a\?b/**)` {
+		t.Errorf("rules = %q, want gitignore metacharacters escaped", odd)
+	}
+}
+
+func TestValidateRejectsAScratchDirInsideTheSources(t *testing.T) {
+	r := &ClaudeRunner{Binary: "unused"}
+	for name, scratch := range map[string]string{
+		"inside": "/src/.kiln/scratch",
+		"equal":  "/src",
+	} {
+		err := Request{Step: StepGenerate, WorkDir: "/src", ScratchDir: scratch, Prompt: "x"}.Validate(r.Capabilities())
+		if err == nil || !strings.Contains(err.Error(), "ScratchDir must not be inside WorkDir") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	// A sibling that merely shares a prefix is fine.
+	if err := (Request{Step: StepGenerate, WorkDir: "/src", ScratchDir: "/src-scratch", Prompt: "x"}).Validate(r.Capabilities()); err != nil {
+		t.Errorf("sibling directory rejected: %v", err)
+	}
+}
+
+func TestBuildArgsGrantsExtraReadDirsToResearch(t *testing.T) {
+	args := BuildArgs(Request{
+		Step: StepResearch, WorkDir: "/src", ExtraDirs: []string{"/docs", "", "/docs", "/web"}, Prompt: "q",
+	})
+	i := indexOf(args, "--add-dir")
+	if i < 0 {
+		t.Fatalf("no --add-dir: %v", args)
+	}
+	if args[i+1] != "/docs" || args[i+2] != "/web" || strings.HasPrefix(args[i+3], "/") {
+		t.Errorf("--add-dir values = %v, want /docs and /web once each", args[i:])
+	}
 }

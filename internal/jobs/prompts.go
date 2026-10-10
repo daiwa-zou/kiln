@@ -162,6 +162,12 @@ const (
 type unitSource struct {
 	text string
 	mode sourceMode
+	// root is the directory the unit's files are in, set only for a runner that
+	// starts its agent somewhere else (the CLI runner, whose working directory
+	// is the scratch directory). The prompts then say where the sources are,
+	// because the relative paths in them, and a Grep or Glob with no path,
+	// would otherwise resolve against the scratch directory.
+	root string
 }
 
 // inlineSource renders a unit's source material for a prompt that carries it.
@@ -192,6 +198,18 @@ func (u unitSource) render() string {
 	return u.text
 }
 
+// where tells the agent which directory the unit's files are in when that is not
+// its working directory. Empty otherwise, which keeps the prompt of a runner
+// that starts in the sources exactly as it was.
+func (u unitSource) where() string {
+	if u.root == "" {
+		return ""
+	}
+	return fmt.Sprintf("\nThe unit's files are in %s. Your working directory is a separate, "+
+		"empty scratch directory, so give Read, Grep and Glob absolute paths under that "+
+		"directory; the relative paths below are relative to it.\n", quoted(u.root))
+}
+
 // buildSources decides where a unit's source material travels, for each step,
 // from what the runner does with it.
 //
@@ -214,7 +232,9 @@ func buildSources(r agent.Runner, root string, unit mapper.Unit) (analyze, gener
 		cached := unitSource{text: text, mode: sourceCached}
 		return cached, cached, text
 	case agent.WritesFiles(r):
-		return unitSource{text: text, mode: sourceInline}, unitSource{text: text, mode: sourceResumed}, ""
+		dir := unitRoot(root, unit)
+		return unitSource{text: text, mode: sourceInline, root: dir},
+			unitSource{text: text, mode: sourceResumed, root: dir}, ""
 	}
 	inline := unitSource{text: text, mode: sourceInline}
 	return inline, inline, ""
@@ -239,6 +259,7 @@ func analyzePrompt(key diff.Key, unit mapper.Unit, src unitSource, s Steering) s
 	if unit.Dir != "" {
 		fmt.Fprintf(&b, "Directory: %s\n", quoted(unit.Dir))
 	}
+	b.WriteString(src.where())
 	if len(unit.Inputs) > 0 {
 		fmt.Fprintf(&b, "\nStart from these paths:\n")
 		for _, in := range unit.Inputs {
@@ -267,18 +288,27 @@ func generatePrompt(key diff.Key, unit mapper.Unit, src unitSource, outDir strin
 	b.WriteString("\n")
 	// The output directory is named, in full, rather than described. It used to
 	// read "relative to the directory granted to you", which is ambiguous in
-	// exactly the way that matters: the working directory is the sources, the
-	// grant is somewhere else entirely, and a relative path resolves against the
+	// exactly the way that matters: the working directory was the sources, the
+	// grant was somewhere else entirely, and a relative path resolved against the
 	// former. The agent obeyed and wrote a complete set of pages into the source
 	// staging directory, where nothing collects them -- the run then reported
 	// success having produced nothing, because an empty output directory is
 	// indistinguishable from a clean one.
+	//
+	// The working directory is now the output directory itself, so a relative
+	// path lands in the right place, and the sources are the read-only side.
+	// Both are still stated in full.
 	if outDir != "" {
-		fmt.Fprintf(&b, "\nWrite every page under %s, which is the only directory "+
-			"you may write to. Use paths beneath it, for example %s/entities/module-name.md "+
-			"or %s/concepts/some-idea.md. Do not write anywhere else: the working "+
-			"directory holds the sources you are documenting, and files written "+
-			"there are discarded.\n", outDir, outDir, outDir)
+		fmt.Fprintf(&b, "\nWrite every page under %s, which is your working directory "+
+			"and the only directory you may write to. Use paths beneath it, for example "+
+			"%s/entities/module-name.md or %s/concepts/some-idea.md. ",
+			outDir, outDir, outDir)
+		if src.root != "" {
+			fmt.Fprintf(&b, "The sources you are documenting are in %s: read them there, "+
+				"and never write to them -- an attempt is refused.\n", quoted(src.root))
+		} else {
+			b.WriteString("Never write to the sources you are documenting.\n")
+		}
 	} else {
 		// The API runner returns pages as data and is granted no directory.
 		b.WriteString("\nUse paths like `entities/module-name.md` or `concepts/some-idea.md`.\n")

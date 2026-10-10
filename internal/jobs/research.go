@@ -101,9 +101,11 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 	units := relevantUnits(req.Question, mat.Map)
 	fmt.Fprintf(out, "researching %q against %d unit(s)\n", req.Question.Title, len(units))
 
+	workDir := researchWorkDir(req.Source.Path, units, mat.staging)
 	res, aerr := p.Runner.Run(ctx, agent.Request{
 		Step:             agent.StepResearch,
-		WorkDir:          researchWorkDir(req.Source.Path, units, mat.staging),
+		WorkDir:          workDir,
+		ExtraDirs:        researchReadDirs(req.Source.Path, units, workDir),
 		Model:            p.researchModel(),
 		BudgetUSD:        p.Budget.AnalyzeUSD,
 		Timeout:          p.Timeout,
@@ -207,6 +209,28 @@ func researchWorkDir(repo string, units []mapper.Unit, staging []string) string 
 		return staging[0]
 	}
 	return ""
+}
+
+// researchReadDirs are the other roots the selected units live in. The CLI runs
+// confined to its working directory and the directories it is granted, and the
+// best match's root is only one of them: a question that touches a repository
+// module and an uploaded document reads from two. Granting them is what keeps
+// confinement from silently narrowing what research can look at. The working
+// directory itself is left out, as are duplicates.
+func researchReadDirs(repo string, units []mapper.Unit, workDir string) []string {
+	var dirs []string
+	seen := map[string]bool{workDir: true, "": true}
+	add := func(d string) {
+		if !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	for _, u := range units {
+		add(unitRoot(repo, u))
+	}
+	add(repo)
+	return dirs
 }
 
 // researchModel prefers the analyze model: research is the same shape of work
