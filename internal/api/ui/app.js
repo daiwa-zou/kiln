@@ -2313,6 +2313,10 @@ function wireInbox(view) {
     // one) would otherwise fall through to the action lookup.
     const key = e.key.toUpperCase();
     if (key.length !== 1 || !"AKX".includes(key)) return;
+    // A held key must not walk the queue: auto-repeat would arm a deletion
+    // and confirm it a few milliseconds later, or resolve item after item.
+    // (Placed after the arrows, which are meant to repeat.)
+    if (e.repeat) return;
     const btn = document.querySelector(`#inbox-detail [data-key="${key}"]`);
     if (btn) { e.preventDefault(); btn.click(); }
   };

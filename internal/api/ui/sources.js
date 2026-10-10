@@ -129,14 +129,26 @@ function nextBuildLine(runs, connectors, pollSeconds) {
   return "Sources are ingested when you press Ingest now.";
 }
 
+// ARM_GRACE_MS is how long a freshly armed button ignores clicks. A double
+// click lands its second press a few tens of milliseconds after the first --
+// well before anyone could have read "confirm delete" -- so without a floor it
+// would arm and commit as one gesture, which is exactly what the two steps
+// exist to prevent.
+const ARM_GRACE_MS = 600;
+
 // armButton is the shared two-step destructive confirm: first click arms
-// (the button turns into an explicit text question), second within 4s
-// commits. Returns true when the click should proceed. Restores whatever the
-// button held before -- text or icon -- so icon buttons survive the round trip.
+// (the button turns into an explicit text question), a second click after a
+// short grace period and within 4s commits. Returns true when the click should
+// proceed. Restores whatever the button held before -- text or icon -- so icon
+// buttons survive the round trip.
 function armButton(b, label) {
-  if (b.dataset.armed === "true") return true;
+  if (b.dataset.armed === "true") {
+    // Too soon to have read the question: still arming, not a confirmation.
+    return Date.now() - Number(b.dataset.armedAt || 0) >= ARM_GRACE_MS;
+  }
   const orig = b.innerHTML;
   b.dataset.armed = "true";
+  b.dataset.armedAt = String(Date.now());
   b.textContent = `confirm ${label}`;
   b.classList.add("danger");
   setTimeout(() => {
