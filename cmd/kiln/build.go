@@ -145,7 +145,7 @@ func runBuild(cmd *cobra.Command, g *globalFlags, f *buildFlags) error {
 	res, err := pipeline.Execute(ctx, jobs.ExecuteRequest{
 		RunID:       jobs.NewRunID(),
 		WorkspaceID: workspaceID,
-		Trigger:     "manual",
+		Trigger:     jobs.TriggerManual,
 		Source:      jobs.SourceSpec{Path: absPath, DocsDir: f.docs, WebURLs: f.web, Slug: slug},
 		BaseRef:     f.since,
 		Force:       f.full,

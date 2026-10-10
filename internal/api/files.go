@@ -21,6 +21,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/connector"
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/extract"
+	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/naming"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
@@ -309,7 +310,7 @@ func (s *Server) maybeEnqueueUploadBuild(ctx context.Context, ws store.Workspace
 		if refused, err := s.refuseOverBudget(ctx, ws); err != nil || refused != "" {
 			return "pending"
 		}
-		if _, _, err := s.Runs.EnqueueRunOpts(ctx, ws.ID, "upload", c.ID,
+		if _, _, err := s.Runs.EnqueueRunOpts(ctx, ws.ID, jobs.TriggerUpload, c.ID,
 			store.EnqueueOptions{NotBefore: time.Now().Add(uploadDebounce)}); err != nil {
 			return "pending"
 		}

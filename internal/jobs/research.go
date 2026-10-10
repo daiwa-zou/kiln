@@ -76,7 +76,7 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 
 	summary := RunSummary{
 		RunID: req.RunID, WorkspaceID: req.WorkspaceID,
-		Trigger: "research", Status: StatusRunning,
+		Trigger: TriggerResearch, Status: StatusRunning,
 	}
 
 	mat, err := materialize(ctx, out, req.Source)

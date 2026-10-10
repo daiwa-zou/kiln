@@ -343,6 +343,7 @@ func (s *WikiStore) RequestResearch(ctx context.Context, workspaceID, reviewID s
 		return "", ErrNotResearchable
 	}
 
+	// 'research' in the insert is jobs.TriggerResearch, kept as a SQL literal.
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO runs (workspace_id, trigger, status, review_id)
 		VALUES ($1, 'research', 'queued', $2)

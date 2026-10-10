@@ -344,7 +344,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	// record: stamping last_sync_at here would push every poll-triggered
 	// connector's next refresh out by a full interval, so answering a question
 	// about the bench would quietly delay rebuilding it.
-	if run.Trigger == "research" {
+	if run.Trigger == jobs.TriggerResearch {
 		w.research(ctx, run, spec, started, stopHeartbeat)
 		return
 	}
@@ -1096,7 +1096,7 @@ func (w *Worker) heartbeatInterval() time.Duration {
 // exactly the case where the next round is provably identical to this one,
 // so it is where the chain has to stop and ask for a human.
 func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, res *jobs.BuildResult, log *slog.Logger) {
-	retryPartial := res.Summary.Status == jobs.StatusPartial && run.Trigger != "continuation"
+	retryPartial := res.Summary.Status == jobs.StatusPartial && run.Trigger != jobs.TriggerContinuation
 	continueDeferred := res.Deferred > 0 && progressed(res)
 	if res.Deferred > 0 && !continueDeferred {
 		log.Warn("run deferred work but completed no unit; not continuing",
@@ -1105,7 +1105,7 @@ func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, 
 	if !continueDeferred && !retryPartial {
 		return
 	}
-	if _, created, err := w.Store.EnqueueRun(ctx, run.WorkspaceID, "continuation", run.ConnectorID); err != nil {
+	if _, created, err := w.Store.EnqueueRun(ctx, run.WorkspaceID, jobs.TriggerContinuation, run.ConnectorID); err != nil {
 		log.Error("continuation enqueue failed", "error", err)
 	} else if created {
 		log.Info("continuation enqueued", "deferred", res.Deferred, "retry_partial", retryPartial)
@@ -1123,7 +1123,7 @@ func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, 
 // canceled by definition on this path, and a write through it would fail and
 // leave the unreached units waiting for some later trigger.
 func (w *Worker) continueInterrupted(ctx context.Context, run *store.QueuedRun, log *slog.Logger) {
-	id, created, err := w.Store.EnqueueRun(context.WithoutCancel(ctx), run.WorkspaceID, "continuation", run.ConnectorID)
+	id, created, err := w.Store.EnqueueRun(context.WithoutCancel(ctx), run.WorkspaceID, jobs.TriggerContinuation, run.ConnectorID)
 	switch {
 	case err != nil:
 		log.Error("continuation after interruption not enqueued; the unreached units wait for the next trigger",
@@ -1195,7 +1195,7 @@ func (w *Worker) pollSources(ctx context.Context, log *slog.Logger) {
 	for _, c := range due {
 		// The active-run index makes this idempotent: a connector already
 		// building debounces onto its waiting run.
-		if _, created, err := w.Store.EnqueueRun(ctx, c.WorkspaceID, "poll", c.ID); err != nil {
+		if _, created, err := w.Store.EnqueueRun(ctx, c.WorkspaceID, jobs.TriggerPoll, c.ID); err != nil {
 			log.Error("poll enqueue failed", "connector", c.Name, "error", err)
 		} else if created {
 			log.Info("poll enqueued run", "connector", c.Name, "workspace", c.WorkspaceID)

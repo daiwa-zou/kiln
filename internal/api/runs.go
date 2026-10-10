@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/store"
 )
 
@@ -184,7 +185,7 @@ func (s *Server) handleRunCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.Runs.EnqueueBuild(r.Context(), ws.ID, "manual", "", store.EnqueueOptions{})
+	res, err := s.Runs.EnqueueBuild(r.Context(), ws.ID, jobs.TriggerManual, "", store.EnqueueOptions{})
 	if err != nil {
 		s.fail(w, err)
 		return
