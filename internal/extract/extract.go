@@ -283,19 +283,52 @@ func runTool(ctx context.Context, binary string, timeout time.Duration, args ...
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var stdout, stderr bytes.Buffer
+	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.WaitDelay = toolWaitDelay
-	cmd.Stdout = &stdout
+	// The passthrough path refuses a file over MaxExtractBytes for the reason
+	// given there, and a converter is the worse case: a small compressed PDF
+	// can expand to gigabytes of text. Stopping the process at the cap, rather
+	// than checking the size after it exits, is what keeps the buffer small.
+	stdout := &cappedWriter{max: MaxExtractBytes, stop: cancel}
+	cmd.Stdout = stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if stdout.exceeded {
+		return "", fmt.Errorf("extract: %s output is above the %d-byte limit", binary, MaxExtractBytes)
+	}
+	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("%s timed out after %s", binary, timeout)
 		}
 		return "", fmt.Errorf("%s: %w (%s)", binary, err, truncate(stderr.String(), 200))
 	}
-	return normalize(stdout.String()), nil
+	return normalize(stdout.buf.String()), nil
+}
+
+// cappedWriter buffers up to max bytes and, on the first byte past that, calls
+// stop and discards the rest. It reports every write as fully accepted: an
+// error would make the child die of a broken pipe, which reads as a converter
+// failure, when the real cause is the size the caller checks for.
+type cappedWriter struct {
+	buf      bytes.Buffer
+	max      int
+	stop     func()
+	exceeded bool
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	if w.exceeded {
+		return len(p), nil
+	}
+	if room := w.max - w.buf.Len(); len(p) > room {
+		w.buf.Write(p[:room])
+		w.exceeded = true
+		w.stop()
+		return len(p), nil
+	}
+	return w.buf.Write(p)
 }
 
 // normalize makes output comparable across tools and platforms, so a hash

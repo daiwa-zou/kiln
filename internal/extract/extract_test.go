@@ -279,3 +279,51 @@ func TestToolTimeoutBoundsWallClockWhenAGrandchildHoldsStdout(t *testing.T) {
 		t.Errorf("runTool took %s; the timeout plus WaitDelay should have bounded it well under that", elapsed)
 	}
 }
+
+// A small compressed PDF can expand to gigabytes of text. The converter must
+// be stopped at the cap, not allowed to fill memory and then checked.
+func TestToolOutputOverTheCapIsRefusedAndTheToolStopped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script")
+	}
+
+	// yes never exits on its own, so returning at all proves it was stopped.
+	path := filepath.Join(t.TempDir(), "endless-converter")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec yes 'a line of extracted text'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, err := runTool(context.Background(), path, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "above the") || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("err = %v, want an over-the-limit error", err)
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("the cap should be reported as such, not as a timeout: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Errorf("took %s; the process was not stopped at the cap", elapsed)
+	}
+}
+
+func TestCappedWriterKeepsExactlyTheCap(t *testing.T) {
+	stopped := 0
+	w := &cappedWriter{max: 5, stop: func() { stopped++ }}
+	if n, err := w.Write([]byte("abc")); n != 3 || err != nil || w.exceeded {
+		t.Fatalf("first write: n=%d err=%v exceeded=%v", n, err, w.exceeded)
+	}
+	// Exactly the cap is allowed; only a byte beyond it is too much.
+	if n, err := w.Write([]byte("de")); n != 2 || err != nil || w.exceeded {
+		t.Fatalf("write to the cap: n=%d err=%v exceeded=%v", n, err, w.exceeded)
+	}
+	if n, err := w.Write([]byte("f")); n != 1 || err != nil || !w.exceeded {
+		t.Fatalf("write past the cap: n=%d err=%v exceeded=%v", n, err, w.exceeded)
+	}
+	_, _ = w.Write([]byte("more"))
+	if got := w.buf.String(); got != "abcde" {
+		t.Errorf("buffer = %q, want %q", got, "abcde")
+	}
+	if stopped != 1 {
+		t.Errorf("stop called %d times, want 1", stopped)
+	}
+}
