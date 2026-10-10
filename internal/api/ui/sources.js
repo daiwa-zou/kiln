@@ -1400,7 +1400,7 @@ async function showGetStarted() {
         <li class="step done">
           ${stepIcon("done")}
           <div><strong>Bench created</strong>
-          <span class="hint">${esc(state.workspace)}</span></div>
+          <span class="hint">${esc(currentBench()?.name ?? "")}</span></div>
         </li>
         <li class="step ${sourceState}">
           ${stepIcon(sourceState)}
