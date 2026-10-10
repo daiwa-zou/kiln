@@ -27,6 +27,10 @@ laptop or a single-node install and wrong for anything you intend to scale,
 because it couples the two lifecycles: restarting the API to deploy a UI change
 would interrupt an in-flight build.
 
+The recommended layout around these roles, for one VM and for a scalable
+cloud deployment, plus the interim settings needed until the remaining
+scaling work lands: [ROADMAP.md](../ROADMAP.md#target-deployment-architecture).
+
 ## Requirements
 
 - **Postgres 16+**, reachable from the API and every worker.

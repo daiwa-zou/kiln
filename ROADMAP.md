@@ -159,6 +159,68 @@ the permissive `member`-writes default (members write content; owners shape
 connectors, credentials, and membership -- the split holds, but the default
 role granted on sign-in deserves a second look).
 
+## Target deployment architecture
+
+*Recorded 2026-10-10. The topology M9 and M10 build toward, so each item
+below has a picture to land in. Same image, same roles, same schema
+throughout — scaling never means a new service. How to run each component
+today: [docs/deployment.md](docs/deployment.md).*
+
+**Small team or single tenant: one VM.** Docker Compose with `api`, one or
+two `worker` replicas, and Postgres 16. Blobs go to real S3 or R2 rather
+than the bundled MinIO, so documents outlive the VM. TLS terminates at
+Caddy or nginx with `client_max_body_size 34m`. Backups are a nightly
+`pg_dump` plus bucket versioning, and `KILN_MASTER_KEY` is stored off the
+VM — losing it loses every sealed credential. Builds are model-bound, not
+CPU-bound, so this tier carries more than it looks; leave it for high
+availability or more than a few workers.
+
+**Cloud: managed Kubernetes plus managed services.** The Helm chart as it
+ships, with these choices around it (AWS names; GCP equivalents in
+brackets):
+
+```
+users, agents ──► CDN ──► load balancer / ingress ──► kiln serve (2–N, HPA, PDB)
+                  caches /ui/*                              │
+GitHub webhooks ───────────────────────────────────────────►┤
+                                                            ▼
+                                  pooler (PgBouncer / RDS Proxy) ──► Postgres 16
+                                                            ▲        (Multi-AZ, PITR)
+                    kiln worker (1–N) ──────────────────────┘
+                      │ egress only: Anthropic API, git hosts, web sources
+                      └──► S3 bucket (workload identity, versioned)
+Prometheus ──► metrics listener (cluster-internal)
+```
+
+- **Database** — RDS [Cloud SQL] Postgres 16, Multi-AZ, point-in-time
+  recovery, behind a transaction-mode pooler. The one component that must
+  be highly available; everything else is stateless.
+- **Object storage** — S3 [GCS interop] with versioning; storage keys left
+  unset so pods use IRSA [workload identity].
+- **API** — `kiln serve`, at least two replicas with the chart's
+  PodDisruptionBudget, autoscaled on CPU. A CDN in front caches `/ui/*`
+  today and page reads once M10 item 2 sends `Cache-Control`.
+- **Workers** — `kiln worker`, outbound-only. Egress is limited to the
+  model API, git hosts, and web sources; the SSRF guard still applies
+  inside that. A fixed count until queue-depth autoscaling (M10 item 4).
+- **Secrets** — a secret manager mounted as files and read through the
+  `_FILE` variables, never inline environment values.
+- **Metrics** — the separate listener stays cluster-internal.
+
+**Interim settings while M9 is open.** Each open item has a setting that
+makes the cloud tier safe today, and is retired by the item:
+
+| Open item | Until it lands |
+| --- | --- |
+| M9·1 Connection pooler | The chart's ceilings (10 API × 20 conns, 20 workers × 6) reach 320 connections. Put RDS Proxy or PgBouncer in front, or keep `maxReplicas` low enough to fit `max_connections` |
+| M9·2 Real client addresses | Every anonymous caller behind the load balancer, GitHub included, shares one rate-limit bucket. Raise the API's limits and rate-limit at the load balancer or WAF |
+| M9·5 Scheduler role | Polling, sweeps, and requeues run in every worker. Harmless at a handful of workers; hold the worker count there |
+
+**After M10.** The API runs as three profiles of one image (reader,
+control, ingress — uploads possibly a fourth), each with its own
+Deployment and HPA; the CDN absorbs most reads; workers scale on queue
+depth, down to zero.
+
 ## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); 1, 2, 5 open
 
 *Items 3 and 4 shipped together: `agent.unit_concurrency` drives the bounded
@@ -247,13 +309,23 @@ schema, one atomic `Import`, one queue.*
 5. **Workload classes** — a `runs.class` column and a claim-query filter,
    giving small and large worker pools so one large bench cannot monopolize
    the fleet. Deferred within the milestone until it is a real complaint.
+6. **Network policy in the chart** — the target architecture's worker
+   egress limit and private metrics listener exist only as advice; the
+   chart ships no `NetworkPolicy`. Add one per role, off by default: the
+   API accepts ingress on its HTTP port only, metrics accept only the
+   configured scraper namespace, and workers get an egress allowlist
+   (DNS, Postgres, the pooler, object storage, and configurable
+   destinations for the model API and sources).
 
 **Verification:** a sustained read load against the reader profile shows
 auth queries falling by roughly the cache hit rate with no change in
 revocation latency past the TTL; a 32 MiB upload in flight does not raise
 page-read latency on the reader pods; a webhook storm against one
 installation does not 429 another's; queue depth drives worker replicas up
-from zero and back down without evicting an in-flight build.
+from zero and back down without evicting an in-flight build; with the
+network policies enabled, a worker cannot open a connection to a
+destination outside its allowlist, and a pod outside the scraper namespace
+cannot read `/metrics`.
 
 ## M11 — The Edges Catch Up
 
