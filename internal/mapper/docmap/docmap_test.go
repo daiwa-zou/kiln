@@ -2,6 +2,8 @@ package docmap
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +220,56 @@ func TestUniqueSlugCollisionCounter(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("slug %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSectionInputsAreTheirOwnFilesAndLeaveIdentityAlone(t *testing.T) {
+	// Staging a section's text must not move anything a page's regeneration is
+	// decided by: the key, slug and hash are what the cache is keyed on.
+	body := "# Introduction\n" + strings.Repeat("intro prose. ", 1200) +
+		"\n# Methods\n" + strings.Repeat("method prose. ", 1200)
+	docs := []Doc{doc("doc:paper.pdf", "papers/paper.md", "The Paper", body)}
+
+	plain, err := testMapper().MapDocs(context.Background(), "/docs", docs)
+	if err != nil {
+		t.Fatalf("MapDocs: %v", err)
+	}
+
+	root := t.TempDir()
+	m := testMapper()
+	m.StageSections = true
+	staged, err := m.MapDocs(context.Background(), root, docs)
+	if err != nil {
+		t.Fatalf("MapDocs staging: %v", err)
+	}
+
+	if staged.Hash != plain.Hash {
+		t.Error("staging sections changed the map hash; pages would regenerate")
+	}
+	seen := map[string]bool{}
+	for i, u := range staged.Units {
+		p := plain.Units[i]
+		if u.Key != p.Key || u.Slug != p.Slug || u.Hash != p.Hash {
+			t.Errorf("unit %d identity changed: %+v vs %+v", i, u, p)
+		}
+		if u.Kind != "doc-section" {
+			if len(u.Inputs) != 1 || u.Inputs[0] != "papers/paper.md" {
+				t.Errorf("whole-document inputs = %v, want the document itself", u.Inputs)
+			}
+			continue
+		}
+		in := u.Inputs[0]
+		if seen[in] {
+			t.Errorf("two sections share the input %q", in)
+		}
+		seen[in] = true
+		got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(in)))
+		if err != nil {
+			t.Fatalf("section input %q not staged: %v", in, err)
+		}
+		if hashText(string(got)) != u.Hash {
+			t.Errorf("staged text of %q does not hash to the unit's hash", u.Title)
 		}
 	}
 }

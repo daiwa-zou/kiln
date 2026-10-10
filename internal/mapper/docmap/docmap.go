@@ -10,7 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -54,9 +57,19 @@ type Doc struct {
 type Mapper struct {
 	// SplitMinBytes overrides the default split threshold.
 	SplitMinBytes int
+	// StageSections writes each section's text to the file its unit's Inputs
+	// name, under the root passed to MapDocs. A pipeline that renders prompts
+	// from those inputs sets it; a caller that only wants the partitioning
+	// (the shape, the keys, the hashes) leaves it off and touches no disk.
+	StageSections bool
 	// Now is injectable so tests can pin GeneratedAt.
 	Now func() time.Time
 }
+
+// sectionsDir is the staging subdirectory section texts live under. The dot
+// prefix and the name keep it from colliding with a document staged at the
+// same root, which is named for the user's own file.
+const sectionsDir = ".kiln-sections"
 
 // Kind names the source type stamped into the maps this mapper produces.
 func (m *Mapper) Kind() string { return "doc" }
@@ -76,7 +89,10 @@ func (m *Mapper) MapDocs(_ context.Context, root string, docs []Doc) (*mapper.Wo
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 
 	for _, doc := range sorted {
-		units := m.unitsFor(doc, taken)
+		units, err := m.unitsFor(root, doc, taken)
+		if err != nil {
+			return nil, err
+		}
 		// Inputs point at staged text, which is not under the run's source
 		// directory. Recording the root here is what lets a merged map resolve
 		// them; a doc unit that loses it reads no source at all.
@@ -104,7 +120,7 @@ func (m *Mapper) MapDocs(_ context.Context, root string, docs []Doc) (*mapper.Wo
 	return wm, nil
 }
 
-func (m *Mapper) unitsFor(doc Doc, taken map[string]bool) []mapper.Unit {
+func (m *Mapper) unitsFor(root string, doc Doc, taken map[string]bool) ([]mapper.Unit, error) {
 	title := doc.Title
 	if title == "" {
 		title = strings.TrimSuffix(path.Base(doc.Path), path.Ext(doc.Path))
@@ -122,26 +138,63 @@ func (m *Mapper) unitsFor(doc Doc, taken map[string]bool) []mapper.Unit {
 
 	sections := m.split(doc)
 	if len(sections) == 0 {
-		return []mapper.Unit{whole}
+		return []mapper.Unit{whole}, nil
 	}
 
 	units := []mapper.Unit{whole}
-	for _, s := range sections {
+	for i, s := range sections {
+		input, err := m.sectionInput(root, doc, i, s)
+		if err != nil {
+			return nil, err
+		}
 		units = append(units, mapper.Unit{
 			Key:   doc.Key + "#" + slugify(s.Title),
 			Kind:  "doc-section",
 			Slug:  uniqueSlug(taken, slugify(title+"-"+s.Title)),
 			Title: s.Title,
-			// The section points at its parent document: there is no separate
-			// file on disk to read, only a span of one.
-			Inputs: []string{doc.Path},
+			// The section's own text, not its parent document. Prompt assembly
+			// reads inputs from the top and stops at a per-file cap, so
+			// pointing every section at the whole file sent each one the same
+			// opening 60 KB: a late chapter never saw its own words, and an
+			// N-section book paid for N copies of its first pages.
+			Inputs: []string{input},
 			// Hashing the section's own text means editing one chapter
 			// regenerates one section, not the whole book.
 			Hash: hashText(s.Body),
 			Meta: map[string]any{"parent": doc.Key, "heading": s.Title},
 		})
 	}
-	return units
+	return units, nil
+}
+
+// sectionInput names the file holding one section's text, writing it when the
+// mapper is asked to stage.
+//
+// The name is derived from the parent's path, the section's position and its
+// title, none of which feed the unit's key, slug or hash, so a unit's
+// identity -- and therefore whether its page regenerates -- is untouched. The
+// position keeps two sections with the same heading apart.
+func (m *Mapper) sectionInput(root string, doc Doc, i int, s section) (string, error) {
+	parent := strings.TrimLeft(strings.TrimSuffix(doc.Path, path.Ext(doc.Path)), "/")
+	rel := path.Join(sectionsDir, parent, fmt.Sprintf("%02d-%s.md", i+1, fileSlug(s.Title)))
+	// Paths come from connectors that stage under their own directory, but
+	// this one is about to be written to, so a ".." that would climb out of
+	// the staging root is refused rather than trusted.
+	if !fs.ValidPath(rel) {
+		return "", fmt.Errorf("docmap: section path %q escapes the staging root", rel)
+	}
+	if !m.StageSections {
+		return rel, nil
+	}
+
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+		return "", fmt.Errorf("docmap: stage section %q of %s: %w", s.Title, doc.Path, err)
+	}
+	if err := os.WriteFile(full, []byte(s.Body), 0o600); err != nil {
+		return "", fmt.Errorf("docmap: stage section %q of %s: %w", s.Title, doc.Path, err)
+	}
+	return rel, nil
 }
 
 // section is one top-level division of a document.
@@ -240,6 +293,16 @@ func uniqueSlug(taken map[string]bool, base string) string {
 			return candidate
 		}
 	}
+}
+
+// fileSlug is slugify bounded for use in a file name: a heading can be a whole
+// sentence, and a name over the filesystem's limit would fail the staging.
+func fileSlug(title string) string {
+	s := slugify(title)
+	if len(s) > 60 {
+		s = strings.Trim(s[:60], "-")
+	}
+	return s
 }
 
 func hashText(s string) string {

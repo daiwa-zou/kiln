@@ -105,7 +105,7 @@ func analyzePrompt(key diff.Key, unit mapper.Unit, root string, s Steering, atte
 		}
 	}
 
-	b.WriteString(renderUnitContext(root, unit))
+	b.WriteString(renderUnitContext(root, unit, buildBudget))
 
 	appendSuppressions(&b, s)
 	appendCorrections(&b, s, unit.Slug)
@@ -148,7 +148,7 @@ func generatePrompt(key diff.Key, unit mapper.Unit, root, outDir string, s Steer
 	// Source content is repeated rather than relied on from the analyze turn:
 	// a page written from a plan alone drifts from the source it is supposed
 	// to describe.
-	b.WriteString(renderUnitContext(root, unit))
+	b.WriteString(renderUnitContext(root, unit, buildBudget))
 	b.WriteString(renderFigures(figures))
 
 	appendSuppressions(&b, s)

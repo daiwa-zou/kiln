@@ -203,14 +203,22 @@ func (p *Pipeline) researchModel() string {
 	return p.Model
 }
 
-// Research context budgets. Smaller than a unit's, and for a different reason:
-// a unit renders the material it is definitely about, while research renders
-// material it is only probably about. Paying unit rates for a guess is how a
-// feature that answers questions becomes a feature nobody enables.
+// Research context budgets. A unit renders the material it is definitely
+// about, while research renders material it is only probably about, and paying
+// unit rates for a guess is how a feature that answers questions becomes a
+// feature nobody enables.
+//
+// So the unit material is one shared budget, not a per-unit one: each of up to
+// maxResearchUnits units used to be rendered at the full build allowance
+// (180 KB), which made one question up to ~1.1 MB of context -- six times a
+// build's, not smaller, and enough to overflow the model's window. The pages
+// are budgeted on top of that, so a question's worst case is the unit budget
+// plus maxResearchPages * maxResearchPageBytes.
 const (
-	maxResearchUnits     = 6
-	maxResearchPages     = 4
-	maxResearchPageBytes = 8_000
+	maxResearchUnits        = 6
+	maxResearchPages        = 4
+	maxResearchPageBytes    = 8_000
+	maxResearchContextBytes = 120_000
 )
 
 // relevantUnits picks the units a question is most likely answered by, ranked
@@ -398,13 +406,26 @@ func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.P
 	default:
 		b.WriteString("\n## Source material\n\n")
 		b.WriteString("These are the units whose subject matter is closest to the question.\n")
-		for _, u := range units {
+		// Each unit gets an even share of what is left, so a small unit's
+		// unused bytes flow to the ones after it. Units arrive best-match
+		// first, and the split depends only on content, so an identical
+		// question still renders an identical prompt.
+		remaining := maxResearchContextBytes
+		for i, u := range units {
 			fmt.Fprintf(&b, "\n### unit %s", u.Key)
 			if u.Title != "" {
 				fmt.Fprintf(&b, " — %s", u.Title)
 			}
 			b.WriteString("\n")
-			if ctx := renderUnitContext(root, u); ctx != "" {
+			share := max(remaining, 0) / (len(units) - i)
+			ctx := renderUnitContext(root, u, contextBudget{
+				total:   share,
+				perFile: min(maxFileContextBytes, share),
+			})
+			// The rendered length, headings and fences included, is what is
+			// charged: slightly conservative, and it keeps the whole bounded.
+			remaining -= len(ctx)
+			if ctx != "" {
 				b.WriteString(ctx)
 			} else {
 				b.WriteString("\n_No readable inputs._\n")
