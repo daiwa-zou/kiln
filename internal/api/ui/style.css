@@ -1518,7 +1518,6 @@
     display: grid; grid-template-columns: minmax(0, 1fr) 292px;
     height: calc(100vh - var(--topbar));
   }
-  @media (max-width: 900px) { .graph-view { grid-template-columns: minmax(0, 1fr); } }
   /* The wrap is a size container: what the toolbar can afford depends on the
      width of the graph column, which is the viewport minus the sidebar minus the
      rail, so a viewport media query guesses it wrong at most widths. */
@@ -1775,7 +1774,28 @@
   }
   .graph-rail .neighbours a:hover { background: var(--surface); color: var(--ink); text-decoration: none; }
   .graph-rail .btn { width: 100%; justify-content: center; }
-  @media (max-width: 900px) { .graph-rail { display: none; } }
+  .graph-rail-close { display: none; }
+  /* Narrow: the rail is a bottom sheet under the canvas, in the grid's second
+     row, and only when something is selected. Hiding it outright left a tap
+     that dimmed the canvas and told the reader nothing, and no way to open the
+     page without a double-click. The sheet scrolls inside its own height cap so
+     a node with many neighbours cannot take the canvas away. */
+  @media (max-width: 900px) {
+    .graph-view { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+    .graph-rail {
+      display: none; max-height: 40vh;
+      border-left: none; border-top: 1px solid var(--border); padding: 14px 16px 18px;
+    }
+    .graph-view.graph-has-sel .graph-rail { display: block; }
+    .graph-rail h2 { padding-right: 32px; }
+    .graph-rail-close {
+      float: right; position: sticky; top: 0; margin: -8px -6px 0 8px;
+      width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+      border: none; border-radius: 7px; background: none; color: var(--ink-dim);
+      cursor: pointer; font-size: 18px; line-height: 1;
+    }
+    .graph-rail-close:hover { background: var(--surface); color: var(--ink); }
+  }
 
   @media print {
     aside, .topbar, .skip, details.panel, .toasts, .to-top, .context-rail, .pager { display: none !important; }

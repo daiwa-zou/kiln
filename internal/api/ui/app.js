@@ -2538,11 +2538,13 @@ async function showGraph() {
         </div>
       </div>
       <div class="graph-rail" id="graph-rail">
+        <button class="graph-rail-close" id="graph-rail-close" aria-label="Close details">&times;</button>
         <div class="group-label">Selected</div>
         <h2 id="graph-sel-name">Nothing yet</h2>
         <div class="sub" id="graph-sel-sub">${esc(plural(nodes.length, "page"))} · ${esc(plural(links.length, "link"))}${esc(truncated)}</div>
-        <p class="why" id="graph-sel-why">Click any node to inspect it here. Neighbours
-          are listed below; the graph dims everything else.</p>
+        <p class="why" id="graph-sel-why">Select a node to inspect it here; press Enter or
+          double-click it to open the page. Neighbours are listed below and the graph
+          dims everything else.</p>
         <div id="graph-sel-box" hidden>
           <div class="group-label">Neighbours</div>
           <div class="neighbours" id="graph-neighbours"></div>
@@ -2655,6 +2657,7 @@ async function showGraph() {
       position();
     };
 
+    const root = svg.closest(".graph-view");
     const rail = {
       name: $("graph-sel-name"), sub: $("graph-sel-sub"), why: $("graph-sel-why"),
       box: $("graph-sel-box"), list: $("graph-neighbours"), open: $("graph-open"),
@@ -2672,7 +2675,25 @@ async function showGraph() {
         `<a href="#/page/${encodeURIComponent(nodes[j].slug)}">${typeDot(nodes[j].type)}<span>${esc(nodes[j].title || nodes[j].slug)}</span></a>`).join("");
       rail.open.href = `#/page/${encodeURIComponent(n.slug)}`;
       rail.box.hidden = false;
+      root.classList.add("graph-has-sel");
+      ensureVisible(i);
     };
+    const railIdle = {
+      name: rail.name.textContent, sub: rail.sub.textContent, why: rail.why.textContent,
+    };
+    // Back to nothing selected: the canvas undims, the rail returns to its
+    // opening text, and below 900px the bottom sheet goes away with it.
+    const deselect = () => {
+      if (selected < 0) return;
+      selected = -1;
+      paintSelection();
+      rail.name.textContent = railIdle.name;
+      rail.sub.textContent = railIdle.sub;
+      rail.why.textContent = railIdle.why;
+      rail.box.hidden = true;
+      root.classList.remove("graph-has-sel");
+    };
+    const openPage = (i) => { location.hash = "#/page/" + encodeURIComponent(nodes[i].slug); };
 
     position();
 
@@ -2731,6 +2752,35 @@ async function showGraph() {
       zoomLabel.textContent = Math.round((W / vb.w) * 100) + "%";
     };
     applyVB();
+    // Bring a node back inside the viewBox: the canvas gets shorter when the
+    // bottom sheet opens, and a focused node can be anywhere.
+    const ensureVisible = (i) => {
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const pad = 24 * (vb.w / rect.width);
+      const p = pts[i];
+      const x0 = vb.x, y0 = vb.y;
+      if (p.x < vb.x + pad) vb.x = p.x - pad;
+      else if (p.x > vb.x + vb.w - pad) vb.x = p.x + pad - vb.w;
+      if (p.y < vb.y + pad) vb.y = p.y - pad;
+      else if (p.y > vb.y + vb.h - pad) vb.y = p.y + pad - vb.h;
+      if (vb.x !== x0 || vb.y !== y0) applyVB();
+    };
+    // The canvas also changes height when that sheet opens and closes, and on
+    // any window resize. Keeping the viewBox's aspect equal to the element's
+    // keeps the picture at its scale: left alone, the browser letterboxes the
+    // old box into the new one and shrinks the whole layout to fit.
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(() => {
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        vb.h = vb.w * (rect.height / rect.width);
+        applyVB();
+        if (selected >= 0) ensureVisible(selected);
+      });
+      ro.observe(svg);
+      onViewCleanup(() => ro.disconnect());
+    }
     // fitView fills the canvas by spreading the layout, never by zooming the
     // camera: nodes move apart while circles and labels keep their natural
     // size. Zooming in to fill made 19 nodes look like beach balls; leaving
@@ -2869,9 +2919,12 @@ async function showGraph() {
         document.removeEventListener("keydown", onEsc);
         return;
       }
-      if (e.key === "Escape" && wrap.classList.contains("graph-fs")) {
+      if (e.key !== "Escape") return;
+      if (wrap.classList.contains("graph-fs")) {
         wrap.classList.remove("graph-fs");
         resync();
+      } else if (selected >= 0) {
+        deselect();
       }
     };
     document.addEventListener("keydown", onEsc);
@@ -2941,6 +2994,10 @@ async function showGraph() {
         // A press that never travels is a click, so navigation survives the
         // drag handlers -- but it selects rather than leaves the graph.
         if (drag.moved < 3) select(drag.i);
+      } else if (drag.moved < 3) {
+        // A press on empty canvas that never travels is a click on nothing, which
+        // lets go of the selection -- and, below 900px, closes the bottom sheet.
+        deselect();
       }
       drag = null;
     };
@@ -2948,14 +3005,26 @@ async function showGraph() {
     svg.addEventListener("pointercancel", endDrag);
     svg.addEventListener("dblclick", (e) => {
       const g = e.target.closest("g.graph-node");
-      if (g) location.hash = "#/page/" + encodeURIComponent(nodes[g.dataset.i].slug);
+      if (g) openPage(Number(g.dataset.i));
     });
+    // Focusing a node selects it, so Enter on a focused node is Enter on a
+    // selected one: it opens the page. Double-click is the pointer's way to say
+    // the same thing, and a keyboard has no double-click.
+    // quiet stops the focus the close button hands back from selecting again.
+    let quiet = false;
     for (const g of nodeEls) {
       g.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") select(Number(g.dataset.i));
+        if (e.key !== "Enter" || e.repeat) return;
+        const i = Number(g.dataset.i);
+        if (selected === i) { e.preventDefault(); openPage(i); } else select(i);
       });
-      g.addEventListener("focus", () => select(Number(g.dataset.i)));
+      g.addEventListener("focus", () => { if (!quiet) select(Number(g.dataset.i)); });
     }
+    $("graph-rail-close").addEventListener("click", () => {
+      const i = selected;
+      deselect();
+      if (i >= 0) { quiet = true; nodeEls[i].focus(); quiet = false; }
+    });
 
     // --- hover: light the neighborhood, dim the rest ----------------------
     // Only while nothing is selected: a selection is a standing answer, and a
