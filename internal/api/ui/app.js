@@ -34,6 +34,9 @@ const runViewCleanups = () => {
 
 // Motion is opt-out: --dur drives the CSS; this drives JS scroll behavior.
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)");
+// The width below which Reviews shows the list or the detail, never both.
+// Mirrors the 860px breakpoint in style.css.
+const NARROW = matchMedia("(max-width: 860px)");
 const scrollBehavior = () => (REDUCED.matches ? "auto" : "smooth");
 
 // localStorage that survives private-mode Safari, where setItem throws.
@@ -510,6 +513,34 @@ const unesc = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
 const safeURL = (u) =>
   /^(https?:\/\/|#\/)/.test(u) || (/^\/api\/v1\//.test(u) && !u.startsWith("//")) ? u : null;
 
+// imageURL is the narrower question for an <img>: may the browser FETCH this?
+// A page body is written by a model reading arbitrary sources, so an image in
+// it can name any host -- and every reader's browser would request it on
+// render, with a query string that can carry whatever the model was fed. That
+// is a zero-click channel out of the wiki, so only this origin's own files
+// (figures served from /api/v1/, which the CSP's img-src 'self' also admits)
+// are drawn. Anything off-origin is shown as a link the reader chooses to
+// follow. Resolved against the page's origin, not matched by prefix, so
+// "//host/x" and "/\host" cannot sneak through as relative paths.
+const imageURL = (u) => {
+  const url = safeURL(u);
+  if (!url || url.startsWith("#/")) return null;
+  try {
+    return new URL(unesc(url), location.href).origin === location.origin ? url : null;
+  } catch { return null; }
+};
+
+// externalImageHTML stands in for an image that is not drawn: a link whose
+// text says what it is, so nothing is silently dropped and nothing is fetched
+// until someone clicks.
+function externalImageHTML(alt, url) {
+  let host = "";
+  try { host = new URL(unesc(url)).host; } catch { /* label falls back to alt */ }
+  const label = alt || esc(host) || "image";
+  return `<a class="ext-image" href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+    + `<span class="hint"> (external image${host && alt ? ` on ${esc(host)}` : ""}, not loaded)</span>`;
+}
+
 // A very small markdown subset: enough to read a generated page without
 // shipping a parser. Everything is escaped first, so page content is data.
 // headingOffset shifts markdown headings: 0 for artifacts (whose # is the
@@ -574,7 +605,7 @@ function renderMarkdown(src, headingOffset = 1) {
     // see it well or at all.
     const standalone = raw.trim().match(/^!\[([^\]]*)\]\(([^)\s]+)\)$/);
     if (standalone) {
-      const u = safeURL(standalone[2]);
+      const u = imageURL(standalone[2]);
       if (u) {
         flushPara(); closeList();
         const alt = standalone[1];
@@ -585,8 +616,8 @@ function renderMarkdown(src, headingOffset = 1) {
         continue;
       }
       // An unresolved figure reference falls through to prose, where it
-      // renders as the literal text it is. Visible and diagnosable beats a
-      // broken image icon.
+      // renders as the literal text it is -- or, for an off-origin image, as a
+      // link to it. Visible and diagnosable beats a broken image icon.
     }
     if (/^\s*[-*]\s+/.test(raw)) {
       flushPara(); openList("ul");
@@ -643,8 +674,10 @@ function inlineText(text) {
   return text
     // Images before links, since the syntaxes nest.
     .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, url) => {
-      const u = safeURL(url);
-      return u ? `<img src="${u}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">` : m;
+      const u = imageURL(url);
+      if (u) return `<img src="${u}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`;
+      const link = safeURL(url);
+      return link && !link.startsWith("#/") ? externalImageHTML(alt, link) : m;
     })
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
       const u = safeURL(url);
@@ -1408,20 +1441,24 @@ function publishPanel(publish) {
       rather than merged.</p>
     ${status}
     <div class="row">
+      <label class="sr-only" for="publish-repo">Repository URL</label>
       <input id="publish-repo" placeholder="https://github.com/owner/repo.git"
              autocomplete="off" spellcheck="false" value="${esc(t?.repo || "")}">
     </div>
     <div class="row">
+      <label class="sr-only" for="publish-branch">Branch</label>
       <input id="publish-branch" placeholder="branch (default main)"
              autocomplete="off" spellcheck="false" value="${esc(t?.branch || "")}">
+      <label class="sr-only" for="publish-prefix">Subdirectory</label>
       <input id="publish-prefix" placeholder="subdirectory (optional, e.g. wiki)"
              autocomplete="off" spellcheck="false" value="${esc(t?.pathPrefix || "")}">
     </div>
     <div class="row">
+      <label class="sr-only" for="publish-credential">Credential id</label>
       <input id="publish-credential" placeholder="credential id (a git_pat that can push)"
              autocomplete="off" spellcheck="false" value="${esc(t?.credentialId || "")}">
       <button class="btn" id="publish-save">${t ? "Update" : "Configure"}</button>
-      ${t ? `<button class="btn" id="publish-remove">Stop publishing</button>` : ""}
+      ${t ? `<button class="btn quiet" id="publish-remove">Stop publishing</button>` : ""}
     </div>
     <div id="publish-note" class="hint" role="status"></div>`;
 }
@@ -1482,7 +1519,7 @@ function deletePanel(p) {
       <label class="sr-only" for="page-delete-reason">Why are you deleting this page?</label>
       <input id="page-delete-reason" placeholder="why (optional — the wiki is told)"
              autocomplete="off">
-      <button class="btn danger" id="page-delete">Delete page</button>
+      <button class="btn quiet" id="page-delete">Delete page</button>
       <div id="page-delete-note" class="hint" role="status"></div>
     </div>`;
 }
@@ -1851,12 +1888,12 @@ function logSummary(r) {
   }
   if (r.status === "queued") return "Waiting for a worker to claim it.";
   if (r.trigger === "research") {
-    if (r.status === "failed") return r.error ? String(r.error).split("\n")[0] : "The research pass did not finish.";
+    if (r.status === "failed") return "The research pass did not finish.";
     if (r.status === "canceled") return "The research pass was canceled before it finished.";
     if (r.status === "over_budget") return "The run reached its budget cap and stopped before finishing.";
     return "Read the sources to answer a question filed under Reviews. The findings are on that review item; no pages were written.";
   }
-  if (r.status === "failed") return r.error ? String(r.error).split("\n")[0] : "The build did not finish.";
+  if (r.status === "failed") return "The build did not finish.";
   if (r.status === "over_budget") return "The run reached its budget cap and stopped before finishing.";
   if (r.status === "canceled") return "The build was canceled before it finished.";
   const parts = [];
@@ -1947,6 +1984,7 @@ async function showLog() {
               <span class="log-when">${r.status === "running" ? "in progress" : esc(relTime(r.created))}</span>
             </div>
             <p class="log-summary">${esc(logSummary(r))}</p>
+            ${runErrorHTML(r)}
             ${(() => {
               const f = logFooter(r);
               return f.length ? `<div class="log-foot">${f.map((x) => `<span>${esc(x)}</span>`).join("")}</div>` : "";
@@ -2013,6 +2051,19 @@ const iconChip = (icons, name, extra = "") => icons[name]
 let reviewFilter = "open";
 let selectedReviewIndex = 0;
 let reviewRows = [];
+// reviewSelectId asks the next render to select that review (and open its
+// detail on a narrow screen) instead of whatever sits at the old index. It is
+// how a review stays selected after it changes queue under the reader.
+let reviewSelectId = null;
+// The open reviews and gap rows as of the last fetch, shared by the render and
+// the poll so the pills and the list are always computed from the same data.
+let reviewOpen = [];
+let reviewGapRows = [];
+// Ids that were being researched the last time anyone looked, and ids whose
+// research has finished but whose findings nobody has opened since. The first
+// is how "finished" is noticed; the second is the "new findings" chip.
+let researchWatch = new Set();
+const reviewFresh = new Set();
 
 // Action labels are per kind: "approve" means something different for a
 // deletion than for a gap, and a button reading "approve" says neither.
@@ -2055,6 +2106,89 @@ const actionsFor = (kind) => REVIEW_ACTIONS[kind] || REVIEW_ACTIONS_FALLBACK;
 const kindClass = (kind) =>
   REVIEW_ACTIONS[kind] ? `k-${kind}` : "k-other";
 
+// The pool a queue draws from. "Researching" is a flag on an open review, not
+// a status of its own: a question someone handed to a worker is still waiting
+// for a human. "Answered" covers both statuses a resolution writes, 'resolved'
+// and 'approved'. `shown` is that second fetch; it is null for every other queue.
+function setReviewRows(open, shown) {
+  reviewRows = reviewFilter === "gaps" ? reviewGapRows
+    : reviewFilter === "answered" ? (shown ?? reviewRows)
+    : reviewFilter === "researching" ? open.filter((r) => r.researching)
+    : open.filter((r) => !r.researching);
+}
+
+const reviewCounts = (open) => ({
+  open: open.filter((r) => !r.researching).length,
+  researching: open.filter((r) => r.researching).length,
+  gaps: reviewGapRows.length,
+});
+
+function inboxPillsHTML(counts) {
+  const pill = (key, label) =>
+    `<button class="pill" data-filter="${key}" aria-pressed="${reviewFilter === key}">${label}</button>`;
+  return `${pill("open", `Open ${counts.open}`)}
+    ${pill("researching", `Researching ${counts.researching}`)}
+    ${counts.gaps || reviewFilter === "gaps"
+      // A bench with no gaps says nothing rather than "Gaps 0" -- but
+      // the queue stays reachable by hash, and arriving there to find
+      // no pill pressed is a page that looks broken.
+      ? pill("gaps", `Gaps ${counts.gaps}`) : ""}
+    ${pill("answered", "Resolved")}`;
+}
+
+function inboxRowsHTML() {
+  if (!reviewRows.length) {
+    return `<div class="empty">${reviewFilter === "answered"
+      ? "Nothing resolved yet. Answered reviews are kept here as a record of what was decided."
+      : reviewFilter === "researching"
+        ? "Nothing is being researched right now."
+        : reviewFilter === "gaps"
+          ? (state.pages.length
+              ? "No gaps — every link resolves to an existing page."
+              : "Nothing to check yet — gaps are links the wiki wants and does not have.")
+          : `No open reviews. Builds file one here when they need a decision,
+           such as confirming a deletion after a source disappears.`}</div>`;
+  }
+  return reviewRows.map((r, i) => `
+    <button class="inbox-row ${kindClass(r.kind)}" data-idx="${i}"
+            aria-current="${i === selectedReviewIndex}">
+      <span class="inbox-row-top">
+        <span class="kind-sq">${REVIEW_KIND_ICONS[r.kind] || iconUncertain}</span>
+        <span class="kind-name">${esc(r.kind)}</span>
+        ${reviewFresh.has(r.id) ? `<span class="chip new-findings">new findings</span>` : ""}
+        <span class="inbox-row-when">${r.gap
+          ? `wanted by ${esc(r.wantedBy)}`
+          : esc(relTime(r.created))}</span>
+      </span>
+      <span class="inbox-row-title">${esc(r.title)}</span>
+      <span class="inbox-row-unit">${r.gap ? "not written yet"
+        : esc(r.unit ? unitSource(r.unit).name : (r.pageSlug || ""))}</span>
+    </button>`).join("");
+}
+
+// noteResearchDone compares the open reviews with the ones last seen being
+// researched and returns those that stopped. Each is marked "new findings"
+// until it is next viewed. A review that vanished (resolved elsewhere) is
+// forgotten without comment.
+function noteResearchDone(open) {
+  const finished = open.filter((r) => !r.researching && researchWatch.has(r.id));
+  for (const r of finished) reviewFresh.add(r.id);
+  researchWatch = new Set(open.filter((r) => r.researching).map((r) => r.id));
+  return finished;
+}
+
+function announceResearchDone(r) {
+  toast(`Research finished: ${r.title}`, {
+    action: "Open",
+    onAction: () => {
+      reviewFilter = "open";
+      reviewSelectId = r.id;
+      if (location.hash === "#/reviews") showReviews(false);
+      else location.hash = "#/reviews";
+    },
+  });
+}
+
 // showReviews keeps its old signature: `true` is the resolved queue, which is
 // now a filter pill rather than a separate route. Every hash it has ever had
 // stays routable.
@@ -2068,10 +2202,9 @@ async function showReviews(history) {
   try {
     // "answered" covers both statuses a resolution writes, 'resolved' and
     // 'approved'; asking for either alone would hide half the history.
-    const wanted = reviewFilter === "answered" ? "answered" : "open";
     const [open, shown, gaps] = await Promise.all([
       api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=open`),
-      wanted === "open"
+      reviewFilter !== "answered"
         ? null
         : api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=answered`),
       // Rides the same revision-keyed cache as everything else here, so the
@@ -2083,27 +2216,32 @@ async function showReviews(history) {
     // Demand is scaled against the most-wanted gap, so the bars compare with
     // each other rather than with an invented ceiling.
     const peak = Math.max(...gaps.map((g) => Number(g.wantedBy) || 0), 1);
-    const gapRows = gaps.map((g) => ({
+    reviewGapRows = gaps.map((g) => ({
       id: `gap:${g.slug}`, kind: "gap", gap: true, slug: g.slug, title: g.slug,
       wantedBy: Number(g.wantedBy) || 0, peak,
     }));
+    reviewOpen = open;
 
-    const pool = wanted === "open" ? open : shown;
-    // "Researching" is a flag on an open review, not a status of its own: a
-    // question someone handed to a worker is still waiting for a human.
-    reviewRows = reviewFilter === "gaps" ? gapRows
-      : reviewFilter === "open" ? pool.filter((r) => !r.researching)
-      : reviewFilter === "researching" ? pool.filter((r) => r.researching)
-      : pool;
+    setReviewRows(open, shown);
+    // A review that finished researching while nobody was on this screen.
+    const finished = noteResearchDone(open);
+    let openedByName = false;
+    if (reviewSelectId) {
+      const at = reviewRows.findIndex((r) => r.id === reviewSelectId);
+      if (at >= 0) {
+        selectedReviewIndex = at;
+        reviewFresh.delete(reviewSelectId);
+        // Asked for by name: on a narrow screen that means the detail, not
+        // the list it was picked from.
+        document.body.classList.add("inbox-detail-open");
+        openedByName = true;
+      }
+      reviewSelectId = null;
+    }
     if (selectedReviewIndex >= reviewRows.length) selectedReviewIndex = 0;
-
-    const counts = {
-      open: open.filter((r) => !r.researching).length,
-      researching: open.filter((r) => r.researching).length,
-      gaps: gaps.length,
-    };
-    const pill = (key, label) =>
-      `<button class="pill" data-filter="${key}" aria-pressed="${reviewFilter === key}">${label}</button>`;
+    // On a wide screen the selected row's detail is already on show, which is
+    // what "viewed" means; on a narrow one it is hidden until picked.
+    if (!NARROW.matches) reviewFresh.delete(reviewRows[selectedReviewIndex]?.id);
 
     if (!view.done(`<div class="inbox">
       <div class="inbox-list">
@@ -2114,49 +2252,25 @@ async function showReviews(history) {
               aria-label="What is this page for?" title="What is this page for?">?</button>
           </div>
           <p>Decisions a build could not make on its own.</p>
-          <div class="pills" role="group" aria-label="Filter reviews">
-            ${pill("open", `Open ${counts.open}`)}
-            ${pill("researching", `Researching ${counts.researching}`)}
-            ${counts.gaps || reviewFilter === "gaps"
-              // A bench with no gaps says nothing rather than "Gaps 0" -- but
-              // the queue stays reachable by hash, and arriving there to find
-              // no pill pressed is a page that looks broken.
-              ? pill("gaps", `Gaps ${counts.gaps}`) : ""}
-            ${pill("answered", "Resolved")}
+          <div class="pills" id="inbox-pills" role="group" aria-label="Filter reviews">
+            ${inboxPillsHTML(reviewCounts(open))}
           </div>
         </div>
-        <div class="inbox-scroll" id="inbox-scroll" role="listbox" aria-label="Reviews">
-          ${reviewRows.length ? reviewRows.map((r, i) => `
-            <button class="inbox-row ${kindClass(r.kind)}" role="option" data-idx="${i}"
-                    aria-current="${i === selectedReviewIndex}"
-                    aria-selected="${i === selectedReviewIndex}">
-              <span class="inbox-row-top">
-                <span class="kind-sq">${REVIEW_KIND_ICONS[r.kind] || iconUncertain}</span>
-                <span class="kind-name">${esc(r.kind)}</span>
-                <span class="inbox-row-when">${r.gap
-                  ? `wanted by ${esc(r.wantedBy)}`
-                  : esc(relTime(r.created))}</span>
-              </span>
-              <span class="inbox-row-title">${esc(r.title)}</span>
-              <span class="inbox-row-unit">${r.gap ? "not written yet"
-                : esc(r.unit ? unitSource(r.unit).name : (r.pageSlug || ""))}</span>
-            </button>`).join("")
-            : `<div class="empty">${reviewFilter === "answered"
-                ? "Nothing resolved yet. Answered reviews are kept here as a record of what was decided."
-                : reviewFilter === "researching"
-                  ? "Nothing is being researched right now."
-                  : reviewFilter === "gaps"
-                    ? (state.pages.length
-                        ? "No gaps — every link resolves to an existing page."
-                        : "Nothing to check yet — gaps are links the wiki wants and does not have.")
-                    : `No open reviews. Builds file one here when they need a decision,
-                     such as confirming a deletion after a source disappears.`}</div>`}
+        <div class="inbox-scroll" id="inbox-scroll" role="group" aria-label="Reviews">
+          ${inboxRowsHTML()}
         </div>
       </div>
       <div class="inbox-detail" id="inbox-detail">${reviewDetailHTML(reviewRows[selectedReviewIndex])}</div>
     </div>`)) return;
 
+    for (const r of finished) announceResearchDone(r);
     wireInbox(view);
+    // Arrived by name (a review followed into Researching, or opened from a
+    // toast) on a screen too narrow to show the list: land on the detail.
+    if (openedByName && NARROW.matches) {
+      const h = $("inbox-detail").querySelector("h2");
+      if (h) { h.tabIndex = -1; h.focus(); }
+    }
   } catch (err) {
     if (!err.handled) view.done(banner(err));
   }
@@ -2266,29 +2380,70 @@ function wireInbox(view) {
   const select = (i, focusDetail) => {
     if (!reviewRows.length) return;
     selectedReviewIndex = (i + reviewRows.length) % reviewRows.length;
+    // Selecting a row is viewing it: the "new findings" chip has done its job.
+    if (reviewFresh.delete(reviewRows[selectedReviewIndex].id)) {
+      // Removed in place: re-rendering the list would drop the focus of the
+      // row that was just clicked.
+      document.querySelector(`.inbox-row[data-idx="${selectedReviewIndex}"] .new-findings`)?.remove();
+      lastRows = inboxRowsHTML();
+    }
     for (const el of document.querySelectorAll(".inbox-row")) {
       const on = Number(el.dataset.idx) === selectedReviewIndex;
       el.setAttribute("aria-current", String(on));
-      el.setAttribute("aria-selected", String(on));
       if (on) el.scrollIntoView({ block: "nearest" });
     }
-    $("inbox-detail").innerHTML = reviewDetailHTML(reviewRows[selectedReviewIndex]);
-    sizeBars($("inbox-detail")); // a gap's demand bar; no-op for every other kind
-    wireDetail();
-    if (focusDetail) document.body.classList.add("inbox-detail-open");
+    showDetail();
+    if (focusDetail) {
+      document.body.classList.add("inbox-detail-open");
+      // Below 860px this hides the list the focused row lives in, which would
+      // leave focus on nothing. Move it to the detail's heading, where a
+      // screen reader starts reading the review it just opened.
+      if (NARROW.matches) focusDetailHeading();
+    }
+  };
+  const focusDetailHeading = () => {
+    const h = $("inbox-detail").querySelector("h2");
+    if (!h) return;
+    h.tabIndex = -1;
+    h.focus();
   };
 
-  for (const b of document.querySelectorAll(".inbox-row")) {
-    b.addEventListener("click", () => select(Number(b.dataset.idx), true));
-  }
-  for (const b of document.querySelectorAll("[data-filter]")) {
-    b.addEventListener("click", () => {
-      if (reviewFilter === b.dataset.filter) return;
-      reviewFilter = b.dataset.filter;
-      selectedReviewIndex = 0;
-      showReviews(false);
-    });
-  }
+  // The detail pane, rebuilt from the selected row. Shared by selection and by
+  // the research poll, which has to replace a pane whose review just changed.
+  const showDetail = () => {
+    const r = reviewRows[selectedReviewIndex];
+    $("inbox-detail").innerHTML = reviewDetailHTML(r);
+    lastDetail = detailKey(r);
+    sizeBars($("inbox-detail")); // a gap's demand bar; no-op for every other kind
+    wireDetail();
+  };
+  const detailKey = (r) => (r ? `${r.id}|${r.researching}|${r.research ?? ""}|${r.status}` : "");
+
+  // Rows and pills are re-rendered in place by the poll, so their handlers are
+  // bound by functions that can run again over the new elements -- separately,
+  // because rebinding the pills that were not replaced would fire twice.
+  const wireRows = () => {
+    for (const b of document.querySelectorAll(".inbox-row")) {
+      b.addEventListener("click", () => select(Number(b.dataset.idx), true));
+    }
+  };
+  const wirePills = () => {
+    for (const b of document.querySelectorAll("[data-filter]")) {
+      b.addEventListener("click", () => {
+        if (reviewFilter === b.dataset.filter) return;
+        reviewFilter = b.dataset.filter;
+        selectedReviewIndex = 0;
+        showReviews(false);
+      });
+    }
+  };
+  // What each region was last rendered from, so the poll can tell whether
+  // anything it fetched actually changes what is on screen.
+  let lastRows = inboxRowsHTML();
+  let lastPills = inboxPillsHTML(reviewCounts(reviewOpen));
+  let lastDetail = detailKey(reviewRows[selectedReviewIndex]);
+  wireRows();
+  wirePills();
 
   const resolve = async (btn) => {
     const r = reviewRows[selectedReviewIndex];
@@ -2313,8 +2468,12 @@ function wireInbox(view) {
   };
 
   function wireDetail() {
-    $("inbox-back")?.addEventListener("click", () =>
-      document.body.classList.remove("inbox-detail-open"));
+    $("inbox-back")?.addEventListener("click", () => {
+      document.body.classList.remove("inbox-detail-open");
+      // Back un-hides the list; put focus on the row that was open so the
+      // reader resumes where they left, not at the top of the page.
+      document.querySelector('.inbox-row[aria-current="true"]')?.focus();
+    });
     for (const b of document.querySelectorAll("#inbox-detail [data-review]")) {
       once(b, () => resolve(b));
     }
@@ -2347,6 +2506,12 @@ function wireInbox(view) {
           // Nothing is resolved, so the badge is left alone: the question is
           // still waiting for a human, now with a reader working on it.
           toast("Research queued");
+          // The review moves out of Open the moment it is queued. Follow it:
+          // switch to the Researching queue and keep it selected, so the
+          // reader sees it being worked on rather than being thrown at
+          // whichever review slid into its place.
+          reviewFilter = "researching";
+          reviewSelectId = b.dataset.research;
           showReviews(false);
         } catch (err) {
           if (!err.handled) note(err.message);
@@ -2382,6 +2547,57 @@ function wireInbox(view) {
   };
   document.addEventListener("keydown", onKey);
   onViewCleanup(() => document.removeEventListener("keydown", onKey));
+
+  // ---- research poll ----------------------------------------------------------
+  // A research pass runs for minutes and nothing else on this screen changes
+  // when it ends, so while any review is being researched the open list is
+  // re-read every 10s. Like the Ingest feed's poll it patches the list in
+  // place -- re-running the view would move focus to <main> and scroll to the
+  // top every tick -- and it stops by itself once nothing is being researched.
+  let timer = 0;
+  onViewCleanup(() => clearTimeout(timer));
+  const schedule = () => {
+    clearTimeout(timer);
+    if (reviewOpen.some((r) => r.researching)) timer = setTimeout(tick, 10000);
+  };
+  async function tick() {
+    if (!view.current()) return;
+    let open;
+    try {
+      open = await api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews?status=open`);
+    } catch (err) {
+      if (!err?.handled) schedule(); // a blip: the screen's numbers are still the last true ones
+      return;
+    }
+    if (!view.current()) return;
+    const before = reviewRows[selectedReviewIndex]?.id;
+    reviewOpen = open;
+    const finished = noteResearchDone(open);
+    updateReviewsBadge(open.length);
+    if (reviewFilter === "open" || reviewFilter === "researching") {
+      setReviewRows(open);
+      const at = reviewRows.findIndex((r) => r.id === before);
+      selectedReviewIndex = at >= 0 ? at : Math.min(selectedReviewIndex, Math.max(reviewRows.length - 1, 0));
+    }
+    // Only touch the DOM for what changed: a replaced pill or row would drop
+    // the focus of a reader who happens to be on it.
+    const pills = inboxPillsHTML(reviewCounts(open));
+    if (pills !== lastPills) {
+      $("inbox-pills").innerHTML = lastPills = pills;
+      wirePills();
+    }
+    const rows = inboxRowsHTML();
+    if (rows !== lastRows) {
+      const hadFocus = document.activeElement?.classList?.contains("inbox-row");
+      $("inbox-scroll").innerHTML = lastRows = rows;
+      wireRows();
+      if (hadFocus) document.querySelector('.inbox-row[aria-current="true"]')?.focus({ preventScroll: true });
+    }
+    if (detailKey(reviewRows[selectedReviewIndex]) !== lastDetail) showDetail();
+    for (const r of finished) announceResearchDone(r);
+    schedule();
+  }
+  schedule();
 }
 
 // showGraph renders the page graph from the materialized links: every live
@@ -2483,6 +2699,7 @@ async function showGraph() {
       <h1 class="sr-only">Graph</h1>
       <div id="graph-wrap">
         <div class="graph-toolbar">
+          <div class="graph-bar">
           <div class="graph-search">
             <div class="graph-search-field" id="graph-search-field">
               <svg class="graph-search-glyph" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M6.9 1.4a5.5 5.5 0 1 0 3.3 9.9l3.1 3.1 1.3-1.3-3.1-3.1a5.5 5.5 0 0 0-4.6-8.6zm0 1.9a3.6 3.6 0 1 1 0 7.2 3.6 3.6 0 0 1 0-7.2z"/></svg>
@@ -2521,11 +2738,15 @@ async function showGraph() {
             <button id="graph-reset" aria-label="Reset view" title="Reset view">${iconReset}</button>
             <button id="graph-full" aria-label="Full screen" title="Full screen">${iconMax}</button>
           </div>
+          </div>
+          <!-- Says why the canvas is dimmed once the panel is closed, so a
+               filtered graph is never a mystery. It sits under the bar, in the
+               toolbar's own flow, so a bar that wraps pushes it down. -->
+          <div class="graph-pill" id="graph-pill" hidden></div>
         </div>
-        <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>
-        <!-- Says why the canvas is dimmed once the panel is closed, so a
-             filtered graph is never a mystery. -->
-        <div class="graph-pill" id="graph-pill" hidden></div>
+        <!-- A group, not an img: an img makes its focusable descendants presentational,
+             and every node in here is a labelled, focusable stop. -->
+        <svg id="graph-svg" role="group" aria-label="Page link graph"></svg>
         <!-- A query that matches nothing greys the graph rather than emptying
              it: an empty rectangle reads as a broken view, and the thing the
              reader wants back is still there behind this. -->
@@ -2535,11 +2756,13 @@ async function showGraph() {
         </div>
       </div>
       <div class="graph-rail" id="graph-rail">
+        <button class="graph-rail-close" id="graph-rail-close" aria-label="Close details">&times;</button>
         <div class="group-label">Selected</div>
         <h2 id="graph-sel-name">Nothing yet</h2>
         <div class="sub" id="graph-sel-sub">${esc(plural(nodes.length, "page"))} · ${esc(plural(links.length, "link"))}${esc(truncated)}</div>
-        <p class="why" id="graph-sel-why">Click any node to inspect it here. Neighbours
-          are listed below; the graph dims everything else.</p>
+        <p class="why" id="graph-sel-why">Select a node to inspect it here; press Enter or
+          double-click it to open the page. Neighbours are listed below and the graph
+          dims everything else.</p>
         <div id="graph-sel-box" hidden>
           <div class="group-label">Neighbours</div>
           <div class="neighbours" id="graph-neighbours"></div>
@@ -2575,6 +2798,11 @@ async function showGraph() {
       svg.appendChild(el);
       return el;
     });
+    // position() runs every frame for every node, and used to find each node's
+    // circles and label with querySelector -- three lookups a node, ~1,800 a
+    // frame at 600 nodes. The elements are fixed at creation, so they are kept:
+    // the dot and the label for good, the halo while its node is selected.
+    const dotEls = [], haloEls = [], textEls = [];
     const nodeEls = nodes.map((n, i) => {
       const g = mk("g", { class: "graph-node", "data-i": i, tabindex: "0" });
       g.setAttribute("aria-label", `${n.title || n.slug} (${n.type})`);
@@ -2584,10 +2812,14 @@ async function showGraph() {
       title.textContent = `${n.title || n.slug} (${n.type}, ${n.links} inbound)`;
       c.appendChild(title);
       g.appendChild(c);
+      dotEls[i] = c;
+      haloEls[i] = null;
+      textEls[i] = null;
       if (n.links >= 2 || nodes.length <= 30) {
         const t = mk("text", { "font-size": "11.5", fill: "var(--ink-dim)" });
         t.textContent = n.slug;
         g.appendChild(t);
+        textEls[i] = t;
       }
       svg.appendChild(g);
       return g;
@@ -2600,21 +2832,21 @@ async function showGraph() {
         el.setAttribute("x2", pts[el._b].x.toFixed(1));
         el.setAttribute("y2", pts[el._b].y.toFixed(1));
       }
-      nodeEls.forEach((g, i) => {
-        const halo = g.querySelector("circle.graph-halo");
-        const c = g.querySelector("circle.graph-dot");
-        c.setAttribute("cx", pts[i].x.toFixed(1));
-        c.setAttribute("cy", pts[i].y.toFixed(1));
+      for (let i = 0; i < pts.length; i++) {
+        const x = pts[i].x.toFixed(1), y = pts[i].y.toFixed(1);
+        dotEls[i].setAttribute("cx", x);
+        dotEls[i].setAttribute("cy", y);
+        const halo = haloEls[i];
         if (halo) {
-          halo.setAttribute("cx", pts[i].x.toFixed(1));
-          halo.setAttribute("cy", pts[i].y.toFixed(1));
+          halo.setAttribute("cx", x);
+          halo.setAttribute("cy", y);
         }
-        const t = g.querySelector("text");
+        const t = textEls[i];
         if (t) {
           t.setAttribute("x", (pts[i].x + radiusOf(i) + 6).toFixed(1));
           t.setAttribute("y", (pts[i].y + 4).toFixed(1));
         }
-      });
+      }
     };
 
     // ---- selection --------------------------------------------------------
@@ -2629,15 +2861,19 @@ async function showGraph() {
         const on = i === selected;
         const near = selected < 0 || on || neighbors[selected].has(i);
         g.classList.toggle("graph-dim", !near);
-        g.querySelector("circle.graph-dot").setAttribute("r", radiusOf(i));
-        let halo = g.querySelector("circle.graph-halo");
+        dotEls[i].setAttribute("r", radiusOf(i));
+        let halo = haloEls[i];
         if (on && !halo) {
           halo = mk("circle", { class: "graph-halo",
             fill: hue[nodes[i].type] || "var(--ink-dim)", opacity: "0.14" });
           g.insertBefore(halo, g.firstChild);
-        } else if (!on && halo) halo.remove();
+          haloEls[i] = halo;
+        } else if (!on && halo) {
+          halo.remove();
+          haloEls[i] = halo = null;
+        }
         if (halo) halo.setAttribute("r", radiusOf(i) + 7);
-        const t = g.querySelector("text");
+        const t = textEls[i];
         if (t) {
           t.setAttribute("font-size", on ? "13" : "11.5");
           t.setAttribute("font-weight", on ? "600" : "400");
@@ -2652,6 +2888,7 @@ async function showGraph() {
       position();
     };
 
+    const root = svg.closest(".graph-view");
     const rail = {
       name: $("graph-sel-name"), sub: $("graph-sel-sub"), why: $("graph-sel-why"),
       box: $("graph-sel-box"), list: $("graph-neighbours"), open: $("graph-open"),
@@ -2669,7 +2906,25 @@ async function showGraph() {
         `<a href="#/page/${encodeURIComponent(nodes[j].slug)}">${typeDot(nodes[j].type)}<span>${esc(nodes[j].title || nodes[j].slug)}</span></a>`).join("");
       rail.open.href = `#/page/${encodeURIComponent(n.slug)}`;
       rail.box.hidden = false;
+      root.classList.add("graph-has-sel");
+      ensureVisible(i);
     };
+    const railIdle = {
+      name: rail.name.textContent, sub: rail.sub.textContent, why: rail.why.textContent,
+    };
+    // Back to nothing selected: the canvas undims, the rail returns to its
+    // opening text, and below 900px the bottom sheet goes away with it.
+    const deselect = () => {
+      if (selected < 0) return;
+      selected = -1;
+      paintSelection();
+      rail.name.textContent = railIdle.name;
+      rail.sub.textContent = railIdle.sub;
+      rail.why.textContent = railIdle.why;
+      rail.box.hidden = true;
+      root.classList.remove("graph-has-sel");
+    };
+    const openPage = (i) => { location.hash = "#/page/" + encodeURIComponent(nodes[i].slug); };
 
     position();
 
@@ -2698,7 +2953,23 @@ async function showGraph() {
     // visibly untangles itself. Afterwards three is the budget: enough to
     // converge in about half a second, few enough that an O(n^2) repulsion pass
     // over a 300-node graph does not eat the frame the drag is being drawn in.
-    let stepsPerFrame = 10;
+    // A frame's budget is the repulsion pass, O(n^2) a step, so the first run
+    // takes fewer steps a frame on a big graph rather than hold the main thread:
+    // ten up to ~385 nodes, four at 600.
+    let stepsPerFrame = Math.max(3, Math.min(10, Math.floor(1500000 / (nodes.length * nodes.length))));
+    // Reduced motion: the layout is not animated at all. Every settle runs to
+    // rest in one synchronous burst, so the graph is drawn once, already
+    // arranged, and a drag or a reset moves things by one jump instead of a
+    // second of drifting. The cost is the same ticks the animation would run,
+    // spent before the next paint instead of across the next sixty.
+    const relax = () => {
+      while (alpha > ALPHA_MIN) { tick(alpha); alpha *= ALPHA_DECAY; }
+    };
+    const rested = () => {
+      settling = false;
+      stepsPerFrame = 3;
+      if (!autoFitted) { autoFitted = true; fitView(); }
+    };
     const settle = () => {
       if (!view.current()) { settling = false; return; }
       for (let i = 0; i < stepsPerFrame && alpha > ALPHA_MIN; i++) {
@@ -2706,19 +2977,19 @@ async function showGraph() {
         alpha *= ALPHA_DECAY;
       }
       position();
-      if (alpha <= ALPHA_MIN) {
-        settling = false;
-        stepsPerFrame = 3;
-        if (!autoFitted) { autoFitted = true; fitView(); }
-        return;
-      }
+      if (alpha <= ALPHA_MIN) { rested(); return; }
       requestAnimationFrame(settle);
     };
     const reheat = (target) => {
       alpha = Math.max(alpha, target);
+      if (REDUCED.matches) {
+        relax();
+        position();
+        if (!settling) rested();
+        return;
+      }
       if (!settling) { settling = true; requestAnimationFrame(settle); }
     };
-    reheat(ALPHA_START);
 
     // --- pan & zoom -------------------------------------------------------
     const vb = { x: 0, y: 0, w: W, h: H };
@@ -2728,6 +2999,35 @@ async function showGraph() {
       zoomLabel.textContent = Math.round((W / vb.w) * 100) + "%";
     };
     applyVB();
+    // Bring a node back inside the viewBox: the canvas gets shorter when the
+    // bottom sheet opens, and a focused node can be anywhere.
+    const ensureVisible = (i) => {
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const pad = 24 * (vb.w / rect.width);
+      const p = pts[i];
+      const x0 = vb.x, y0 = vb.y;
+      if (p.x < vb.x + pad) vb.x = p.x - pad;
+      else if (p.x > vb.x + vb.w - pad) vb.x = p.x + pad - vb.w;
+      if (p.y < vb.y + pad) vb.y = p.y - pad;
+      else if (p.y > vb.y + vb.h - pad) vb.y = p.y + pad - vb.h;
+      if (vb.x !== x0 || vb.y !== y0) applyVB();
+    };
+    // The canvas also changes height when that sheet opens and closes, and on
+    // any window resize. Keeping the viewBox's aspect equal to the element's
+    // keeps the picture at its scale: left alone, the browser letterboxes the
+    // old box into the new one and shrinks the whole layout to fit.
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(() => {
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        vb.h = vb.w * (rect.height / rect.width);
+        applyVB();
+        if (selected >= 0) ensureVisible(selected);
+      });
+      ro.observe(svg);
+      onViewCleanup(() => ro.disconnect());
+    }
     // fitView fills the canvas by spreading the layout, never by zooming the
     // camera: nodes move apart while circles and labels keep their natural
     // size. Zooming in to fill made 19 nodes look like beach balls; leaving
@@ -2773,6 +3073,9 @@ async function showGraph() {
         springLen *= grow;
         gravity /= grow;
       }
+      // Reduced motion relaxes now, so the camera below frames the final layout
+      // rather than the one the rescale left behind.
+      if (REDUCED.matches) { alpha = Math.max(alpha, ALPHA_RESCALE); relax(); }
       position();
       m = bounds();
       const bx = m.x0 - 20, by = m.y0 - 20;
@@ -2789,8 +3092,11 @@ async function showGraph() {
       applyVB();
       // Uniform rescaling magnifies the old layout's irregularities: let
       // the simulation relax into even spacing at the new scale.
-      reheat(ALPHA_RESCALE);
+      if (!REDUCED.matches) reheat(ALPHA_RESCALE);
     };
+    // Last, because with reduced motion this runs the whole layout and then
+    // fitView before returning, and both need everything above.
+    reheat(ALPHA_START);
     const toSVG = (e) => {
       const rect = svg.getBoundingClientRect();
       return {
@@ -2866,9 +3172,12 @@ async function showGraph() {
         document.removeEventListener("keydown", onEsc);
         return;
       }
-      if (e.key === "Escape" && wrap.classList.contains("graph-fs")) {
+      if (e.key !== "Escape") return;
+      if (wrap.classList.contains("graph-fs")) {
         wrap.classList.remove("graph-fs");
         resync();
+      } else if (selected >= 0) {
+        deselect();
       }
     };
     document.addEventListener("keydown", onEsc);
@@ -2911,7 +3220,9 @@ async function showGraph() {
         // below the temperature a release re-arms: letting go should visibly
         // hand the node back to the layout, not continue what was already
         // happening.
-        reheat(ALPHA_DRAG);
+        // Reduced motion skips this: the neighbours would have to jump to a new
+        // rest on every pointer event. They settle once, when the node is let go.
+        if (!REDUCED.matches) reheat(ALPHA_DRAG);
       } else {
         const rect = svg.getBoundingClientRect();
         vb.x = drag.pan.x - ((e.clientX - drag.from.cx) / rect.width) * vb.w;
@@ -2929,8 +3240,9 @@ async function showGraph() {
         // moment instead of stopping the instant the finger lifts. Capped at
         // the same per-tick travel the integrator allows, so a violent flick
         // cannot launch a node across the canvas.
-        p.vx = Math.max(-8, Math.min(8, drag.vx));
-        p.vy = Math.max(-8, Math.min(8, drag.vy));
+        // Reduced motion carries nothing: the node stops where it was let go.
+        p.vx = REDUCED.matches ? 0 : Math.max(-8, Math.min(8, drag.vx));
+        p.vy = REDUCED.matches ? 0 : Math.max(-8, Math.min(8, drag.vy));
         // The release is what needs the heat: until now nothing re-armed the
         // simulation here, so a node let go simply stayed where it was dropped
         // and the graph around it never re-settled.
@@ -2938,6 +3250,10 @@ async function showGraph() {
         // A press that never travels is a click, so navigation survives the
         // drag handlers -- but it selects rather than leaves the graph.
         if (drag.moved < 3) select(drag.i);
+      } else if (drag.moved < 3) {
+        // A press on empty canvas that never travels is a click on nothing, which
+        // lets go of the selection -- and, below 900px, closes the bottom sheet.
+        deselect();
       }
       drag = null;
     };
@@ -2945,14 +3261,26 @@ async function showGraph() {
     svg.addEventListener("pointercancel", endDrag);
     svg.addEventListener("dblclick", (e) => {
       const g = e.target.closest("g.graph-node");
-      if (g) location.hash = "#/page/" + encodeURIComponent(nodes[g.dataset.i].slug);
+      if (g) openPage(Number(g.dataset.i));
     });
+    // Focusing a node selects it, so Enter on a focused node is Enter on a
+    // selected one: it opens the page. Double-click is the pointer's way to say
+    // the same thing, and a keyboard has no double-click.
+    // quiet stops the focus the close button hands back from selecting again.
+    let quiet = false;
     for (const g of nodeEls) {
       g.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") select(Number(g.dataset.i));
+        if (e.key !== "Enter" || e.repeat) return;
+        const i = Number(g.dataset.i);
+        if (selected === i) { e.preventDefault(); openPage(i); } else select(i);
       });
-      g.addEventListener("focus", () => select(Number(g.dataset.i)));
+      g.addEventListener("focus", () => { if (!quiet) select(Number(g.dataset.i)); });
     }
+    $("graph-rail-close").addEventListener("click", () => {
+      const i = selected;
+      deselect();
+      if (i >= 0) { quiet = true; nodeEls[i].focus(); quiet = false; }
+    });
 
     // --- hover: light the neighborhood, dim the rest ----------------------
     // Only while nothing is selected: a selection is a standing answer, and a
@@ -3459,6 +3787,9 @@ async function showMembers() {
     }
     for (const b of document.querySelectorAll("[data-remove]")) {
       once(b, async () => {
+        // Removing someone ends their access to the bench at once; a stray
+        // click should not do that, so it arms first like every other delete.
+        if (!armButton(b, "remove")) return;
         try {
           await api(`/workspaces/${encodeURIComponent(state.workspace)}/members/${encodeURIComponent(b.dataset.remove)}`,
             { method: "DELETE" });

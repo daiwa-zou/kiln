@@ -56,7 +56,7 @@ func TestCloneRefusesInstallationNoMemberHolds(t *testing.T) {
 	st := &fakeStore{installOK: false}
 	w, minted := installationWorker(t, st)
 
-	_, _, err := w.cloneRemote(context.Background(), installationConnector(), "https://github.com/acme/private.git")
+	_, _, _, err := w.cloneRemote(context.Background(), installationConnector(), "https://github.com/acme/private.git")
 	if err == nil || !strings.Contains(err.Error(), "no current member") {
 		t.Fatalf("err = %v, want a refusal naming membership", err)
 	}
@@ -72,7 +72,7 @@ func TestCloneAllowsInstallationAMemberHolds(t *testing.T) {
 	st := &fakeStore{installOK: true}
 	w, minted := installationWorker(t, st)
 
-	_, _, err := w.cloneRemote(context.Background(), installationConnector(), "https://github.com/acme/private.git")
+	_, _, _, err := w.cloneRemote(context.Background(), installationConnector(), "https://github.com/acme/private.git")
 	if err == nil {
 		t.Fatal("expected the stubbed token endpoint to fail the clone")
 	}
@@ -88,7 +88,7 @@ func TestCloneInstallationCheckFailsClosed(t *testing.T) {
 	st := &fakeStore{installErr: errors.New("db down")}
 	w, minted := installationWorker(t, st)
 
-	_, _, err := w.cloneRemote(context.Background(), installationConnector(), "https://github.com/acme/private.git")
+	_, _, _, err := w.cloneRemote(context.Background(), installationConnector(), "https://github.com/acme/private.git")
 	if err == nil || !strings.Contains(err.Error(), "db down") {
 		t.Fatalf("err = %v, want the store error surfaced", err)
 	}
@@ -104,7 +104,7 @@ func TestCloneSkipsInstallationCheckWithAuthDisabled(t *testing.T) {
 	w, minted := installationWorker(t, st)
 	w.AuthDisabled = true
 
-	_, _, _ = w.cloneRemote(context.Background(), installationConnector(), "https://github.com/acme/private.git")
+	_, _, _, _ = w.cloneRemote(context.Background(), installationConnector(), "https://github.com/acme/private.git")
 	if len(st.installChecked) != 0 {
 		t.Errorf("auth-disabled worker consulted the store: %v", st.installChecked)
 	}

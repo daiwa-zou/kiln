@@ -578,7 +578,7 @@ func (rm *RepoMap) ToWorkspaceMap() *mapper.WorkspaceMap {
 		Kind:          "git",
 		Root:          rm.Root,
 		GeneratedAt:   rm.GeneratedAt,
-		Hash:          rm.Hash,
+		ArchHash:      rm.Hash,
 		Summary:       rm.Render(),
 	}
 
@@ -635,8 +635,10 @@ func (m Module) entryInputs() []string {
 	return out
 }
 
-// computeHash digests the structural shape of the map. A change here dirties
-// the architecture synthesis pages.
+// computeHash digests the structural shape of the map: modules, their
+// dependencies, entry points, protobuf services and compose services. It is
+// the architecture synthesis's gate (WorkspaceMap.ArchHash), so a change here
+// dirties the architecture pages and nothing else does.
 func (rm *RepoMap) computeHash() string {
 	h := sha256.New()
 	for _, m := range rm.Modules {

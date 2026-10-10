@@ -243,10 +243,10 @@ sequenceDiagram
     rect rgb(30,40,55)
     note over T,API: manual · webhook · poll · continuation
     T->>API: POST /runs, or push webhook
-    API->>API: check workspace budget window
+    API->>API: check workspace budget window<br/>(a person's request: manual, upload)
     API->>DB: EnqueueRun, status queued
     note right of DB: a partial unique index allows<br/>one active run per bench
-    DB-->>API: existing run if one is active<br/>— debounced, ref_to advanced
+    DB-->>API: waiting build: merged, ref_to advanced<br/>research or running build: recorded, queued after
     end
 
     loop poll interval
@@ -257,6 +257,7 @@ sequenceDiagram
     end
 
     DB-->>W: run + workspace + org (one round trip)
+    W->>W: check workspace budget window<br/>(spent: finish over_budget, build nothing)
     W->>W: resolve sources, build, import
     W->>DB: RecordRun (terminal status)
     opt deferred work AND something succeeded
@@ -265,11 +266,43 @@ sequenceDiagram
 ```
 
 **Debounce.** A partial unique index allows only one `queued`-or-`running` run
-per workspace. A second enqueue collapses onto the waiting run and *advances its
-`ref_to`* to the newest head, so a push storm's final state is what gets built.
-A run already claimed is left alone — it loses nothing, because the base of an
-incremental range always derives from the workspace's last successful build, not
-from the webhook's claim.
+per workspace, so the bench does one job at a time. What a second request does
+depends on what holds the slot, because only a queued *build* can honor a build
+request:
+
+- **A queued build is waiting:** the request *merges* into it and advances its
+  `ref_to` to the newest head, so a push storm's final state is what gets built.
+  If that build is pinned to one connector and the request names another (or
+  none, as a manual Build does), the build is *widened* to every connector, so
+  no connector's change is left out of the build that was meant to include it.
+  Widening only goes one way.
+- **A research run is queued, or a build is already running:** merging would
+  lose the request. Research reads sources to answer one question and builds
+  nothing; a running build planned its units from what it read at the start. The
+  request is recorded in `build_requests` (one row per workspace, merged the same
+  way) and the claim step turns it into a queued build as soon as the workspace
+  has no active run. Because promotion happens at claim, a request survives the
+  worker that was running the blocking job dying.
+
+`POST /runs` reports which happened: `outcome` is `created`, `merged` (with
+`mergedInto`, the absorbing run's trigger) or `deferred` (with `queuedBehind`,
+the trigger of the run it waits for). The incremental range base always derives
+from the workspace's last successful build, not from the request, so neither
+path can leave a hole in the diff.
+
+**Budget window.** The API checks the rolling workspace budget when a person
+asks for a build, so they get an immediate refusal. Webhook, poll and
+continuation runs are enqueued without that check, and any run can wait in the
+queue while the window fills, so the worker checks the same window when it
+claims a run: a bench already at its `budget_usd` has the run finished as
+`over_budget` with the pipeline never called, files the same deduplicated
+"budget window exceeded" review, and enqueues no continuation.
+
+**Branch.** A git connector builds one branch: its `branch` config key, or the
+repository's default branch when unset. A push to any other ref (a feature
+branch, a tag, a branch deletion) is acknowledged with a 2xx and an `ignored`
+message, never enqueued and never an error, because GitHub does not redeliver
+failed hooks.
 
 **Cooldown.** `github.webhook_cooldown` (default 1 minute) sets `not_before` on
 enqueue, so however hard someone pushes, a bench rebuilds at most once a minute.
@@ -433,9 +466,13 @@ flowchart LR
     style Gen fill:#4a3510,stroke:#c88a2e,color:#f5e6c8
 ```
 
-The architecture synthesis has no unit of its own, so the **whole-map hash**
-gates it. Without that, every build — including a completely unchanged one —
-would pay for an architecture regeneration.
+The architecture synthesis has no unit of its own, so the repository's
+**structural digest** (`ArchHash`: modules, dependencies, entry points, protobuf
+and compose services) gates it. Documents and web pages are deliberately not part
+of it, and the merge carries it through unchanged, so editing a document — or
+running with a different set of connectors — never re-pays for the synthesis.
+Without that gate, every build — including a completely unchanged one — would
+pay for an architecture regeneration.
 
 A source record is updated **only on success**. A failed unit keeps its old
 hash, so it is planned again on the next run. That single rule is what makes
@@ -801,7 +838,7 @@ flowchart TD
     L3["<b>3 · max_pages_per_run</b><br/>truncates the plan; remainder deferred"]
     L4["<b>4 · Per-call budgets</b><br/>analyze_budget_usd · page_budget_usd"]
     L5["<b>5 · run_budget_usd</b><br/>reserve-before / settle-after ledger"]
-    L6["<b>6 · Workspace budget window</b><br/>rolling cap, enforced at enqueue;<br/>warns at 80%"]
+    L6["<b>6 · Workspace budget window</b><br/>rolling cap, enforced at enqueue<br/>and again at claim; warns at 80%"]
 
     L1 --> L2 --> L3 --> L4 --> L5 --> L6
 
@@ -886,8 +923,8 @@ stateDiagram-v2
     running --> partial : some clean, some failed
     running --> failed : nothing succeeded
     running --> no_changes : hash gate dropped everything
-    running --> over_budget : ledger refused a reservation
-    running --> canceled : context canceled mid-run
+    running --> over_budget : ledger refused a reservation, or window spent at claim
+    running --> canceled : context canceled mid-run (drain: continuation queued)
     running --> queued : drain / stale requeue
     succeeded --> [*]
     partial --> [*]
@@ -935,7 +972,12 @@ Browser sessions act with the user's full authority; scopes exist to narrow
 *automation* tokens. Sessions are server-side rows, so a stolen cookie is
 revocable.
 
-**Rate limiting** applies to write routes. **Uploads** get a 5-minute timeout
+**Rate limiting** applies to write routes. The **webhook** is limited per
+repository (or App installation), taken from the payload only *after* its HMAC
+verified, because behind an ingress every delivery shares the proxy's address
+and GitHub never redelivers a 429. Deliveries that fail verification are limited
+by peer address instead (never `X-Forwarded-For`), and signed ones never touch
+that bucket. **Uploads** get a 5-minute timeout
 instead of the API-wide 30 seconds, and accept up to 32 MiB per file — a reverse
 proxy in front of kiln needs its body limit raised to match (nginx:
 `client_max_body_size 34m`).
@@ -1027,7 +1069,7 @@ survives.
 | Validation fails | Errors are stated back to the agent and generation retries; the final attempt escalates to the fallback model. |
 | Run budget exhausted | Scheduling stops. In-flight units finish — paid-for calls are not thrown away. Remaining units stay stale. |
 | Ctrl-C / cancellation | Stops scheduling; already-generated units are still imported, on an uncancelable context. |
-| Rolling deploy | Shutdown drains: the in-flight run keeps a detached context for `worker.drain_grace` (default 15m, above one agent call). Past that it is interrupted and **requeued, not failed**. |
+| Rolling deploy | Shutdown drains: the in-flight run keeps a detached context for `worker.drain_grace` (default 15m, above one agent call). Past that it is interrupted and **never failed**. A run that had produced nothing yet (resolving sources, or a research pass) is **requeued** whole, with its review item left untouched. A build that was part-way keeps what it finished: those units are imported, the run is recorded `canceled`, and a `continuation` run is queued for the units it never reached. |
 | Worker dies mid-build | Its run sits `running` and would block the bench via the active-run index. `worker.stale_after` (default 45m) returns it to the queue once its claim has gone that long without a heartbeat; a live worker refreshes the claim every `worker.heartbeat_interval` (default 1m), so a long healthy build is never swept. Terminal and progress writes are fenced to the claiming worker, so a worker that lost its claim can neither finish nor requeue the run that replaced it, and it cancels its own build as soon as a heartbeat finds the claim gone. The pipeline is idempotent from the start. |
 | Import fails | The run is marked failed **and still ledgered**, because the agent calls are already billed. |
 | Blob missing at sync | That document is skipped and reported to the review queue; the rest of the bench builds. |

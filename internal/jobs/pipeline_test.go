@@ -1425,3 +1425,40 @@ func TestUnitThatPlansPagesAndWritesNoneStillReportsSuccess(t *testing.T) {
 		t.Errorf("Created = %d, want 0 for a generation that wrote nothing", res.Summary.Created)
 	}
 }
+
+// A run's ref is the base of the next incremental range, and only a full SHA
+// can be fetched from a remote; an abbreviation cannot. So the record keeps the
+// full id while everything a reader sees stays at the familiar seven characters.
+func TestBuildRecordsTheFullRefAndShowsTheShortOne(t *testing.T) {
+	const full = "0123456789abcdef0123456789abcdef01234567"
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.filesByAttempt[0] = map[string]string{
+		"entities/ripple.md": validPage("entity", "Ripple"),
+	}
+	p := testPipeline(store, runner)
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"})
+	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
+	req.Ref = full
+
+	res, err := p.Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.Summary.Ref != full {
+		t.Errorf("run summary ref = %q, want the full SHA", res.Summary.Ref)
+	}
+
+	imp := store.lastImport()
+	if imp == nil {
+		t.Fatal("nothing was imported")
+	}
+	if strings.Contains(imp.Overview, full) || !strings.Contains(imp.Overview, full[:7]) {
+		t.Errorf("overview should show the short ref only:\n%s", imp.Overview)
+	}
+	for _, pg := range imp.UpsertPages {
+		if pg.Meta.BuiltAtRef != full[:7] {
+			t.Errorf("page %s BuiltAtRef = %q, want %q", pg.Path, pg.Meta.BuiltAtRef, full[:7])
+		}
+	}
+}

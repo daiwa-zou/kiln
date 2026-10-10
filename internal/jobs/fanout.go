@@ -326,10 +326,10 @@ func (p *Pipeline) mergeOutcomes(
 
 			// The source record is only updated on success, so a failed unit
 			// keeps its old hash and is retried on the next run. The
-			// architecture synthesis has no unit of its own; the whole-map
-			// hash is its input, and recording it is what makes an unchanged
-			// repeat build genuinely free.
-			hash := req.Map.Hash
+			// architecture synthesis has no unit of its own; the repository's
+			// structural digest is its input, and recording it is what makes
+			// an unchanged repeat build genuinely free.
+			hash := req.Map.ArchHash
 			if key != diff.ArchOverview {
 				hash = units[string(key)].Hash
 			}

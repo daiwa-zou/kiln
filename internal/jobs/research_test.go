@@ -262,6 +262,33 @@ func TestResearchLedgersAFailedPass(t *testing.T) {
 	}
 }
 
+func TestResearchInterruptedByCancellationRecordsNothing(t *testing.T) {
+	// A canceled context is the worker draining (or having lost the claim), not
+	// a research failure. Recording 'failed' would finish the row, and the
+	// requeue that follows is fenced to status 'running' -- so the question would
+	// never be researched. The pass must return the context's error and leave the
+	// row for the worker.
+	repo := researchRepo(t)
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.failWith = context.Canceled
+	p := testPipeline(store, runner)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := p.Research(ctx, ResearchRequest{
+		RunID: "run-research", WorkspaceID: "ws-1",
+		Source:   SourceSpec{Path: repo, Slug: "bench"},
+		Question: Question{Kind: "gap", Title: "What is the retry policy?"},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Research = %v, want the context's error", err)
+	}
+	if len(store.runs) != 0 {
+		t.Errorf("an interrupted pass recorded a terminal status: %+v", store.runs)
+	}
+}
+
 func TestResearchRejectsAnEmptyAnswer(t *testing.T) {
 	repo := researchRepo(t)
 	store := newMemStore()
@@ -374,8 +401,9 @@ func TestResearchPromptCarriesTheQuestionAndItsMaterial(t *testing.T) {
 	)
 
 	// The "Question:" line leads, which is the contract the fake runner reads
-	// back and the reason a research prompt is recognisable at all.
-	if !strings.Contains(prompt, "Question: Two retry counts") {
+	// back and the reason a research prompt is recognisable at all. The title
+	// is quoted because it is untrusted single-line text.
+	if !strings.Contains(prompt, `Question: "Two retry counts"`) {
 		t.Errorf("prompt does not lead with the question:\n%s", prompt)
 	}
 	for _, want := range []string{"contradiction", "one says 3", "module:dispatch", "dispatch", "It retries."} {
@@ -430,7 +458,8 @@ func TestResearchPromptSharesOneBudgetAcrossItsUnits(t *testing.T) {
 
 func TestBuildContextIsUnchangedByTheBudgetParameter(t *testing.T) {
 	// The build path passes the limits it always had; its rendering must stay
-	// byte-for-byte what it was.
+	// byte-for-byte what it was, apart from the path headings, which are now
+	// quoted so that a file name cannot inject a line of its own.
 	root := t.TempDir()
 	write(t, root, "a.go", "package a\n")
 	write(t, root, "b.go", "package b\n")
@@ -439,8 +468,8 @@ func TestBuildContextIsUnchangedByTheBudgetParameter(t *testing.T) {
 
 	want := "\n## Source material\n\n" +
 		"This is the content of the unit's inputs. Ground every claim in it.\n" +
-		"\n### a.go\n\n```\npackage a\n\n```\n" +
-		"\n### b.go\n\n```\npackage b\n\n```\n"
+		"\n### \"a.go\"\n\n```\npackage a\n\n```\n" +
+		"\n### \"b.go\"\n\n```\npackage b\n\n```\n"
 	if got != want {
 		t.Errorf("build context changed:\n got %q\nwant %q", got, want)
 	}

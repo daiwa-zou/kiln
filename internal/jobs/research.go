@@ -163,10 +163,27 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 }
 
 // failResearch ledgers a failed pass and returns the cause. Recording happens
-// on a detached context because the usual reason a research call fails is that
-// the worker is draining, and a run row left 'running' blocks its workspace
-// until the stale deadline.
+// on a detached context so a failure that arrives as the worker is shutting
+// down is still written, rather than leaving the row 'running' until the stale
+// deadline.
+//
+// A canceled context is the exception, and the reason is what the cancellation
+// means. The worker cancels a run's context for exactly two reasons: it is
+// draining past its grace period, in which case the run is not broken and goes
+// back to the queue, or the run's claim was lost, in which case it is no longer
+// this worker's to write. Recording 'failed' is wrong for both. For a drain it
+// finishes the row, so the requeue that follows (fenced to status 'running') is
+// refused and the question is never researched; for a lost claim the fenced
+// write is refused anyway. So an interrupted pass writes nothing, and returns
+// the context's error for the worker to act on. No known spend is lost by it: a
+// call canceled mid-flight returns no result, so there is no cost to ledger, and
+// the requeued run is charged for its own pass.
 func (p *Pipeline) failResearch(ctx context.Context, summary RunSummary, cause error) error {
+	if ctx.Err() != nil {
+		p.logger().Warn("research interrupted; leaving the run for the worker to requeue",
+			"run", summary.RunID, "cause", cause)
+		return ctx.Err()
+	}
 	summary.Status = StatusFailed
 	summary.Err = cause.Error()
 	if err := p.Store.RecordRun(context.WithoutCancel(ctx), summary); err != nil {
@@ -453,16 +470,18 @@ Rules:
 func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.Page) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "Answer this review item.\n\nQuestion: %s\n", q.Title)
-	fmt.Fprintf(&b, "Kind: %s\n", q.Kind)
+	// The title is a flag a model raised while reading untrusted source, so it
+	// is quoted; see quoted.
+	fmt.Fprintf(&b, "Answer this review item.\n\nQuestion: %s\n", quoted(q.Title))
+	fmt.Fprintf(&b, "Kind: %s\n", quoted(q.Kind))
 	if q.PageSlug != "" {
-		fmt.Fprintf(&b, "Raised against page: %s\n", q.PageSlug)
+		fmt.Fprintf(&b, "Raised against page: %s\n", quoted(q.PageSlug))
 	}
 	if strings.TrimSpace(q.Detail) != "" {
 		b.WriteString("\n## What the build recorded\n\n")
 		// Fenced: the detail is prose a previous model wrote, and it is read
 		// here as the question rather than as instruction.
-		fmt.Fprintf(&b, "```\n%s\n```\n", strings.TrimSpace(q.Detail))
+		b.WriteString(fence(strings.TrimSpace(q.Detail)))
 	}
 
 	switch {
@@ -477,9 +496,9 @@ func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.P
 		// question still renders an identical prompt.
 		remaining := maxResearchContextBytes
 		for i, u := range units {
-			fmt.Fprintf(&b, "\n### unit %s", u.Key)
+			fmt.Fprintf(&b, "\n### unit %s", quoted(string(u.Key)))
 			if u.Title != "" {
-				fmt.Fprintf(&b, " — %s", u.Title)
+				fmt.Fprintf(&b, " — %s", quoted(u.Title))
 			}
 			b.WriteString("\n")
 			share := max(remaining, 0) / (len(units) - i)
@@ -502,12 +521,12 @@ func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.P
 		b.WriteString("\n## What the wiki currently says\n\n")
 		b.WriteString("These pages bear on the question. They may be the source of it.\n")
 		for _, pg := range pages {
-			fmt.Fprintf(&b, "\n### %s (%s)\n\n", pg.Meta.Title, pg.Slug)
+			fmt.Fprintf(&b, "\n### %s (%s)\n\n", quoted(pg.Meta.Title), quoted(pg.Slug))
 			body := pg.Body
 			if len(body) > maxResearchPageBytes {
 				body = body[:maxResearchPageBytes] + "\n…truncated…"
 			}
-			fmt.Fprintf(&b, "```\n%s\n```\n", body)
+			b.WriteString(fence(body))
 		}
 	}
 

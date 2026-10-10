@@ -148,6 +148,19 @@ func validateConnectorConfig(kind string, cfg map[string]any) string {
 				return err.Error()
 			}
 		}
+		// Optional: which branch to build. Absent means the repository's
+		// default branch, and pushes to any other branch do not trigger builds.
+		if raw, present := cfg["branch"]; present {
+			branch, ok := raw.(string)
+			if !ok {
+				return "branch must be a string"
+			}
+			if branch = strings.TrimSpace(branch); branch != "" {
+				if err := gitconn.ValidateBranch(branch); err != nil {
+					return err.Error()
+				}
+			}
+		}
 	case "upload":
 		// No path means files mode: the connector consumes the workspace's
 		// uploaded files from the blob store, which is the browser-upload

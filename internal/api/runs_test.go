@@ -55,6 +55,61 @@ func TestRunsCreateListAndDebounce(t *testing.T) {
 	}
 }
 
+type enqueueBody struct {
+	ID           string `json:"id"`
+	Created      bool   `json:"created"`
+	Outcome      string `json:"outcome"`
+	MergedInto   string `json:"mergedInto"`
+	QueuedBehind string `json:"queuedBehind"`
+}
+
+func TestRunsCreateSaysWhatAbsorbedTheRequest(t *testing.T) {
+	srv, js, wsID := testServer(t)
+	ctx := context.Background()
+
+	// A webhook build is waiting; the Build click joins it, and says so.
+	webhook, _, err := js.EnqueueRunOpts(ctx, wsID, "webhook", "", store.EnqueueOptions{RefTo: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var joined enqueueBody
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/runs", "",
+		map[string]any{}, &joined); code != http.StatusAccepted {
+		t.Fatalf("POST runs = %d, want 202", code)
+	}
+	if joined.Outcome != "merged" || joined.MergedInto != "webhook" || joined.Created || joined.ID != webhook {
+		t.Errorf("joined a waiting build: %+v", joined)
+	}
+}
+
+func TestRunsCreateBehindResearchIsQueuedNotJoined(t *testing.T) {
+	srv, js, wsID := testServer(t)
+	ctx := context.Background()
+
+	if err := js.FileReview(ctx, wsID, "gap", "retry-policy is missing", "two pages link to it"); err != nil {
+		t.Fatal(err)
+	}
+	var item string
+	if err := js.Pool().QueryRow(ctx, `SELECT id FROM review_items WHERE workspace_id = $1`, wsID).Scan(&item); err != nil {
+		t.Fatal(err)
+	}
+	research, err := js.RequestResearch(ctx, wsID, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The click used to be reported as "joined" the research run, which builds
+	// nothing. It is now a request that waits its turn, and the response says so.
+	var res enqueueBody
+	if code := send(t, srv, http.MethodPost, "/api/v1/workspaces/demo/runs", "",
+		map[string]any{}, &res); code != http.StatusAccepted {
+		t.Fatalf("POST runs = %d, want 202", code)
+	}
+	if res.Outcome != "deferred" || res.QueuedBehind != "research" || res.Created || res.ID != research || res.MergedInto != "" {
+		t.Errorf("behind research: %+v", res)
+	}
+}
+
 func TestRunsListSurfacesDebounceDeadline(t *testing.T) {
 	srv, js, wsID := testServer(t)
 	ctx := context.Background()
@@ -77,6 +132,19 @@ func TestRunsListSurfacesDebounceDeadline(t *testing.T) {
 	got, err := time.Parse(time.RFC3339, runs[0].NotBefore)
 	if err != nil || !got.Equal(notBefore) {
 		t.Errorf("notBefore = %q (%v), want %s", runs[0].NotBefore, err, notBefore.Format(time.RFC3339))
+	}
+}
+
+func TestShortRefAbbreviatesFullSHAsForDisplay(t *testing.T) {
+	// Runs store the full SHA so a later build can fetch it; the dashboard keeps
+	// showing seven characters.
+	if got := shortRef("0123456789abcdef0123456789abcdef01234567"); got != "0123456" {
+		t.Errorf("shortRef(full) = %q, want 0123456", got)
+	}
+	for _, in := range []string{"", "abc1234", "abc"} {
+		if got := shortRef(in); got != in {
+			t.Errorf("shortRef(%q) = %q, want it unchanged", in, got)
+		}
 	}
 }
 
