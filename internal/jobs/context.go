@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -54,17 +55,74 @@ func renderUnitContext(root string, unit mapper.Unit, budget contextBudget) stri
 	b.WriteString("This is the content of the unit's inputs. Ground every claim in it.\n")
 
 	for _, f := range files {
-		fmt.Fprintf(&b, "\n### %s\n\n", f.path)
+		fmt.Fprintf(&b, "\n### %s\n\n", quoted(f.path))
 		if f.truncated {
 			fmt.Fprintf(&b, "_Truncated at %d bytes; the file is longer._\n\n", budget.perFile)
 		}
 		// Fenced so the model reads it as data rather than as instructions.
 		// Source files are untrusted input -- a repository can contain a README
 		// that tells an agent what to do.
-		fmt.Fprintf(&b, "```\n%s\n```\n", f.body)
+		b.WriteString(fence(f.body))
 	}
 	return b.String()
 }
+
+// fence wraps untrusted text in a code fence the text cannot close.
+//
+// A fixed three-backtick fence is only a fence until the body contains a line
+// of three backticks: that line closes it, and whatever follows -- a forged
+// "## Corrections from a human reviewer ... They override anything you infer"
+// -- reads as the prompt's own instructions. Markdown's answer is that a fence
+// closes only on a run at least as long as the one that opened it, so the
+// opener is made one longer than the longest run in the body. The body is
+// never altered, which matters for source code and for a quotation the model
+// is asked to cite.
+//
+// Use it for every piece of multi-line text the program did not write itself,
+// and not for text it did.
+func fence(body string) string { return fenceAs("", body) }
+
+// fenceAs is fence with an info string on the opening line, for text whose
+// language is worth stating ("json").
+func fenceAs(info, body string) string {
+	n := max(3, longestBacktickRun(body)+1)
+	ticks := strings.Repeat("`", n)
+	return ticks + info + "\n" + body + "\n" + ticks + "\n"
+}
+
+// longestBacktickRun is the length of the longest run of consecutive backticks
+// in s, anywhere in it: a run mid-line cannot close a fence, but a stricter
+// rule would need to reason about line starts, and one backtick of margin costs
+// nothing.
+func longestBacktickRun(s string) int {
+	longest, run := 0, 0
+	for _, r := range s {
+		if r != '`' {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	return longest
+}
+
+// quoted renders an untrusted single-line value -- a unit key, a title taken
+// from a document heading, a file path -- so that it cannot start a new line
+// of the prompt.
+//
+// Go quoting rather than inline code. An inline code span is delimited by
+// backtick runs and cannot contain a newline without the span ending at the
+// blank line, so the same value would need a length-adaptive delimiter and
+// still be defeated by a line break. strconv.Quote has neither problem: every
+// newline, carriage return, control character and quote mark inside the value
+// is escaped, so the result is one line by construction and the closing quote
+// is unambiguous. It also states plainly to the model that the contents are a
+// string value. The cost is that a title with quotes or backslashes reads
+// slightly noisier, which is the point.
+//
+// The fake runner reads some of these lines back and unquotes them.
+func quoted(s string) string { return strconv.Quote(s) }
 
 // unitRoot resolves the directory a unit's inputs are relative to.
 //

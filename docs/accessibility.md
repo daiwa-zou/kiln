@@ -61,9 +61,33 @@ Six more defects were found and fixed:
   always `<h2>`.
 - The graph's only heading was the selection rail's `<h2>`. It now opens with a
   visually-hidden `<h1>`.
+- The graph's controls were not all held to the floor after all: the hop
+  buttons (18px), the neighbour switch (17px), the filter pill's clear button
+  (19px) and the search box's clear button (20px) are now 24px. Its canvas was
+  `role="img"`, which makes the focusable nodes inside it presentational; it is
+  a `group`. A switched-off type chip is struck through, dashed and drawn in
+  `--ink-faint` rather than faded to 40% opacity (1.81:1). The search field,
+  which draws no outline of its own, shows the 2px `--ember` ring on the field.
+  The graph honours `prefers-reduced-motion`: the layout runs to rest before the
+  first paint, and a dragged node carries no momentum.
 - Two grids (`.stats`, `.type-cards`) used `1fr` tracks, whose automatic minimum
   is their content: one long page title pushed the document past 375px and the
   whole page scrolled sideways. Every track is `minmax(0, 1fr)`.
+
+### Follow-up pass
+
+Four more pairs failed once the UI had real data in it, and are fixed with
+tokens rather than one-off colours:
+
+| Element | Before | After |
+| --- | --- | --- |
+| Armed danger button, `#fff` on dark `--oxide` | 3.54:1 | 5.04:1 (`--on-oxide: #1a1715`) |
+| Ember chips (`run-running`, `run-queued`, `kind-git`) in light, on `--surface` | 4.39:1 | 5.10:1 (`--ember-text: #a34c09`) |
+| Rail nav entries for views with nothing in them yet (were `opacity: .5`) | 2.10 light / 2.76 dark | 4.94 / 5.10 (`--ink-faint`) |
+| Rail filter focus ring (`--ember-soft`) | 1.31:1 | 4.70:1 light / 6.52:1 dark (`--ember`) |
+
+"Delete page" is also quiet until it is armed, as the comment on
+`.danger-panel` always said.
 
 ## Deliberate exceptions
 

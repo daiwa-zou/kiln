@@ -71,20 +71,74 @@ func (s *WikiStore) QueueDepth(ctx context.Context) (map[string]int, error) {
 	return out, rows.Err()
 }
 
-// EnqueueRun files a build request for a workspace. When the workspace already
-// has a queued or running run, that run is returned instead and created is
-// false: the partial unique index makes double-submission and webhook storms
-// collapse into the one run already waiting.
+// EnqueueOutcome says what became of a build request.
+type EnqueueOutcome string
+
+const (
+	// EnqueueCreated: the request became a new queued run.
+	EnqueueCreated EnqueueOutcome = "created"
+	// EnqueueMerged: the request joined a build already waiting in the queue,
+	// which will do the work it asked for.
+	EnqueueMerged EnqueueOutcome = "merged"
+	// EnqueueDeferred: the workspace's active run cannot do the work -- a research
+	// run, or a build already underway -- so the request was recorded and becomes
+	// a queued build when that run finishes. It is not lost, and not yet queued.
+	EnqueueDeferred EnqueueOutcome = "deferred"
+)
+
+// EnqueueResult is the full answer to a build request.
+type EnqueueResult struct {
+	// RunID is the run the caller should watch: the new run, the waiting build
+	// that absorbed the request, or the active run the request is waiting behind.
+	RunID   string
+	Outcome EnqueueOutcome
+	// ActiveTrigger is the trigger of the run the request merged into or is
+	// waiting behind. Empty when a new run was created.
+	ActiveTrigger string
+}
+
+// Created reports whether the request became a new run of its own.
+func (r EnqueueResult) Created() bool { return r.Outcome == EnqueueCreated }
+
+// EnqueueRun files a build request for a workspace. When a build is already
+// waiting, the request merges into it and created is false; when the workspace
+// is busy with something that cannot honor it, the request is recorded to run
+// afterwards and created is likewise false. See EnqueueBuild.
 func (s *WikiStore) EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (runID string, created bool, err error) {
 	return s.EnqueueRunOpts(ctx, workspaceID, trigger, connectorID, EnqueueOptions{})
 }
 
-// EnqueueRunOpts is EnqueueRun with the incremental fields. A debounced
-// enqueue advances the waiting run's ref_to to the newest head, so a push
-// storm's final state is what gets built; a run already claimed cannot be
-// updated, and loses nothing — the range base always derives from the last
-// successful build, so the next enqueue covers the gap.
+// EnqueueRunOpts is EnqueueBuild reduced to the run id and whether a new run was
+// created, for callers that do not report what happened to the request.
 func (s *WikiStore) EnqueueRunOpts(ctx context.Context, workspaceID, trigger, connectorID string, opts EnqueueOptions) (runID string, created bool, err error) {
+	res, err := s.EnqueueBuild(ctx, workspaceID, trigger, connectorID, opts)
+	if err != nil {
+		return "", false, err
+	}
+	return res.RunID, res.Created(), nil
+}
+
+// EnqueueBuild files a request to build a workspace. The partial unique index
+// allows one queued-or-running run per workspace, which is what makes a push
+// storm collapse into one build -- but only a queued build can honor a build
+// request, so the request goes one of three ways:
+//
+//   - No active run: a new queued run is created.
+//   - A queued build is waiting: the request merges into it. It advances the
+//     build's ref_to to the newest head, so a push storm's final state is what
+//     gets built, and widens a build pinned to one connector to every connector
+//     when the request names a different one (or none), so no connector's change
+//     is left out of the build that was supposed to include it.
+//   - Anything else (a queued research run, or a build already running): the
+//     request is recorded in build_requests and promoted to a queued build when
+//     the workspace is next free. Merging into research would drop the request
+//     on the floor, because the worker reads sources to answer one question and
+//     builds nothing. Merging into a running build would drop it too: that build
+//     planned its work from what it read at the start.
+//
+// Nothing is lost either way, because the range base of an incremental build
+// always derives from the last successful build rather than from the request.
+func (s *WikiStore) EnqueueBuild(ctx context.Context, workspaceID, trigger, connectorID string, opts EnqueueOptions) (EnqueueResult, error) {
 	var notBefore any
 	if !opts.NotBefore.IsZero() {
 		notBefore = opts.NotBefore
@@ -93,50 +147,124 @@ func (s *WikiStore) EnqueueRunOpts(ctx context.Context, workspaceID, trigger, co
 	// finishes between our conflicting insert and the read-back), and losing
 	// it repeatedly means something is wrong enough to surface.
 	for attempt := 0; attempt < 3; attempt++ {
-		err = s.pool.QueryRow(ctx, `
+		var runID string
+		err := s.pool.QueryRow(ctx, `
 			INSERT INTO runs (workspace_id, connector_id, trigger, status, ref_to, not_before)
 			VALUES ($1, $2, $3, 'queued', $4, $5)
 			ON CONFLICT (workspace_id) WHERE status IN ('queued','running') DO NOTHING
 			RETURNING id`,
 			workspaceID, nullable(connectorID), trigger, nullable(opts.RefTo), notBefore).Scan(&runID)
 		if err == nil {
-			return runID, true, nil
+			return EnqueueResult{RunID: runID, Outcome: EnqueueCreated}, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return "", false, fmt.Errorf("store: enqueue run: %w", err)
+			return EnqueueResult{}, fmt.Errorf("store: enqueue run: %w", err)
 		}
 
-		// Conflict path: advance the waiting run's target head, then surface
-		// the active run so the caller can report it. A running (claimed)
-		// run is left alone.
-		if opts.RefTo != "" {
-			if _, err := s.pool.Exec(ctx, `
-				UPDATE runs SET ref_to = $2
-				WHERE workspace_id = $1 AND status = 'queued'`,
-				workspaceID, opts.RefTo); err != nil {
-				return "", false, fmt.Errorf("store: advance ref_to: %w", err)
-			}
-		}
+		// Conflict path. First try to merge into a waiting build. The status
+		// guard is re-evaluated under the row lock, so a worker that claims the
+		// build between the insert above and this update is not merged into.
+		var mergedTrigger string
 		err = s.pool.QueryRow(ctx, `
-			SELECT id FROM runs
+			UPDATE runs SET
+			    ref_to = coalesce($2, ref_to),
+			    connector_id = CASE WHEN connector_id IS NOT DISTINCT FROM $3::uuid
+			                        THEN connector_id ELSE NULL END
+			WHERE workspace_id = $1 AND status = 'queued' AND trigger <> 'research'
+			RETURNING id, trigger`,
+			workspaceID, nullable(opts.RefTo), nullable(connectorID)).Scan(&runID, &mergedTrigger)
+		if err == nil {
+			return EnqueueResult{RunID: runID, Outcome: EnqueueMerged, ActiveTrigger: mergedTrigger}, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return EnqueueResult{}, fmt.Errorf("store: merge into waiting build: %w", err)
+		}
+
+		// No waiting build. Whatever is active cannot honor the request.
+		var activeTrigger string
+		err = s.pool.QueryRow(ctx, `
+			SELECT id, trigger FROM runs
 			WHERE workspace_id = $1 AND status IN ('queued','running')
-			ORDER BY created_at DESC LIMIT 1`, workspaceID).Scan(&runID)
+			ORDER BY created_at DESC LIMIT 1`, workspaceID).Scan(&runID, &activeTrigger)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue // the active run finished in between; try the insert again
 		}
 		if err != nil {
-			return "", false, fmt.Errorf("store: find active run: %w", err)
+			return EnqueueResult{}, fmt.Errorf("store: find active run: %w", err)
 		}
-		return runID, false, nil
+
+		// Recorded even if the active run finishes before this lands: the
+		// promotion at the next claim queues it when no run is active, so there
+		// is no window in which the request can be missed.
+		if err := s.recordBuildRequest(ctx, workspaceID, trigger, connectorID, opts.RefTo, notBefore); err != nil {
+			return EnqueueResult{}, err
+		}
+		return EnqueueResult{RunID: runID, Outcome: EnqueueDeferred, ActiveTrigger: activeTrigger}, nil
 	}
-	return "", false, fmt.Errorf("store: enqueue run: lost the insert race repeatedly for workspace %s", workspaceID)
+	return EnqueueResult{}, fmt.Errorf("store: enqueue run: lost the insert race repeatedly for workspace %s", workspaceID)
+}
+
+// recordBuildRequest upserts the workspace's one pending follow-up build. A
+// second request merges into it exactly as it would into a queued build: the
+// newest head wins, a differing connector widens it to all of them, and the
+// earliest start time wins so a debounce on one request never delays another.
+func (s *WikiStore) recordBuildRequest(ctx context.Context, workspaceID, trigger, connectorID, refTo string, notBefore any) error {
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO build_requests (workspace_id, trigger, connector_id, ref_to, not_before)
+		VALUES ($1, $2, $3::uuid, $4, $5::timestamptz)
+		ON CONFLICT (workspace_id) DO UPDATE SET
+		    connector_id = CASE WHEN build_requests.connector_id IS NOT DISTINCT FROM EXCLUDED.connector_id
+		                        THEN build_requests.connector_id ELSE NULL END,
+		    ref_to = coalesce(EXCLUDED.ref_to, build_requests.ref_to),
+		    not_before = CASE WHEN build_requests.not_before IS NULL OR EXCLUDED.not_before IS NULL
+		                      THEN NULL
+		                      ELSE least(build_requests.not_before, EXCLUDED.not_before) END,
+		    updated_at = now()`,
+		workspaceID, trigger, nullable(connectorID), nullable(refTo), notBefore); err != nil {
+		return fmt.Errorf("store: record build request: %w", err)
+	}
+	return nil
+}
+
+// promoteBuildRequests turns every pending follow-up whose workspace has no
+// active run into a queued build, and drops the request. One statement, so a
+// request is either still pending or already a run, never both and never
+// neither. ON CONFLICT covers a run enqueued between the check and the insert:
+// the request then stays pending and is promoted after that run finishes.
+func (s *WikiStore) promoteBuildRequests(ctx context.Context) error {
+	if _, err := s.pool.Exec(ctx, `
+		WITH due AS (
+		    SELECT b.workspace_id, b.trigger, b.connector_id, b.ref_to, b.not_before
+		    FROM build_requests b
+		    WHERE NOT EXISTS (
+		        SELECT 1 FROM runs r
+		        WHERE r.workspace_id = b.workspace_id AND r.status IN ('queued','running'))
+		    FOR UPDATE OF b SKIP LOCKED),
+		promoted AS (
+		    INSERT INTO runs (workspace_id, connector_id, trigger, status, ref_to, not_before)
+		    SELECT workspace_id, connector_id, trigger, 'queued', ref_to, not_before FROM due
+		    ON CONFLICT (workspace_id) WHERE status IN ('queued','running') DO NOTHING
+		    RETURNING workspace_id)
+		DELETE FROM build_requests
+		WHERE workspace_id IN (SELECT workspace_id FROM promoted)`); err != nil {
+		return fmt.Errorf("store: promote build requests: %w", err)
+	}
+	return nil
 }
 
 // ClaimNextRun atomically claims the oldest queued run for this worker.
 // Returns nil when the queue is empty. Claim and state change are one
 // statement, so two workers racing on the same row is impossible: SKIP LOCKED
 // makes the loser move on to the next row or come back empty.
+//
+// Pending follow-up builds are promoted to queued runs first, so a request that
+// arrived while the workspace was busy is claimable the moment it is free, by
+// whichever worker looks next -- including after the worker that would have
+// promoted it died.
 func (s *WikiStore) ClaimNextRun(ctx context.Context, workerID string) (*QueuedRun, error) {
+	if err := s.promoteBuildRequests(ctx); err != nil {
+		return nil, err
+	}
 	var (
 		run       QueuedRun
 		connector *string
@@ -209,6 +337,26 @@ func (s *WikiStore) FailRun(ctx context.Context, runID, workerID, message string
 		WHERE id = $1 AND claimed_by = $2`, runID, workerID, message)
 	if err != nil {
 		return fmt.Errorf("store: fail run: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClaimLost
+	}
+	return nil
+}
+
+// RefuseRunOverBudget finishes a claimed run as over_budget without it having
+// built anything: the workspace's rolling budget was already spent when the
+// worker picked the run up.
+//
+// Fenced like FailRun, and additionally to status 'running': this is a decision
+// taken before the pipeline starts, so a row that is already finished is not
+// this worker's to restate. ErrClaimLost means no row matched.
+func (s *WikiStore) RefuseRunOverBudget(ctx context.Context, runID, workerID, message string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runs SET status = 'over_budget', error = $3, finished_at = now()
+		WHERE id = $1 AND claimed_by = $2 AND status = 'running'`, runID, workerID, message)
+	if err != nil {
+		return fmt.Errorf("store: refuse run over budget: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrClaimLost

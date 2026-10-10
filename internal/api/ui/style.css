@@ -27,6 +27,11 @@
     --ink: #221e1a;       --ink-dim: #6b6055;   --ink-faint: #756a5e;
     --ember: #b4530a;     --ember-soft: #f0dcc4; --ember-tint: #fbf1e6;
     --on-ember: #fff;
+    /* Text on a solid --oxide fill (the armed danger button), and ember used
+       as TEXT. The light --ember is 4.39:1 on --surface, which is where every
+       chip sits, so chip text takes the darker --ember-text (5.10:1); the
+       chip's border stays --ember. */
+    --on-oxide: #fff;     --ember-text: #a34c09;
     --ash: #5f656c;       --oxide: #a3341f;
     --moss: #3f7d5d;      --iris: #7c5cbf;
 
@@ -71,6 +76,8 @@
       --ink: #ece5db;     --ink-dim: #b0a294;   --ink-faint: #948779;
       --ember: #e0872f;   --ember-soft: #4a3320; --ember-tint: #2a1d12;
       --on-ember: #1a1715;
+      /* #fff on the dark --oxide was 3.54:1; the page background reads 5.04. */
+      --on-oxide: #1a1715;  --ember-text: #e0872f;
       --ash: #8b9198;     --oxide: #d4694f;
       --moss: #6aa987;    --iris: #a288d6;
 
@@ -357,8 +364,9 @@
   .nav a[aria-current="page"] .nav-count { color: var(--bg); }
   /* Views that cannot hold anything until the first ingest. Dimmed, not
      disabled: they still explain themselves when clicked. */
-  .nav a.nav-waiting { opacity: 0.5; }
-  .nav a.nav-waiting:hover { opacity: 1; }
+  .nav a.nav-waiting { color: var(--ink-faint); }
+  .nav a.nav-waiting:hover { color: var(--ink); }
+  .nav a.nav-waiting[aria-current="page"] { color: var(--bg); }
   .nav-count { font-size: 11px; color: var(--ink-faint); flex: none; }
   .nav-count[hidden], .nav-live[hidden] { display: none; }
   .nav-live { width: 6px; height: 6px; border-radius: 50%; background: var(--ember); flex: none; }
@@ -387,7 +395,7 @@
     margin: 0; padding: 5px 9px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 7px; font-size: 12.5px;
   }
-  .rail-filter input:focus { outline: 2px solid var(--ember-soft); outline-offset: -1px; }
+  .rail-filter input:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
 
   /* The tree takes the rail's slack and scrolls inside it. */
   .tree { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-bottom: 8px; }
@@ -545,9 +553,9 @@
     display: inline-flex; align-items: center; justify-content: center;
     cursor: pointer; font-family: var(--sans); color: var(--ink-dim);
   }
-  .chip.run-running, .chip.run-queued { border-color: var(--ember); color: var(--ember); }
+  .chip.run-running, .chip.run-queued { border-color: var(--ember); color: var(--ember-text); }
   .chip.run-failed, .chip.run-over_budget { border-color: var(--oxide); color: var(--oxide); }
-  .chip.kind-git { border-color: var(--ember); color: var(--ember); }
+  .chip.kind-git { border-color: var(--ember); color: var(--ember-text); }
   .chip.kind-web { border-color: var(--ash); color: var(--ash); }
   .chip.kind-upload { border-color: var(--ember-soft); }
   /* A chip carrying a glyph instead of a word. */
@@ -690,7 +698,7 @@
     background: var(--panel); border-color: var(--border); color: var(--ink); font-weight: 400;
   }
   .btn.quiet:hover { border-color: var(--ember); color: var(--ember); }
-  .btn.danger { background: var(--oxide); border-color: var(--oxide); color: #fff; }
+  .btn.danger { background: var(--oxide); border-color: var(--oxide); color: var(--on-oxide); }
 
   /* Deleting a page is the one destructive control in the reading rail, so it
      is set apart rather than styled like the correction form above it: a
@@ -914,6 +922,12 @@
     font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600;
   }
   .inbox-row-when { margin-left: auto; font-size: 11px; color: var(--ink-faint); flex: none; }
+  /* A research pass finished on this review and nobody has opened it since.
+     Solid ink so it reads as a state, not as another kind of label. */
+  .chip.new-findings {
+    padding: 1px 7px; font-size: 10.5px; font-weight: 600; flex: none;
+    background: var(--ink); border-color: var(--ink); color: var(--bg);
+  }
   .inbox-row-title { font-size: 13.5px; font-weight: 500; line-height: 1.35; margin-bottom: 3px; }
   .inbox-row-unit {
     font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
@@ -1518,26 +1532,56 @@
     display: grid; grid-template-columns: minmax(0, 1fr) 292px;
     height: calc(100vh - var(--topbar));
   }
-  @media (max-width: 900px) { .graph-view { grid-template-columns: minmax(0, 1fr); } }
-  #graph-wrap { position: relative; background: var(--panel); min-width: 0; overflow: hidden; }
+  /* The wrap is a size container: what the toolbar can afford depends on the
+     width of the graph column, which is the viewport minus the sidebar minus the
+     rail, so a viewport media query guesses it wrong at most widths. */
+  #graph-wrap {
+    position: relative; background: var(--panel); min-width: 0; overflow: hidden;
+    container: graphwrap / inline-size;
+  }
   /* The svg must be styled here, not via a style attribute -- the CSP refuses
      those. */
   #graph-svg { width: 100%; height: 100%; display: block; touch-action: none; }
+  /* The toolbar is a column: the bar of controls, then the filter pill under it,
+     so the pill follows the bar however many rows it wraps to instead of sitting
+     at a fixed offset the bar can grow over. The strip itself lets pointer events
+     through to the canvas; only the things drawn on it take them. */
   .graph-toolbar {
     position: absolute; top: 14px; left: 16px; right: 16px; z-index: 5;
-    display: flex; gap: 10px; align-items: flex-start;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+    pointer-events: none;
   }
-  /* The chips scroll rather than wrap. The graph column is often far narrower
-     than the screen, and a wrapping chip row builds a vertical tower of debris
-     over the canvas -- the one thing the toolbar must not become. */
+  .graph-toolbar > *, .graph-bar > * { pointer-events: auto; }
+  /* Narrow graph column first (and the fallback where container queries are
+     missing): search and controls share the first row and the type legend gets a
+     row of its own, so it has the full width instead of whatever the fixed-width
+     neighbours leave. */
+  .graph-bar {
+    display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-start;
+    align-self: stretch; pointer-events: none;
+  }
+  /* The chips scroll rather than wrap. A wrapping chip row builds a vertical
+     tower of debris over the canvas -- the one thing the toolbar must not
+     become. The row's own padding and negative margin keep a focused chip's
+     outline from being clipped by the scroll container. */
   .graph-legend {
-    /* Basis 0, not auto: with auto the row demands its full content width and
-       the search field is shrunk to its floor even on a wide screen. The chips
-       scroll, so they can start from nothing and take whatever is left. */
-    flex: 1 1 0; min-width: 0; display: flex; gap: 6px;
+    order: 3; flex: 1 0 100%; min-width: 0; display: flex; gap: 6px;
+    padding: 3px; margin: -3px;
     overflow-x: auto; scrollbar-width: none;
   }
   .graph-legend::-webkit-scrollbar { display: none; }
+  /* Wide enough for all three side by side: the search at its full width, the
+     controls, and at least three chips between them. The legend takes basis 0,
+     not auto: with auto the row demands its full content width and shrinks the
+     search to its floor even on a wide screen. */
+  @container graphwrap (min-width: 820px) {
+    .graph-search { flex-basis: 328px; }
+    .graph-legend { order: 0; flex: 1 1 0; }
+  }
+  /* Too narrow for the zoom readout to share a row with the search field. */
+  @container graphwrap (max-width: 440px) {
+    .graph-zoom-level { display: none; }
+  }
   .graph-legend .chip-count { font-variant-numeric: tabular-nums; }
   /* flex: none, because the row scrolls instead of squeezing. button.chip's
      24px tap-target floor replaces the min-width: auto that would otherwise
@@ -1549,9 +1593,14 @@
     padding: 4px 10px; background: var(--panel); cursor: pointer;
   }
   .graph-legend .chip .dot { width: 7px; height: 7px; }
-  .graph-legend .chip.graph-off { opacity: 0.4; text-decoration: line-through; }
+  /* Off is the strike-through, the fainter ink and the dashed edge together. It
+     was opacity .4, which put the label at 1.81:1 on a chip that is still a
+     working control; --ink-faint clears 4.5:1 on the panel. */
+  .graph-legend .chip.graph-off {
+    color: var(--ink-faint); text-decoration: line-through; border-style: dashed;
+  }
   .graph-controls {
-    flex: none; display: flex; gap: 4px; align-items: center;
+    flex: none; margin-left: auto; display: flex; gap: 4px; align-items: center;
     background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 3px;
   }
   .graph-controls button {
@@ -1566,10 +1615,8 @@
     min-width: 34px; text-align: center; font-variant-numeric: tabular-nums;
   }
   /* Finding by name. The field, its result panel and the scope footer are one
-     shape; the type chips scroll rather than wrap beside it, because the graph
-     column is often far narrower than the screen and a wrapped chip row builds
-     a tower over the canvas. */
-  .graph-search { flex: 1 1 328px; min-width: 272px; max-width: 328px; position: relative; }
+     shape. 180px is the least that still shows a useful stretch of the query. */
+  .graph-search { flex: 1 1 180px; min-width: 180px; max-width: 328px; position: relative; }
   .graph-search-field {
     display: flex; align-items: center; gap: 8px; height: 34px;
     padding: 0 6px 0 10px; background: var(--panel);
@@ -1582,6 +1629,10 @@
   }
   .graph-search-glyph { width: 13px; height: 13px; flex: none; fill: var(--ink-faint); }
   .graph-search-field:focus-within .graph-search-glyph { fill: var(--ember); }
+  /* The input draws no outline of its own, so the field wears the UI's focus
+     ring instead. Inset, because the result panel opens straight under the field
+     and would cover the lower edge of a ring drawn outside it. */
+  .graph-search-field:focus-within { outline: 2px solid var(--ember); outline-offset: -2px; }
   .graph-search input {
     flex: 1 1 auto; min-width: 0; border: none; background: none; outline: none;
     font-family: var(--sans); font-size: 13px; color: var(--ink);
@@ -1594,7 +1645,7 @@
   }
   .graph-find-count.graph-find-none { color: var(--oxide); }
   .graph-find-clear {
-    width: 20px; height: 20px; flex: none; border: none; border-radius: 5px;
+    width: 24px; height: 24px; flex: none; border: none; border-radius: 5px;
     background: none; color: var(--ink-faint); cursor: pointer; font-size: 14px;
     line-height: 1; display: inline-flex; align-items: center; justify-content: center;
   }
@@ -1654,7 +1705,7 @@
   /* A real button, so the pressed state is the thing screen readers read. */
   .graph-switch {
     display: inline-flex; align-items: center; gap: 8px; border: none; background: none;
-    padding: 0; cursor: pointer; font-family: var(--sans); font-size: 11.5px;
+    padding: 0; min-height: 24px; cursor: pointer; font-family: var(--sans); font-size: 11.5px;
     color: var(--ink-dim); text-align: left;
   }
   .graph-switch-track {
@@ -1674,7 +1725,7 @@
   }
   .graph-seg[hidden] { display: none; }
   .graph-seg button {
-    padding: 2px 9px; border: none; border-radius: 5px; background: none;
+    padding: 2px 9px; min-height: 24px; min-width: 24px; border: none; border-radius: 5px; background: none;
     font-family: var(--sans); font-size: 11px; color: var(--ink-dim); cursor: pointer;
   }
   .graph-seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); }
@@ -1683,15 +1734,15 @@
 
   /* Says why the canvas is dimmed, once the panel is no longer saying it. */
   .graph-pill {
-    position: absolute; top: 60px; left: 16px; z-index: 4;
+    max-width: 100%;
     display: flex; align-items: center; gap: 6px;
-    padding: 5px 6px 5px 11px; background: var(--ember-tint);
+    padding: 3px 4px 3px 11px; background: var(--ember-tint);
     border: 1px solid var(--ember-soft); border-radius: 999px;
     font-size: 11.5px; color: var(--ember);
   }
   .graph-pill[hidden] { display: none; }
   .graph-pill-x {
-    width: 19px; height: 19px; border: none; border-radius: 999px;
+    width: 24px; height: 24px; flex: none; border: none; border-radius: 999px;
     background: rgba(224, 135, 47, 0.16); color: var(--ember);
     cursor: pointer; font-size: 13px; line-height: 1;
     display: inline-flex; align-items: center; justify-content: center;
@@ -1746,7 +1797,28 @@
   }
   .graph-rail .neighbours a:hover { background: var(--surface); color: var(--ink); text-decoration: none; }
   .graph-rail .btn { width: 100%; justify-content: center; }
-  @media (max-width: 900px) { .graph-rail { display: none; } }
+  .graph-rail-close { display: none; }
+  /* Narrow: the rail is a bottom sheet under the canvas, in the grid's second
+     row, and only when something is selected. Hiding it outright left a tap
+     that dimmed the canvas and told the reader nothing, and no way to open the
+     page without a double-click. The sheet scrolls inside its own height cap so
+     a node with many neighbours cannot take the canvas away. */
+  @media (max-width: 900px) {
+    .graph-view { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+    .graph-rail {
+      display: none; max-height: 40vh;
+      border-left: none; border-top: 1px solid var(--border); padding: 14px 16px 18px;
+    }
+    .graph-view.graph-has-sel .graph-rail { display: block; }
+    .graph-rail h2 { padding-right: 32px; }
+    .graph-rail-close {
+      float: right; position: sticky; top: 0; margin: -8px -6px 0 8px;
+      width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+      border: none; border-radius: 7px; background: none; color: var(--ink-dim);
+      cursor: pointer; font-size: 18px; line-height: 1;
+    }
+    .graph-rail-close:hover { background: var(--surface); color: var(--ink); }
+  }
 
   @media print {
     aside, .topbar, .skip, details.panel, .toasts, .to-top, .context-rail, .pager { display: none !important; }

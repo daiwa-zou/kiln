@@ -97,7 +97,7 @@ func TestGitRefHelpers(t *testing.T) {
 	if got := gitRef(&repomap.RepoMap{}); got != "" {
 		t.Errorf("gitRef without git meta = %q, want empty", got)
 	}
-	if got := gitRef(&repomap.RepoMap{Git: &repomap.GitMeta{HeadSHA: "abcdef012345"}}); got != "abcdef0" {
+	if got := gitRef(&repomap.RepoMap{Git: &repomap.GitMeta{HeadSHA: "abcdef012345"}}); got != "abcdef012345" {
 		t.Errorf("gitRef = %q", got)
 	}
 }

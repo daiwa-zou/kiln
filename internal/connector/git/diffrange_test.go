@@ -65,7 +65,7 @@ func fixtureRepo(t *testing.T) (dir, first, second string) {
 func TestDiffRange(t *testing.T) {
 	dir, first, second := fixtureRepo(t)
 
-	changes, ok := DiffRange(context.Background(), dir, first, second)
+	changes, ok := DiffRange(context.Background(), dir, "", first, second)
 	if !ok {
 		t.Fatal("DiffRange not ok on a healthy range")
 	}
@@ -87,13 +87,14 @@ func TestDiffRange(t *testing.T) {
 		}
 	}
 
-	// Short SHAs resolve too — runs.ref stores the 7-char form.
-	if _, ok := DiffRange(context.Background(), dir, first[:7], second[:7]); !ok {
+	// Short SHAs still resolve locally (a --since abbreviation, or a run
+	// recorded before runs stored full ids), though a remote could not serve one.
+	if _, ok := DiffRange(context.Background(), dir, "", first[:7], second[:7]); !ok {
 		t.Error("short-sha range rejected")
 	}
 	// An identical range is empty but ok: the run becomes no_changes without
 	// hashing anything.
-	if changes, ok := DiffRange(context.Background(), dir, second, second); !ok || len(changes) != 0 {
+	if changes, ok := DiffRange(context.Background(), dir, "", second, second); !ok || len(changes) != 0 {
 		t.Errorf("self-range = %v ok=%v, want empty ok", changes, ok)
 	}
 }
@@ -103,14 +104,14 @@ func TestDiffRangeFallsBackCleanly(t *testing.T) {
 	ctx := context.Background()
 
 	// Unknown base (simulates a force-push): not ok, caller full-rebuilds.
-	if _, ok := DiffRange(ctx, dir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", second); ok {
+	if _, ok := DiffRange(ctx, dir, "", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", second); ok {
 		t.Error("unknown base accepted")
 	}
 	// Empty refs and non-repos are unusable, not errors.
-	if _, ok := DiffRange(ctx, dir, "", second); ok {
+	if _, ok := DiffRange(ctx, dir, "", "", second); ok {
 		t.Error("empty base accepted")
 	}
-	if _, ok := DiffRange(ctx, t.TempDir(), "a", "b"); ok {
+	if _, ok := DiffRange(ctx, t.TempDir(), "", "a", "b"); ok {
 		t.Error("non-repo accepted")
 	}
 }

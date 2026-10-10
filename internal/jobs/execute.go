@@ -44,6 +44,11 @@ func (c SourceConnectors) For(key diff.Key) string {
 type SourceSpec struct {
 	// Path is the repository directory the git connector scans.
 	Path string
+	// GitToken is the credential Path was cloned with, when it was cloned from
+	// a private remote. Incremental builds need it to deepen that clone or
+	// fetch the base commit; without it the fetch is anonymous and fails, and
+	// every push falls back to a full rebuild. It is never logged or persisted.
+	GitToken string `json:"-"`
 	// DocsDir optionally merges a documents directory into the same wiki
 	// through the upload connector.
 	DocsDir string
@@ -271,11 +276,11 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	changes := diff.ChangeSet{FullRebuild: true}
 	if req.BaseRef != "" && req.Source.Path != "" {
 		head := gitconn.HeadRef(ctx, req.Source.Path)
-		if list, ok := gitconn.DiffRange(ctx, req.Source.Path, req.BaseRef, head); ok && head != "" {
+		if list, ok := gitconn.DiffRange(ctx, req.Source.Path, req.Source.GitToken, req.BaseRef, head); ok && head != "" {
 			changes = diff.ChangeSet{FromRef: req.BaseRef, ToRef: head, Changes: list}
-			fmt.Fprintf(out, "  incremental: %d changed path(s) since %s\n", len(list), req.BaseRef)
+			fmt.Fprintf(out, "  incremental: %d changed path(s) since %s\n", len(list), shortRef(req.BaseRef))
 		} else {
-			fmt.Fprintf(out, "  range %s..HEAD unusable; falling back to a full hash-gated rebuild\n", req.BaseRef)
+			fmt.Fprintf(out, "  range %s..HEAD unusable; falling back to a full hash-gated rebuild\n", shortRef(req.BaseRef))
 		}
 	}
 
@@ -541,11 +546,13 @@ func sectionsByParent(wm *mapper.WorkspaceMap) map[diff.Key][]diff.Key {
 	return out
 }
 
+// gitRef is the full commit id a run records. Abbreviating it here would store a
+// base the next incremental build cannot fetch from a remote.
 func gitRef(rm *repomap.RepoMap) string {
 	if rm == nil || rm.Git == nil {
 		return ""
 	}
-	return shortRef(rm.Git.HeadSHA)
+	return rm.Git.HeadSHA
 }
 
 func shortRef(sha string) string {

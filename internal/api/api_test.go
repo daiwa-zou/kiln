@@ -287,6 +287,38 @@ func TestUnknownWorkspaceIs404(t *testing.T) {
 	}
 }
 
+// The UI renders model-written markdown, so an image in a page is a request
+// every reader's browser makes. The policy must not let it reach a foreign
+// host: that would be a zero-click channel out of the wiki.
+func TestUICSPForbidsForeignImagesAndScripts(t *testing.T) {
+	srv, _, _ := testServer(t)
+
+	res, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	csp := res.Header.Get("Content-Security-Policy")
+
+	directives := map[string]string{}
+	for _, d := range strings.Split(csp, ";") {
+		name, value, _ := strings.Cut(strings.TrimSpace(d), " ")
+		directives[name] = value
+	}
+	if got := directives["img-src"]; got != "'self' data:" {
+		t.Errorf("img-src = %q, want only 'self' and data: (no https:, no hosts)", got)
+	}
+	if got := directives["script-src"]; got != "'self'" {
+		t.Errorf("script-src = %q, want 'self'", got)
+	}
+	if got := directives["connect-src"]; got != "'self'" {
+		t.Errorf("connect-src = %q, want 'self'", got)
+	}
+	if got := directives["default-src"]; got != "'none'" {
+		t.Errorf("default-src = %q, want 'none'", got)
+	}
+}
+
 func TestUIIsServedAndDeepLinksWork(t *testing.T) {
 	srv, _, _ := testServer(t)
 

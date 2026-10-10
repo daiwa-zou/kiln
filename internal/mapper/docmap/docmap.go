@@ -116,7 +116,6 @@ func (m *Mapper) MapDocs(_ context.Context, root string, docs []Doc) (*mapper.Wo
 	}
 
 	wm.Summary = m.render(wm)
-	wm.Hash = hashUnits(wm.Units)
 	return wm, nil
 }
 
@@ -308,14 +307,4 @@ func fileSlug(title string) string {
 func hashText(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
-}
-
-// hashUnits digests the shape of the map, so the architecture synthesis is
-// dirtied when documents are added or removed.
-func hashUnits(units []mapper.Unit) string {
-	h := sha256.New()
-	for _, u := range units {
-		fmt.Fprintf(h, "%s|%s|%s\n", u.Key, u.Slug, u.Hash)
-	}
-	return hex.EncodeToString(h.Sum(nil))
 }

@@ -67,7 +67,11 @@ type BuildRequest struct {
 	RunID       string
 	WorkspaceID string
 	Trigger     string
-	Ref         string
+	// Ref is the full SHA of the commit being built, or empty for sources with
+	// no commit. It is what the run record stores as the base of the next
+	// incremental range, so it must stay full; everything a reader sees (the
+	// overview, the log, page freshness) shows shortRef(Ref).
+	Ref string
 	// Connectors attributes each source record to the connector whose sync
 	// produced it, by namespace. Zero value for CLI builds, which have no
 	// connector rows.
@@ -141,8 +145,11 @@ type BuildResult struct {
 	Planned []diff.Key
 	// EstimatedUSD is the projected spend shown before anything is charged.
 	EstimatedUSD float64
-	// Deferred counts units the per-run page cap held back. They stay stale and
-	// are picked up by the next run.
+	// Deferred counts units this run planned and did not reach: the per-run page
+	// cap held them back, or the run was canceled before the scheduler got to
+	// them. They stay stale and are picked up by the next run. A run that halts
+	// on its own budget does not count its remainder here -- that stop is a
+	// decision to spend no more, and a follow-up would only spend it.
 	Deferred   int
 	Violations []wiki.Violation
 }
@@ -346,6 +353,13 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	if halted != "" {
 		res.Summary.Status = halted
 	}
+	if halted == StatusCanceled {
+		for _, oc := range outcomes {
+			if !oc.attempted {
+				res.Deferred++
+			}
+		}
+	}
 
 	written, newSources, findings, spent := p.mergeOutcomes(res, req, outcomes, known, perUnit, log)
 	res.Summary.CostUSD = spent
@@ -364,11 +378,11 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	index := wiki.BuildIndex(merged, wiki.IndexOptions{})
 	overview := wiki.BuildOverview(merged, wiki.OverviewInput{
 		Workspace: req.workspaceLabel(),
-		Ref:       req.Ref,
+		Ref:       shortRef(req.Ref),
 		Date:      now.Format(wiki.DateFormat),
 		BuiltAt:   now.Format(wiki.StampFormat),
 		Narrative: findings,
-		Sources:   sourceTallies(req.Map),
+		Sources:   sourceTallies(req.Map, sources, cascade.DropSources, req.SyncedNamespaces),
 	})
 
 	created, updated := countChanges(pages, written)
@@ -380,7 +394,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		Date:    now.Format(wiki.DateFormat),
 		Action:  "build",
 		Subject: req.WorkspaceID,
-		Ref:     req.Ref,
+		Ref:     shortRef(req.Ref),
 		Lines:   buildLogLines(res.Summary, res.Summary.CostUSD),
 	})
 
@@ -468,12 +482,15 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 	for _, k := range dirty {
 		var hash string
 		if k == diff.ArchOverview {
-			// The synthesis has no unit of its own; its input is the whole
-			// map, so the map hash gates it. Without this every build --
-			// including a completely unchanged one -- would pay for an
-			// architecture regeneration.
+			// The synthesis has no unit of its own; it describes the
+			// repository's module structure, so the structural digest gates
+			// it. Documents and web pages are deliberately not part of it
+			// (and Merge carries it through untouched), or editing a PDF
+			// would pay for an architecture rewrite. Without this gate every
+			// build -- including a completely unchanged one -- would
+			// regenerate it.
 			if m != nil {
-				hash = m.Hash
+				hash = m.ArchHash
 			}
 		} else if unit, ok := units[string(k)]; ok {
 			hash = unit.Hash
@@ -695,7 +712,7 @@ func (p *Pipeline) generateUnit(
 			return res
 		}
 
-		p.stampDates(collected, sc.existingCreated, req.Ref)
+		p.stampDates(collected, sc.existingCreated, shortRef(req.Ref))
 
 		lastViolations = append(parseViolations, wiki.ValidateBatch(collected, wiki.ValidateOptions{
 			KnownSlugs:     sc.known,
@@ -771,22 +788,51 @@ func planFrom(res *agent.Result) (plan string, planned map[string]bool, reviews 
 	return plan, planned, analysis.Reviews
 }
 
-// sourceTallies counts the map's units by the namespace that produced them, so
-// the overview can say what the bench is made of. Derived from the map on every
-// build rather than stored, which is what keeps the sentence true as sources
-// are connected and removed.
+// sourceTallies counts the bench's units by the namespace that produced them,
+// so the overview can say what the bench is made of. Derived on every build
+// rather than stored, which is what keeps the sentence true as sources are
+// connected and removed.
+//
+// The map only describes what this run synced. A run pinned to one connector
+// (a webhook or poll on the git connector) maps the repository alone, and
+// tallying that map would rewrite the overview as though the uploaded
+// documents and fetched pages had gone, only for the next unpinned run to put
+// them back. So a namespace this run synced is counted from the map, which is
+// current and includes units that have not produced a page yet; every other
+// namespace is counted from the source records already on file, less the ones
+// this run's cascade drops. synced is the run's SyncedNamespaces; nil infers
+// the synced set from the namespaces the map has units in, as deletion
+// detection does.
 //
 // Order is the namespaces' own, not a map iteration: the overview is rewritten
 // on every run and compared against the last, so an unstable order would read
 // as a change on a build where nothing changed.
-func sourceTallies(m *mapper.WorkspaceMap) []wiki.SourceTally {
-	if m == nil {
-		return nil
-	}
+func sourceTallies(m *mapper.WorkspaceMap, recorded []diff.SourceRecord, dropped []diff.Key, synced []string) []wiki.SourceTally {
 	counts := map[string]int{}
-	for _, u := range m.Units {
-		counts[diff.Namespace(diff.Key(u.Key))]++
+	fresh := map[string]bool{}
+	for _, ns := range synced {
+		fresh[ns] = true
 	}
+	if m != nil {
+		for _, u := range m.Units {
+			ns := diff.Namespace(diff.Key(u.Key))
+			counts[ns]++
+			if synced == nil {
+				fresh[ns] = true
+			}
+		}
+	}
+
+	gone := make(map[diff.Key]bool, len(dropped))
+	for _, k := range dropped {
+		gone[k] = true
+	}
+	for _, r := range recorded {
+		if ns := diff.Namespace(r.Key); !fresh[ns] && !gone[r.Key] {
+			counts[ns]++
+		}
+	}
+
 	order := []string{"module", "doc", "doc:upload", "doc:web"}
 	out := make([]wiki.SourceTally, 0, len(order))
 	for _, kind := range order {
