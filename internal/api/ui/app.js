@@ -2699,6 +2699,7 @@ async function showGraph() {
       <h1 class="sr-only">Graph</h1>
       <div id="graph-wrap">
         <div class="graph-toolbar">
+          <div class="graph-bar">
           <div class="graph-search">
             <div class="graph-search-field" id="graph-search-field">
               <svg class="graph-search-glyph" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M6.9 1.4a5.5 5.5 0 1 0 3.3 9.9l3.1 3.1 1.3-1.3-3.1-3.1a5.5 5.5 0 0 0-4.6-8.6zm0 1.9a3.6 3.6 0 1 1 0 7.2 3.6 3.6 0 0 1 0-7.2z"/></svg>
@@ -2737,11 +2738,15 @@ async function showGraph() {
             <button id="graph-reset" aria-label="Reset view" title="Reset view">${iconReset}</button>
             <button id="graph-full" aria-label="Full screen" title="Full screen">${iconMax}</button>
           </div>
+          </div>
+          <!-- Says why the canvas is dimmed once the panel is closed, so a
+               filtered graph is never a mystery. It sits under the bar, in the
+               toolbar's own flow, so a bar that wraps pushes it down. -->
+          <div class="graph-pill" id="graph-pill" hidden></div>
         </div>
-        <svg id="graph-svg" role="img" aria-label="Page link graph"></svg>
-        <!-- Says why the canvas is dimmed once the panel is closed, so a
-             filtered graph is never a mystery. -->
-        <div class="graph-pill" id="graph-pill" hidden></div>
+        <!-- A group, not an img: an img makes its focusable descendants presentational,
+             and every node in here is a labelled, focusable stop. -->
+        <svg id="graph-svg" role="group" aria-label="Page link graph"></svg>
         <!-- A query that matches nothing greys the graph rather than emptying
              it: an empty rectangle reads as a broken view, and the thing the
              reader wants back is still there behind this. -->
@@ -2751,11 +2756,13 @@ async function showGraph() {
         </div>
       </div>
       <div class="graph-rail" id="graph-rail">
+        <button class="graph-rail-close" id="graph-rail-close" aria-label="Close details">&times;</button>
         <div class="group-label">Selected</div>
         <h2 id="graph-sel-name">Nothing yet</h2>
         <div class="sub" id="graph-sel-sub">${esc(plural(nodes.length, "page"))} · ${esc(plural(links.length, "link"))}${esc(truncated)}</div>
-        <p class="why" id="graph-sel-why">Click any node to inspect it here. Neighbours
-          are listed below; the graph dims everything else.</p>
+        <p class="why" id="graph-sel-why">Select a node to inspect it here; press Enter or
+          double-click it to open the page. Neighbours are listed below and the graph
+          dims everything else.</p>
         <div id="graph-sel-box" hidden>
           <div class="group-label">Neighbours</div>
           <div class="neighbours" id="graph-neighbours"></div>
@@ -2791,6 +2798,11 @@ async function showGraph() {
       svg.appendChild(el);
       return el;
     });
+    // position() runs every frame for every node, and used to find each node's
+    // circles and label with querySelector -- three lookups a node, ~1,800 a
+    // frame at 600 nodes. The elements are fixed at creation, so they are kept:
+    // the dot and the label for good, the halo while its node is selected.
+    const dotEls = [], haloEls = [], textEls = [];
     const nodeEls = nodes.map((n, i) => {
       const g = mk("g", { class: "graph-node", "data-i": i, tabindex: "0" });
       g.setAttribute("aria-label", `${n.title || n.slug} (${n.type})`);
@@ -2800,10 +2812,14 @@ async function showGraph() {
       title.textContent = `${n.title || n.slug} (${n.type}, ${n.links} inbound)`;
       c.appendChild(title);
       g.appendChild(c);
+      dotEls[i] = c;
+      haloEls[i] = null;
+      textEls[i] = null;
       if (n.links >= 2 || nodes.length <= 30) {
         const t = mk("text", { "font-size": "11.5", fill: "var(--ink-dim)" });
         t.textContent = n.slug;
         g.appendChild(t);
+        textEls[i] = t;
       }
       svg.appendChild(g);
       return g;
@@ -2816,21 +2832,21 @@ async function showGraph() {
         el.setAttribute("x2", pts[el._b].x.toFixed(1));
         el.setAttribute("y2", pts[el._b].y.toFixed(1));
       }
-      nodeEls.forEach((g, i) => {
-        const halo = g.querySelector("circle.graph-halo");
-        const c = g.querySelector("circle.graph-dot");
-        c.setAttribute("cx", pts[i].x.toFixed(1));
-        c.setAttribute("cy", pts[i].y.toFixed(1));
+      for (let i = 0; i < pts.length; i++) {
+        const x = pts[i].x.toFixed(1), y = pts[i].y.toFixed(1);
+        dotEls[i].setAttribute("cx", x);
+        dotEls[i].setAttribute("cy", y);
+        const halo = haloEls[i];
         if (halo) {
-          halo.setAttribute("cx", pts[i].x.toFixed(1));
-          halo.setAttribute("cy", pts[i].y.toFixed(1));
+          halo.setAttribute("cx", x);
+          halo.setAttribute("cy", y);
         }
-        const t = g.querySelector("text");
+        const t = textEls[i];
         if (t) {
           t.setAttribute("x", (pts[i].x + radiusOf(i) + 6).toFixed(1));
           t.setAttribute("y", (pts[i].y + 4).toFixed(1));
         }
-      });
+      }
     };
 
     // ---- selection --------------------------------------------------------
@@ -2845,15 +2861,19 @@ async function showGraph() {
         const on = i === selected;
         const near = selected < 0 || on || neighbors[selected].has(i);
         g.classList.toggle("graph-dim", !near);
-        g.querySelector("circle.graph-dot").setAttribute("r", radiusOf(i));
-        let halo = g.querySelector("circle.graph-halo");
+        dotEls[i].setAttribute("r", radiusOf(i));
+        let halo = haloEls[i];
         if (on && !halo) {
           halo = mk("circle", { class: "graph-halo",
             fill: hue[nodes[i].type] || "var(--ink-dim)", opacity: "0.14" });
           g.insertBefore(halo, g.firstChild);
-        } else if (!on && halo) halo.remove();
+          haloEls[i] = halo;
+        } else if (!on && halo) {
+          halo.remove();
+          haloEls[i] = halo = null;
+        }
         if (halo) halo.setAttribute("r", radiusOf(i) + 7);
-        const t = g.querySelector("text");
+        const t = textEls[i];
         if (t) {
           t.setAttribute("font-size", on ? "13" : "11.5");
           t.setAttribute("font-weight", on ? "600" : "400");
@@ -2868,6 +2888,7 @@ async function showGraph() {
       position();
     };
 
+    const root = svg.closest(".graph-view");
     const rail = {
       name: $("graph-sel-name"), sub: $("graph-sel-sub"), why: $("graph-sel-why"),
       box: $("graph-sel-box"), list: $("graph-neighbours"), open: $("graph-open"),
@@ -2885,7 +2906,25 @@ async function showGraph() {
         `<a href="#/page/${encodeURIComponent(nodes[j].slug)}">${typeDot(nodes[j].type)}<span>${esc(nodes[j].title || nodes[j].slug)}</span></a>`).join("");
       rail.open.href = `#/page/${encodeURIComponent(n.slug)}`;
       rail.box.hidden = false;
+      root.classList.add("graph-has-sel");
+      ensureVisible(i);
     };
+    const railIdle = {
+      name: rail.name.textContent, sub: rail.sub.textContent, why: rail.why.textContent,
+    };
+    // Back to nothing selected: the canvas undims, the rail returns to its
+    // opening text, and below 900px the bottom sheet goes away with it.
+    const deselect = () => {
+      if (selected < 0) return;
+      selected = -1;
+      paintSelection();
+      rail.name.textContent = railIdle.name;
+      rail.sub.textContent = railIdle.sub;
+      rail.why.textContent = railIdle.why;
+      rail.box.hidden = true;
+      root.classList.remove("graph-has-sel");
+    };
+    const openPage = (i) => { location.hash = "#/page/" + encodeURIComponent(nodes[i].slug); };
 
     position();
 
@@ -2914,7 +2953,23 @@ async function showGraph() {
     // visibly untangles itself. Afterwards three is the budget: enough to
     // converge in about half a second, few enough that an O(n^2) repulsion pass
     // over a 300-node graph does not eat the frame the drag is being drawn in.
-    let stepsPerFrame = 10;
+    // A frame's budget is the repulsion pass, O(n^2) a step, so the first run
+    // takes fewer steps a frame on a big graph rather than hold the main thread:
+    // ten up to ~385 nodes, four at 600.
+    let stepsPerFrame = Math.max(3, Math.min(10, Math.floor(1500000 / (nodes.length * nodes.length))));
+    // Reduced motion: the layout is not animated at all. Every settle runs to
+    // rest in one synchronous burst, so the graph is drawn once, already
+    // arranged, and a drag or a reset moves things by one jump instead of a
+    // second of drifting. The cost is the same ticks the animation would run,
+    // spent before the next paint instead of across the next sixty.
+    const relax = () => {
+      while (alpha > ALPHA_MIN) { tick(alpha); alpha *= ALPHA_DECAY; }
+    };
+    const rested = () => {
+      settling = false;
+      stepsPerFrame = 3;
+      if (!autoFitted) { autoFitted = true; fitView(); }
+    };
     const settle = () => {
       if (!view.current()) { settling = false; return; }
       for (let i = 0; i < stepsPerFrame && alpha > ALPHA_MIN; i++) {
@@ -2922,19 +2977,19 @@ async function showGraph() {
         alpha *= ALPHA_DECAY;
       }
       position();
-      if (alpha <= ALPHA_MIN) {
-        settling = false;
-        stepsPerFrame = 3;
-        if (!autoFitted) { autoFitted = true; fitView(); }
-        return;
-      }
+      if (alpha <= ALPHA_MIN) { rested(); return; }
       requestAnimationFrame(settle);
     };
     const reheat = (target) => {
       alpha = Math.max(alpha, target);
+      if (REDUCED.matches) {
+        relax();
+        position();
+        if (!settling) rested();
+        return;
+      }
       if (!settling) { settling = true; requestAnimationFrame(settle); }
     };
-    reheat(ALPHA_START);
 
     // --- pan & zoom -------------------------------------------------------
     const vb = { x: 0, y: 0, w: W, h: H };
@@ -2944,6 +2999,35 @@ async function showGraph() {
       zoomLabel.textContent = Math.round((W / vb.w) * 100) + "%";
     };
     applyVB();
+    // Bring a node back inside the viewBox: the canvas gets shorter when the
+    // bottom sheet opens, and a focused node can be anywhere.
+    const ensureVisible = (i) => {
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const pad = 24 * (vb.w / rect.width);
+      const p = pts[i];
+      const x0 = vb.x, y0 = vb.y;
+      if (p.x < vb.x + pad) vb.x = p.x - pad;
+      else if (p.x > vb.x + vb.w - pad) vb.x = p.x + pad - vb.w;
+      if (p.y < vb.y + pad) vb.y = p.y - pad;
+      else if (p.y > vb.y + vb.h - pad) vb.y = p.y + pad - vb.h;
+      if (vb.x !== x0 || vb.y !== y0) applyVB();
+    };
+    // The canvas also changes height when that sheet opens and closes, and on
+    // any window resize. Keeping the viewBox's aspect equal to the element's
+    // keeps the picture at its scale: left alone, the browser letterboxes the
+    // old box into the new one and shrinks the whole layout to fit.
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(() => {
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        vb.h = vb.w * (rect.height / rect.width);
+        applyVB();
+        if (selected >= 0) ensureVisible(selected);
+      });
+      ro.observe(svg);
+      onViewCleanup(() => ro.disconnect());
+    }
     // fitView fills the canvas by spreading the layout, never by zooming the
     // camera: nodes move apart while circles and labels keep their natural
     // size. Zooming in to fill made 19 nodes look like beach balls; leaving
@@ -2989,6 +3073,9 @@ async function showGraph() {
         springLen *= grow;
         gravity /= grow;
       }
+      // Reduced motion relaxes now, so the camera below frames the final layout
+      // rather than the one the rescale left behind.
+      if (REDUCED.matches) { alpha = Math.max(alpha, ALPHA_RESCALE); relax(); }
       position();
       m = bounds();
       const bx = m.x0 - 20, by = m.y0 - 20;
@@ -3005,8 +3092,11 @@ async function showGraph() {
       applyVB();
       // Uniform rescaling magnifies the old layout's irregularities: let
       // the simulation relax into even spacing at the new scale.
-      reheat(ALPHA_RESCALE);
+      if (!REDUCED.matches) reheat(ALPHA_RESCALE);
     };
+    // Last, because with reduced motion this runs the whole layout and then
+    // fitView before returning, and both need everything above.
+    reheat(ALPHA_START);
     const toSVG = (e) => {
       const rect = svg.getBoundingClientRect();
       return {
@@ -3082,9 +3172,12 @@ async function showGraph() {
         document.removeEventListener("keydown", onEsc);
         return;
       }
-      if (e.key === "Escape" && wrap.classList.contains("graph-fs")) {
+      if (e.key !== "Escape") return;
+      if (wrap.classList.contains("graph-fs")) {
         wrap.classList.remove("graph-fs");
         resync();
+      } else if (selected >= 0) {
+        deselect();
       }
     };
     document.addEventListener("keydown", onEsc);
@@ -3127,7 +3220,9 @@ async function showGraph() {
         // below the temperature a release re-arms: letting go should visibly
         // hand the node back to the layout, not continue what was already
         // happening.
-        reheat(ALPHA_DRAG);
+        // Reduced motion skips this: the neighbours would have to jump to a new
+        // rest on every pointer event. They settle once, when the node is let go.
+        if (!REDUCED.matches) reheat(ALPHA_DRAG);
       } else {
         const rect = svg.getBoundingClientRect();
         vb.x = drag.pan.x - ((e.clientX - drag.from.cx) / rect.width) * vb.w;
@@ -3145,8 +3240,9 @@ async function showGraph() {
         // moment instead of stopping the instant the finger lifts. Capped at
         // the same per-tick travel the integrator allows, so a violent flick
         // cannot launch a node across the canvas.
-        p.vx = Math.max(-8, Math.min(8, drag.vx));
-        p.vy = Math.max(-8, Math.min(8, drag.vy));
+        // Reduced motion carries nothing: the node stops where it was let go.
+        p.vx = REDUCED.matches ? 0 : Math.max(-8, Math.min(8, drag.vx));
+        p.vy = REDUCED.matches ? 0 : Math.max(-8, Math.min(8, drag.vy));
         // The release is what needs the heat: until now nothing re-armed the
         // simulation here, so a node let go simply stayed where it was dropped
         // and the graph around it never re-settled.
@@ -3154,6 +3250,10 @@ async function showGraph() {
         // A press that never travels is a click, so navigation survives the
         // drag handlers -- but it selects rather than leaves the graph.
         if (drag.moved < 3) select(drag.i);
+      } else if (drag.moved < 3) {
+        // A press on empty canvas that never travels is a click on nothing, which
+        // lets go of the selection -- and, below 900px, closes the bottom sheet.
+        deselect();
       }
       drag = null;
     };
@@ -3161,14 +3261,26 @@ async function showGraph() {
     svg.addEventListener("pointercancel", endDrag);
     svg.addEventListener("dblclick", (e) => {
       const g = e.target.closest("g.graph-node");
-      if (g) location.hash = "#/page/" + encodeURIComponent(nodes[g.dataset.i].slug);
+      if (g) openPage(Number(g.dataset.i));
     });
+    // Focusing a node selects it, so Enter on a focused node is Enter on a
+    // selected one: it opens the page. Double-click is the pointer's way to say
+    // the same thing, and a keyboard has no double-click.
+    // quiet stops the focus the close button hands back from selecting again.
+    let quiet = false;
     for (const g of nodeEls) {
       g.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") select(Number(g.dataset.i));
+        if (e.key !== "Enter" || e.repeat) return;
+        const i = Number(g.dataset.i);
+        if (selected === i) { e.preventDefault(); openPage(i); } else select(i);
       });
-      g.addEventListener("focus", () => select(Number(g.dataset.i)));
+      g.addEventListener("focus", () => { if (!quiet) select(Number(g.dataset.i)); });
     }
+    $("graph-rail-close").addEventListener("click", () => {
+      const i = selected;
+      deselect();
+      if (i >= 0) { quiet = true; nodeEls[i].focus(); quiet = false; }
+    });
 
     // --- hover: light the neighborhood, dim the rest ----------------------
     // Only while nothing is selected: a selection is a standing answer, and a
