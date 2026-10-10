@@ -1350,10 +1350,12 @@ async function showGetStarted() {
       : p.everRan
         ? "Ingested. If no pages appeared, check Ingest for what the run reported."
         : "Reads every source and writes the pages. Only changed sources cost anything.";
+    const progressAria = (r) =>
+      `Ingest progress: ${r.unitsDone || 0} of ${r.unitsTotal} units done`;
     const ingestBar = running && running.unitsTotal
-      ? `<div class="run-progress">
+      ? `<div class="run-progress" id="gs-progress">
           <progress max="${running.unitsTotal}" value="${running.unitsDone || 0}"
-            aria-label="Ingest progress: ${running.unitsDone || 0} of ${running.unitsTotal} units done"></progress>
+            aria-label="${esc(progressAria(running))}"></progress>
         </div>`
       : "";
 
@@ -1380,8 +1382,8 @@ async function showGetStarted() {
         <li class="step ${ingestState}">
           ${stepIcon(ingestState)}
           <div><strong>Ingest</strong>
-            ${p.active ? runningNow(p.runs) : ""}
-            <span class="hint">${esc(ingestDetail)}</span>
+            <span id="gs-live">${p.active ? runningNow(p.runs) : ""}</span>
+            <span class="hint" id="gs-ingest-detail">${esc(ingestDetail)}</span>
             ${ingestBar}
             ${p.hasSource && !p.active
               ? `<div class="meta"><button class="btn ${p.everRan ? "quiet" : ""} icon-btn" id="gs-ingest"
@@ -1435,15 +1437,60 @@ async function showGetStarted() {
 
     // While a run is moving, keep the checklist honest and pick up the pages
     // the moment they land -- the payoff should not need a manual refresh.
+    //
+    // Each tick patches the Ingest step's progress in place. Re-running the
+    // view (beginView) every five seconds moved focus to <main>, scrolled to
+    // the top, replayed the entrance animation and shut any open disclosure --
+    // on the one page a reader watches for minutes. The view is only rebuilt
+    // when the checklist itself changes shape (a run starting or ending, a
+    // source arriving), which is a real transition rather than a tick.
     if (p.active) {
-      setTimeout(async () => {
+      const shape = (q) => `${q.hasSource}|${q.active}|${q.everRan}`;
+      let timer = 0;
+      onViewCleanup(() => clearTimeout(timer));
+      const tick = async () => {
         if (!view.current()) return;
+        let q;
         try {
+          q = await benchProgress(ws);
+          if (!q) return; // a 401: the token form is up
           const pages = await api(`/workspaces/${ws}/pages`);
           if (pages.length) { location.reload(); return; }
-        } catch { /* fall through to another tick */ }
-        showGetStarted();
-      }, 5000);
+        } catch (err) {
+          if (err?.handled) return;
+          timer = setTimeout(tick, 5000); // a blip: try again
+          return;
+        }
+        if (!view.current()) return;
+        if (shape(q) !== shape(p)) { showGetStarted(); return; }
+        const running = q.runs.find((r) => r.status === "running");
+        // The kiln keeps its element, and so its animation phase; only the
+        // count beside it changes.
+        const live = $("gs-live");
+        if (live) {
+          const label = live.querySelector(".kiln-firing-text");
+          const text = running && running.unitsTotal
+            ? `Firing — ${running.unitsDone || 0} of ${running.unitsTotal} done` : "Firing";
+          if (running && !label) live.innerHTML = runningNow(q.runs);
+          else if (!running && label) live.innerHTML = "";
+          else if (label && label.textContent !== text) label.textContent = text;
+        }
+        const bar = $("gs-progress");
+        if (running && running.unitsTotal) {
+          const meter = bar?.querySelector("progress");
+          if (meter) {
+            meter.max = running.unitsTotal;
+            meter.value = running.unitsDone || 0;
+            meter.setAttribute("aria-label", progressAria(running));
+          } else {
+            $("gs-ingest-detail")?.insertAdjacentHTML("afterend", `<div class="run-progress" id="gs-progress">
+              <progress max="${running.unitsTotal}" value="${running.unitsDone || 0}"
+                aria-label="${esc(progressAria(running))}"></progress></div>`);
+          }
+        } else bar?.remove();
+        timer = setTimeout(tick, 5000);
+      };
+      timer = setTimeout(tick, 5000);
     }
   } catch (err) {
     if (!err.handled) view.done(banner(err));
