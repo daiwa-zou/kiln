@@ -120,7 +120,10 @@ func CloneShallow(ctx context.Context, opts CloneOptions) error {
 	}
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// The remote is attacker-shaped, so the clone runs with a minimal
+	// environment: the parent's KILN_* secrets stay out of reach, and the token
+	// below is the only one of them the child sees.
+	cmd.Env = childproc.GitEnv()
 
 	if opts.Token != "" {
 		askpass, cleanup, err := WriteAskpass(opts.Dir)

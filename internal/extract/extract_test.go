@@ -327,3 +327,32 @@ func TestCappedWriterKeepsExactlyTheCap(t *testing.T) {
 		t.Errorf("stop called %d times, want 1", stopped)
 	}
 }
+
+// The converter parses an untrusted document, so it must not inherit the
+// parent's KILN_* secrets.
+func TestToolRunsWithoutTheParentsSecrets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script")
+	}
+	t.Setenv("KILN_MASTER_KEY", "master-secret")
+	t.Setenv("KILN_SESSION_SECRET", "session-secret")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-parent")
+
+	path := filepath.Join(t.TempDir(), "env-dumper")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nenv\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runTool(context.Background(), path, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"KILN_", "ANTHROPIC_"} {
+		if strings.Contains(out, key) {
+			t.Errorf("child environment contains %s*:\n%s", key, out)
+		}
+	}
+	if !strings.Contains(out, "PATH=") {
+		t.Errorf("PATH did not reach the child:\n%s", out)
+	}
+}

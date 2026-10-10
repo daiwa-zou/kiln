@@ -286,6 +286,10 @@ func runTool(ctx context.Context, binary string, timeout time.Duration, args ...
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.WaitDelay = toolWaitDelay
+	// The input is an untrusted document and the converter is a large parser
+	// with a long history of memory-safety bugs; it has no use for the
+	// parent's KILN_* secrets, which an inherited environment would hand it.
+	cmd.Env = childproc.Env()
 	// The passthrough path refuses a file over MaxExtractBytes for the reason
 	// given there, and a converter is the worse case: a small compressed PDF
 	// can expand to gigabytes of text. Stopping the process at the cap, rather

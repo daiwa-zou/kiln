@@ -100,6 +100,9 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 	cmd.WaitDelay = childproc.WaitDelay
+	// dir holds a clone of someone else's repository, so git runs without the
+	// parent's KILN_* secrets or any host-level git configuration.
+	cmd.Env = childproc.GitEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)

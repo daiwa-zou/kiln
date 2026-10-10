@@ -240,15 +240,14 @@ func safeRelPath(rel string) (string, error) {
 	return clean, nil
 }
 
-// gitEnv builds the environment every git call runs with: no terminal prompt,
-// no inherited credential helper, and the askpass helper when a token is set.
+// gitEnv builds the environment every git call runs with: a minimal one with
+// no terminal prompt or inherited git configuration, plus the askpass helper
+// when a token is set.
 func gitEnv(near, token string) (env []string, cleanup func(), err error) {
-	env = append(os.Environ(),
-		"GIT_TERMINAL_PROMPT=0",
-		// A published wiki's commits are machine-made; an inherited signing
-		// config would make every push fail on a worker with no key.
-		"GIT_CONFIG_NOSYSTEM=1",
-	)
+	// GitEnv also drops the system and global config, which is what stops an
+	// inherited signing setup from failing every machine-made commit on a
+	// worker with no key, and keeps the parent's KILN_* secrets away from git.
+	env = childproc.GitEnv()
 	if token == "" {
 		return env, func() {}, nil
 	}
