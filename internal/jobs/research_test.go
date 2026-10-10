@@ -302,8 +302,9 @@ func TestResearchPromptCarriesTheQuestionAndItsMaterial(t *testing.T) {
 	)
 
 	// The "Question:" line leads, which is the contract the fake runner reads
-	// back and the reason a research prompt is recognisable at all.
-	if !strings.Contains(prompt, "Question: Two retry counts") {
+	// back and the reason a research prompt is recognisable at all. The title
+	// is quoted because it is untrusted single-line text.
+	if !strings.Contains(prompt, `Question: "Two retry counts"`) {
 		t.Errorf("prompt does not lead with the question:\n%s", prompt)
 	}
 	for _, want := range []string{"contradiction", "one says 3", "module:dispatch", "dispatch", "It retries."} {
@@ -358,7 +359,8 @@ func TestResearchPromptSharesOneBudgetAcrossItsUnits(t *testing.T) {
 
 func TestBuildContextIsUnchangedByTheBudgetParameter(t *testing.T) {
 	// The build path passes the limits it always had; its rendering must stay
-	// byte-for-byte what it was.
+	// byte-for-byte what it was, apart from the path headings, which are now
+	// quoted so that a file name cannot inject a line of its own.
 	root := t.TempDir()
 	write(t, root, "a.go", "package a\n")
 	write(t, root, "b.go", "package b\n")
@@ -367,8 +369,8 @@ func TestBuildContextIsUnchangedByTheBudgetParameter(t *testing.T) {
 
 	want := "\n## Source material\n\n" +
 		"This is the content of the unit's inputs. Ground every claim in it.\n" +
-		"\n### a.go\n\n```\npackage a\n\n```\n" +
-		"\n### b.go\n\n```\npackage b\n\n```\n"
+		"\n### \"a.go\"\n\n```\npackage a\n\n```\n" +
+		"\n### \"b.go\"\n\n```\npackage b\n\n```\n"
 	if got != want {
 		t.Errorf("build context changed:\n got %q\nwant %q", got, want)
 	}

@@ -106,6 +106,52 @@ func TestFakeGenerateHonorsThePlanExactly(t *testing.T) {
 	}
 }
 
+func TestFakeReadsTheQuotedAndLongFencedPromptsTheJobsPackageWrites(t *testing.T) {
+	// internal/jobs quotes untrusted single-line values and lengthens a fence
+	// around text that contains backticks. The fake recovers the unit, title,
+	// question and plan from those prompts, so it must read both shapes.
+	f := NewFakeRunner(FakeOptions{})
+
+	t.Run("quoted unit and title", func(t *testing.T) {
+		prompt := "Analyze this unit and plan its wiki pages.\n\nUnit: \"doc:a b.md\"\nTitle: \"A \\\"quoted\\\" title\"\n"
+		res, err := f.Run(context.Background(), Request{Step: StepAnalyze, SessionID: "s", WorkDir: "/src", Prompt: prompt})
+		if err != nil || !res.Succeeded() || res.Analysis == nil || len(res.Analysis.Pages) != 1 {
+			t.Fatalf("run: %v %+v", err, res)
+		}
+		if got := res.Analysis.Pages[0].Title; got != `A "quoted" title` {
+			t.Errorf("title = %q, want the unquoted value", got)
+		}
+		if got := res.Analysis.Pages[0].Path; got != "sources/doc-a-b-md.md" {
+			t.Errorf("path = %q, want it derived from the unquoted unit key", got)
+		}
+	})
+
+	t.Run("quoted unit on generate", func(t *testing.T) {
+		if got := unitFromPrompt("Write the wiki pages you planned for unit \"module:x\".\n"); got != "module:x" {
+			t.Errorf("unit = %q, want module:x", got)
+		}
+	})
+
+	t.Run("quoted question", func(t *testing.T) {
+		if got := questionFromPrompt("Answer this review item.\n\nQuestion: \"Why?\\nBecause\"\n"); got != "Why?\nBecause" {
+			t.Errorf("question = %q, want the unquoted value", got)
+		}
+	})
+
+	t.Run("plan in a lengthened fence", func(t *testing.T) {
+		plan := &AnalysisResult{Pages: []AnalysisPage{{Path: "entities/alpha.md", Type: "entity", Title: "Has ``` inside"}}}
+		encoded, err := json.Marshal(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prompt := "Write the wiki pages you planned for unit \"module:alpha\".\n\n````json\n" + string(encoded) + "\n````\n"
+		pages := plannedPages(prompt)
+		if len(pages) != 1 || pages[0].Title != "Has ``` inside" {
+			t.Errorf("planned pages = %+v, want the one page from the 4-backtick fence", pages)
+		}
+	})
+}
+
 func TestFakeGenerateFallbackAgreesWithAnalyze(t *testing.T) {
 	f := NewFakeRunner(FakeOptions{})
 	const unit = "module:internal-store"

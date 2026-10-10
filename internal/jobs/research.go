@@ -388,16 +388,18 @@ Rules:
 func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.Page) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "Answer this review item.\n\nQuestion: %s\n", q.Title)
-	fmt.Fprintf(&b, "Kind: %s\n", q.Kind)
+	// The title is a flag a model raised while reading untrusted source, so it
+	// is quoted; see quoted.
+	fmt.Fprintf(&b, "Answer this review item.\n\nQuestion: %s\n", quoted(q.Title))
+	fmt.Fprintf(&b, "Kind: %s\n", quoted(q.Kind))
 	if q.PageSlug != "" {
-		fmt.Fprintf(&b, "Raised against page: %s\n", q.PageSlug)
+		fmt.Fprintf(&b, "Raised against page: %s\n", quoted(q.PageSlug))
 	}
 	if strings.TrimSpace(q.Detail) != "" {
 		b.WriteString("\n## What the build recorded\n\n")
 		// Fenced: the detail is prose a previous model wrote, and it is read
 		// here as the question rather than as instruction.
-		fmt.Fprintf(&b, "```\n%s\n```\n", strings.TrimSpace(q.Detail))
+		b.WriteString(fence(strings.TrimSpace(q.Detail)))
 	}
 
 	switch {
@@ -412,9 +414,9 @@ func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.P
 		// question still renders an identical prompt.
 		remaining := maxResearchContextBytes
 		for i, u := range units {
-			fmt.Fprintf(&b, "\n### unit %s", u.Key)
+			fmt.Fprintf(&b, "\n### unit %s", quoted(string(u.Key)))
 			if u.Title != "" {
-				fmt.Fprintf(&b, " — %s", u.Title)
+				fmt.Fprintf(&b, " — %s", quoted(u.Title))
 			}
 			b.WriteString("\n")
 			share := max(remaining, 0) / (len(units) - i)
@@ -437,12 +439,12 @@ func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.P
 		b.WriteString("\n## What the wiki currently says\n\n")
 		b.WriteString("These pages bear on the question. They may be the source of it.\n")
 		for _, pg := range pages {
-			fmt.Fprintf(&b, "\n### %s (%s)\n\n", pg.Meta.Title, pg.Slug)
+			fmt.Fprintf(&b, "\n### %s (%s)\n\n", quoted(pg.Meta.Title), quoted(pg.Slug))
 			body := pg.Body
 			if len(body) > maxResearchPageBytes {
 				body = body[:maxResearchPageBytes] + "\n…truncated…"
 			}
-			fmt.Fprintf(&b, "```\n%s\n```\n", body)
+			b.WriteString(fence(body))
 		}
 	}
 
