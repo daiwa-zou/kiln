@@ -85,15 +85,88 @@ func loadSources(ctx context.Context, q queryer, workspaceID string) ([]diff.Sou
 	return out, rows.Err()
 }
 
-// LoadPages returns live pages for a workspace, used to resolve wikilinks and
-// to rebuild the index.
+// LoadPages returns live pages for a workspace with their bodies. Only callers
+// that read the prose want this; a caller that needs to know what pages exist
+// -- slugs, titles, types, frontmatter -- should use LoadPageMeta, which does not
+// ship every body on the bench across the wire.
 func (s *WikiStore) LoadPages(ctx context.Context, workspaceID string) ([]wiki.Page, error) {
-	rows, err := s.pool.Query(ctx, `
+	return s.queryPages(ctx, `
 		SELECT p.path, p.slug, p.type, p.title, p.frontmatter, p.body
 		FROM pages p
 		JOIN wikis w ON w.id = p.wiki_id
 		WHERE w.workspace_id = $1 AND p.deleted_at IS NULL
 		ORDER BY p.path`, workspaceID)
+}
+
+// LoadPageMeta returns live pages for a workspace without their bodies: path,
+// slug, type, title and frontmatter. The body column is never selected, so the
+// cost is independent of how much prose the bench holds.
+//
+// This is what an incremental build needs to resolve wikilinks, preserve each
+// page's created date and rebuild the index and overview. Page.Body is empty on
+// everything it returns.
+func (s *WikiStore) LoadPageMeta(ctx context.Context, workspaceID string) ([]wiki.Page, error) {
+	return s.queryPages(ctx, `
+		SELECT p.path, p.slug, p.type, p.title, p.frontmatter, ''::text
+		FROM pages p
+		JOIN wikis w ON w.id = p.wiki_id
+		WHERE w.workspace_id = $1 AND p.deleted_at IS NULL
+		ORDER BY p.path`, workspaceID)
+}
+
+// LoadPagesBySlug returns the named live pages with their bodies, for a caller
+// that has already chosen which pages it will read. Slugs that match nothing are
+// absent from the result rather than an error.
+func (s *WikiStore) LoadPagesBySlug(ctx context.Context, workspaceID string, slugs []string) ([]wiki.Page, error) {
+	if len(slugs) == 0 {
+		return nil, nil
+	}
+	return s.queryPages(ctx, `
+		SELECT p.path, p.slug, p.type, p.title, p.frontmatter, p.body
+		FROM pages p
+		JOIN wikis w ON w.id = p.wiki_id
+		WHERE w.workspace_id = $1 AND p.deleted_at IS NULL AND p.slug = ANY($2)
+		ORDER BY p.path`, workspaceID, slugs)
+}
+
+// LinkingSlugs returns the slugs of live pages that contain a wikilink to the
+// given slug, answered from the materialized link table rather than by scanning
+// bodies. The target is normalized the way links are on the way in, so
+// "Retry-Policy", "concepts/retry-policy" and "retry-policy#backoff" all find
+// the same pages, and a link to a page that does not exist yet is found too --
+// which is how a gap's own referrers are located.
+func (s *WikiStore) LinkingSlugs(ctx context.Context, workspaceID, slug string) ([]string, error) {
+	target := wiki.NormalizeLinkTarget(slug)
+	if target == "" {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT p.slug
+		FROM page_links l
+		JOIN pages p ON p.id = l.from_page_id
+		JOIN wikis w ON w.id = p.wiki_id
+		WHERE w.workspace_id = $1 AND l.to_slug = $2 AND p.deleted_at IS NULL
+		ORDER BY p.slug`, workspaceID, target)
+	if err != nil {
+		return nil, fmt.Errorf("store: pages linking to %s: %w", target, err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var linker string
+		if err := rows.Scan(&linker); err != nil {
+			return nil, fmt.Errorf("store: scan linking page: %w", err)
+		}
+		out = append(out, linker)
+	}
+	return out, rows.Err()
+}
+
+// queryPages runs a six-column page query (path, slug, type, title,
+// frontmatter, body) and decodes the rows.
+func (s *WikiStore) queryPages(ctx context.Context, sql string, args ...any) ([]wiki.Page, error) {
+	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: load pages: %w", err)
 	}

@@ -36,20 +36,52 @@ import (
 //
 // Blob first, row second. A row pointing at bytes that were never written would
 // render as a broken image; an orphaned blob is garbage a sweep collects.
+//
+// Work that is already done is not repeated. This runs on every build, and on
+// an established bench almost every build is a poll that changes nothing: with
+// hundreds of documents carrying megabytes of pictures each, re-uploading and
+// re-recording them all would make an idle poll the most expensive thing the
+// service does. One query loads what is already recorded; a figure whose blob
+// has a row is not Put again (keys are content digests, so a recorded blob is
+// by construction the same bytes), and a document whose recorded set already
+// matches is not handed to ReplaceFigures at all.
 func (p *Pipeline) storeFigures(ctx context.Context, req BuildRequest, log *slog.Logger) {
 	if len(req.Figures) == 0 || p.Blobs == nil {
 		return
 	}
-	for _, key := range sortedFigureKeys(req.Figures) {
+	keys := sortedFigureKeys(req.Figures)
+
+	// A failed lookup degrades to the old behaviour -- store everything --
+	// rather than skipping the figures: redundant work is safe, missing
+	// pictures are not.
+	recordedBlobs := map[string]bool{}
+	recordedBySource := map[string]map[string]FigureRecord{}
+	if existing, err := p.Store.FiguresForSources(ctx, req.WorkspaceID, keys); err != nil {
+		log.Warn("could not load recorded figures; storing all of them", "err", err)
+	} else {
+		for _, f := range existing {
+			recordedBlobs[f.BlobKey] = true
+			if recordedBySource[f.SourceKey] == nil {
+				recordedBySource[f.SourceKey] = map[string]FigureRecord{}
+			}
+			recordedBySource[f.SourceKey][f.SHA256] = f
+		}
+	}
+
+	for _, key := range keys {
 		figs := req.Figures[key]
 		records := make([]FigureRecord, 0, len(figs))
 
 		for i, f := range figs {
 			blobKey := blob.FigureKey(req.WorkspaceID, f.SHA256)
-			if err := p.Blobs.Put(ctx, blobKey, bytes.NewReader(f.Data), int64(len(f.Data))); err != nil {
-				log.Warn("figure could not be stored; the page will not show it",
-					"unit", key, "figure", f.Ref, "err", err)
-				continue
+			if !recordedBlobs[blobKey] {
+				if err := p.Blobs.Put(ctx, blobKey, bytes.NewReader(f.Data), int64(len(f.Data))); err != nil {
+					log.Warn("figure could not be stored; the page will not show it",
+						"unit", key, "figure", f.Ref, "err", err)
+					continue
+				}
+				// Two documents in one run can share a picture.
+				recordedBlobs[blobKey] = true
 			}
 			records = append(records, FigureRecord{
 				SourceKey: key, Ref: f.Ref, BlobKey: blobKey,
@@ -57,6 +89,10 @@ func (p *Pipeline) storeFigures(ctx context.Context, req BuildRequest, log *slog
 				SizeBytes: int64(len(f.Data)), Page: f.Page,
 				Caption: f.Caption, Ordinal: i, SHA256: f.SHA256,
 			})
+		}
+
+		if sameFigureSet(recordedBySource[key], records) {
+			continue
 		}
 
 		orphaned, err := p.Store.ReplaceFigures(ctx, req.WorkspaceID, key, records)
@@ -73,6 +109,32 @@ func (p *Pipeline) storeFigures(ctx context.Context, req BuildRequest, log *slog
 			}
 		}
 	}
+}
+
+// sameFigureSet reports whether recording want would change nothing: the same
+// pictures, with the same per-document details ReplaceFigures refreshes.
+//
+// Identity is the digest, as in the store. An empty recorded set matches only
+// an empty want, so a document's first figures are always recorded.
+func sameFigureSet(recorded map[string]FigureRecord, want []FigureRecord) bool {
+	// The same picture can appear twice in one document; the store keeps one
+	// row per digest, the last occurrence winning, so compare the same way.
+	distinct := make(map[string]FigureRecord, len(want))
+	for _, w := range want {
+		distinct[w.SHA256] = w
+	}
+	if len(recorded) != len(distinct) {
+		return false
+	}
+	for _, w := range distinct {
+		r, ok := recorded[w.SHA256]
+		if !ok || r.Ref != w.Ref || r.Page != w.Page ||
+			r.Caption != w.Caption || r.Ordinal != w.Ordinal ||
+			r.BlobKey != w.BlobKey {
+			return false
+		}
+	}
+	return true
 }
 
 // BlobWriter is the half of object storage the pipeline uses: it stores

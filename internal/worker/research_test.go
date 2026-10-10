@@ -29,6 +29,37 @@ type pipelineStore struct {
 func (s *pipelineStore) LoadPages(context.Context, string) ([]wiki.Page, error) {
 	return s.pages, s.pageErr
 }
+func (s *pipelineStore) LoadPageMeta(context.Context, string) ([]wiki.Page, error) {
+	out := make([]wiki.Page, len(s.pages))
+	for i, p := range s.pages {
+		p.Body = ""
+		out[i] = p
+	}
+	return out, s.pageErr
+}
+func (s *pipelineStore) LoadPagesBySlug(_ context.Context, _ string, slugs []string) ([]wiki.Page, error) {
+	var out []wiki.Page
+	for _, p := range s.pages {
+		for _, slug := range slugs {
+			if p.Slug == slug {
+				out = append(out, p)
+			}
+		}
+	}
+	return out, s.pageErr
+}
+func (s *pipelineStore) LinkingSlugs(_ context.Context, _, slug string) ([]string, error) {
+	var out []string
+	for _, p := range s.pages {
+		for _, l := range wiki.LinkTargets(p.Body) {
+			if l == wiki.NormalizeLinkTarget(slug) {
+				out = append(out, p.Slug)
+				break
+			}
+		}
+	}
+	return out, s.pageErr
+}
 func (s *pipelineStore) LoadSteering(context.Context, string) (jobs.Steering, error) {
 	return jobs.Steering{}, nil
 }

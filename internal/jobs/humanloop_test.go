@@ -166,6 +166,10 @@ func TestApprovedDeletionExecutesTheCascade(t *testing.T) {
 type fakeBlobDeleter struct {
 	deleted []string
 	put     map[string][]byte
+	// puts counts Put calls, which put (a map) cannot: writing the same key
+	// twice leaves one entry, and that repetition is what some tests exist
+	// to catch.
+	puts int
 }
 
 func (f *fakeBlobDeleter) Put(_ context.Context, key string, r io.Reader, _ int64) error {
@@ -177,6 +181,7 @@ func (f *fakeBlobDeleter) Put(_ context.Context, key string, r io.Reader, _ int6
 		f.put = map[string][]byte{}
 	}
 	f.put[key] = data
+	f.puts++
 	return nil
 }
 

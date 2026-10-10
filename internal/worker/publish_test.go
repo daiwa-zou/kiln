@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daiwa-zou/kiln/internal/publish"
 	"github.com/daiwa-zou/kiln/internal/store"
 	"github.com/daiwa-zou/kiln/internal/wiki"
 )
@@ -24,27 +25,45 @@ type publishStore struct {
 	artifact map[string]string
 	figures  []store.FigureRow
 
+	// revision is what WikiRevision reports; revisionErr makes it fail.
+	revision    int64
+	revisionErr error
+
+	// loads counts the expensive reads a publish makes, so a test can prove a
+	// skipped publish made none of them.
+	pageLoads, figureLoads, artifactLoads int
+
 	// marked records every MarkPublished call, which is the only durable
 	// evidence a push produced.
 	marked []markedPublish
 }
 
-type markedPublish struct{ commit, err string }
+type markedPublish struct {
+	commit   string
+	revision int64
+	err      string
+}
+
+func (p *publishStore) WikiRevision(context.Context, string) (int64, error) {
+	return p.revision, p.revisionErr
+}
 
 func (p *publishStore) PublishTargetFor(context.Context, string) (store.PublishTarget, error) {
 	return p.target, p.targetErr
 }
 
-func (p *publishStore) MarkPublished(_ context.Context, _, commit, publishErr string) error {
-	p.marked = append(p.marked, markedPublish{commit: commit, err: publishErr})
+func (p *publishStore) MarkPublished(_ context.Context, _, commit string, revision int64, publishErr string) error {
+	p.marked = append(p.marked, markedPublish{commit: commit, revision: revision, err: publishErr})
 	return nil
 }
 
 func (p *publishStore) LoadPages(context.Context, string) ([]wiki.Page, error) {
+	p.pageLoads++
 	return p.pages, nil
 }
 
 func (p *publishStore) LoadArtifact(_ context.Context, _, kind string) (string, error) {
+	p.artifactLoads++
 	if body, ok := p.artifact[kind]; ok {
 		return body, nil
 	}
@@ -52,6 +71,7 @@ func (p *publishStore) LoadArtifact(_ context.Context, _, kind string) (string, 
 }
 
 func (p *publishStore) ListFigures(context.Context, string) ([]store.FigureRow, error) {
+	p.figureLoads++
 	return p.figures, nil
 }
 
@@ -119,6 +139,160 @@ func TestPublishFailureIsRecordedNotRaised(t *testing.T) {
 	// The reason has to be diagnosable from the target row alone.
 	if !strings.Contains(st.marked[0].err, "public address") {
 		t.Errorf("recorded reason is not actionable: %q", st.marked[0].err)
+	}
+}
+
+// countingBlobs counts reads, because the point of skipping a publish is that
+// no image is pulled out of object storage to build a tree nobody will push.
+type countingBlobs struct {
+	memBlobs
+	gets int
+}
+
+func (c *countingBlobs) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	c.gets++
+	return c.memBlobs.Get(ctx, key)
+}
+
+// fakePush swaps the network push for a counter, restoring it afterwards.
+func fakePush(t *testing.T, err error) *int {
+	t.Helper()
+	var calls int
+	orig := pushToRepository
+	pushToRepository = func(context.Context, publish.PushOptions) (publish.Result, error) {
+		calls++
+		if err != nil {
+			return publish.Result{}, err
+		}
+		return publish.Result{Commit: "abc123"}, nil
+	}
+	t.Cleanup(func() { pushToRepository = orig })
+	return &calls
+}
+
+func publishableStore() (*publishStore, *countingBlobs) {
+	blobs := &countingBlobs{memBlobs: memBlobs{"k1": []byte("png")}}
+	return &publishStore{
+		target: store.PublishTarget{
+			RepoURL: "https://github.com/example/wiki.git", Branch: "main", Enabled: true,
+		},
+		pages: []wiki.Page{{
+			Path: "concepts/a.md", Slug: "a",
+			Meta: wiki.Frontmatter{Type: "concept", Title: "A"}, Body: "# A\n",
+		}},
+		figures: []store.FigureRow{{ID: "f1", BlobKey: "k1", ContentType: "image/png"}},
+	}, blobs
+}
+
+// TestPublishSkipsAnUnchangedRevision: a build that changed nothing must not
+// load the wiki, read its images, or touch the remote.
+func TestPublishSkipsAnUnchangedRevision(t *testing.T) {
+	pushes := fakePush(t, nil)
+	st, blobs := publishableStore()
+	st.revision = 7
+	st.target.PublishedRevision = 7
+	w := &Worker{Store: st, Blobs: blobs, Log: quietLogger()}
+
+	w.publishAfterBuild(context.Background(), "ws", "demo", "poll", quietLogger())
+
+	if *pushes != 0 {
+		t.Errorf("pushed %d times at an unchanged revision", *pushes)
+	}
+	if st.pageLoads != 0 || st.figureLoads != 0 || st.artifactLoads != 0 || blobs.gets != 0 {
+		t.Errorf("loaded %d page sets, %d figure lists, %d artifacts, %d blobs; want none",
+			st.pageLoads, st.figureLoads, st.artifactLoads, blobs.gets)
+	}
+	if len(st.marked) != 0 {
+		t.Errorf("a skipped publish recorded %v", st.marked)
+	}
+}
+
+// TestPublishRunsWhenTheRevisionMoved covers the cases that must still publish:
+// a build that changed pages, and a page deleted by hand, which moves the
+// revision with no build at all.
+func TestPublishRunsWhenTheRevisionMoved(t *testing.T) {
+	pushes := fakePush(t, nil)
+	st, blobs := publishableStore()
+	st.revision = 8
+	st.target.PublishedRevision = 7
+	w := &Worker{Store: st, Blobs: blobs, Log: quietLogger()}
+
+	w.publishAfterBuild(context.Background(), "ws", "demo", "manual", quietLogger())
+
+	if *pushes != 1 {
+		t.Fatalf("pushed %d times, want 1", *pushes)
+	}
+	if blobs.gets == 0 {
+		t.Error("the figures were never read for a real publish")
+	}
+	if len(st.marked) != 1 || st.marked[0].err != "" || st.marked[0].revision != 8 || st.marked[0].commit != "abc123" {
+		t.Errorf("recorded %+v, want a success stamped with revision 8", st.marked)
+	}
+}
+
+// TestPublishRecordsTheRevisionWhenTheRepositoryAlreadyMatched: finding nothing
+// to commit is still a successful sync at this revision, and recording it is
+// what lets the next build skip.
+func TestPublishRecordsTheRevisionWhenTheRepositoryAlreadyMatched(t *testing.T) {
+	fakePush(t, publish.ErrNothingToPush)
+	st, blobs := publishableStore()
+	st.revision = 3
+	w := &Worker{Store: st, Blobs: blobs, Log: quietLogger()}
+
+	w.publishAfterBuild(context.Background(), "ws", "demo", "manual", quietLogger())
+
+	if len(st.marked) != 1 || st.marked[0].err != "" || st.marked[0].revision != 3 {
+		t.Errorf("recorded %+v, want a success at revision 3", st.marked)
+	}
+}
+
+// TestFailedPublishDoesNotAdvanceTheRevision: a push that failed must be tried
+// again by the next build even though nothing new was written meanwhile.
+func TestFailedPublishDoesNotAdvanceTheRevision(t *testing.T) {
+	fakePush(t, errors.New("remote unreachable"))
+	st, blobs := publishableStore()
+	st.revision = 9
+	st.target.PublishedRevision = 8
+	w := &Worker{Store: st, Blobs: blobs, Log: quietLogger()}
+
+	w.publishAfterBuild(context.Background(), "ws", "demo", "manual", quietLogger())
+
+	if len(st.marked) != 1 || st.marked[0].err == "" || st.marked[0].revision != 0 {
+		t.Errorf("recorded %+v, want a failure carrying no revision", st.marked)
+	}
+}
+
+// TestPublishDoesNotSkipWhenTheRevisionIsUnknown: if the check itself cannot be
+// answered the safe move is the old behaviour -- push -- and recording
+// "unknown" so that it never counts as current.
+func TestPublishDoesNotSkipWhenTheRevisionIsUnknown(t *testing.T) {
+	pushes := fakePush(t, nil)
+	st, blobs := publishableStore()
+	st.revisionErr = errors.New("db down")
+	st.target.PublishedRevision = 5
+	w := &Worker{Store: st, Blobs: blobs, Log: quietLogger()}
+
+	w.publishAfterBuild(context.Background(), "ws", "demo", "manual", quietLogger())
+
+	if *pushes != 1 {
+		t.Errorf("pushed %d times, want 1", *pushes)
+	}
+	if len(st.marked) != 1 || st.marked[0].revision != 0 {
+		t.Errorf("recorded %+v, want revision 0", st.marked)
+	}
+}
+
+// TestFirstPublishOfAnEmptyBenchStillRuns: revision zero means no wiki yet, and
+// never-published is also zero. They must not be mistaken for "current".
+func TestFirstPublishOfAnEmptyBenchStillRuns(t *testing.T) {
+	pushes := fakePush(t, nil)
+	st, blobs := publishableStore()
+	w := &Worker{Store: st, Blobs: blobs, Log: quietLogger()}
+
+	w.publishAfterBuild(context.Background(), "ws", "demo", "manual", quietLogger())
+
+	if *pushes != 1 {
+		t.Errorf("pushed %d times, want 1", *pushes)
 	}
 }
 

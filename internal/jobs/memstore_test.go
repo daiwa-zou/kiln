@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
@@ -44,6 +45,15 @@ type memStore struct {
 	// semantics, like the real one: what a document currently contains is
 	// what is recorded for it.
 	figures map[string][]FigureRecord
+	// replaceFigureCalls counts ReplaceFigures calls, each of which is a
+	// transaction in the real store.
+	replaceFigureCalls int
+
+	// pageLoads and metaLoads count whole-bench page reads, with and without
+	// bodies; bodiesLoaded names every page whose body was fetched by slug.
+	// Together they say how much prose a run actually pulled.
+	pageLoads, metaLoads int
+	bodiesLoaded         []string
 
 	// trailingUnitCost is what TrailingUnitCost reports; zero means no history.
 	trailingUnitCost float64
@@ -72,6 +82,7 @@ func (m *memStore) ReplaceFigures(_ context.Context, _, sourceKey string, figs [
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.replaceFigureCalls++
 	keep := map[string]bool{}
 	for _, f := range figs {
 		keep[f.SHA256] = true
@@ -122,10 +133,66 @@ func (m *memStore) LoadPages(context.Context, string) ([]wiki.Page, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.pageLoads++
 	out := make([]wiki.Page, 0, len(m.pages))
 	for _, p := range m.pages {
 		out = append(out, p)
 	}
+	return out, nil
+}
+
+// LoadPageMeta mirrors the real store: every live page, body omitted. Blanking
+// the body here rather than returning it is deliberate -- a pipeline that came
+// to depend on a body from this call would pass against a fake that leaked one
+// and break against Postgres.
+func (m *memStore) LoadPageMeta(context.Context, string) ([]wiki.Page, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.metaLoads++
+	out := make([]wiki.Page, 0, len(m.pages))
+	for _, p := range m.pages {
+		p.Body = ""
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (m *memStore) LoadPagesBySlug(_ context.Context, _ string, slugs []string) ([]wiki.Page, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	want := make(map[string]bool, len(slugs))
+	for _, s := range slugs {
+		want[s] = true
+	}
+	var out []wiki.Page
+	for _, p := range m.pages {
+		if want[p.Slug] {
+			out = append(out, p)
+			m.bodiesLoaded = append(m.bodiesLoaded, p.Slug)
+		}
+	}
+	return out, nil
+}
+
+// LinkingSlugs answers from the bodies the way page_links is populated from
+// them on import.
+func (m *memStore) LinkingSlugs(_ context.Context, _, slug string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	target := wiki.NormalizeLinkTarget(slug)
+	var out []string
+	for _, p := range m.pages {
+		for _, l := range wiki.LinkTargets(p.Body) {
+			if l == target {
+				out = append(out, p.Slug)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
 	return out, nil
 }
 
