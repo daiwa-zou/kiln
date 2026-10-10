@@ -34,6 +34,7 @@ type Metrics struct {
 	runsFinished *prometheus.CounterVec
 	runDuration  *prometheus.HistogramVec
 	runCost      prometheus.Counter
+	staleRuns    prometheus.Counter
 	unitsBuilt   *prometheus.CounterVec
 	pagesWritten *prometheus.CounterVec
 	activeRuns   prometheus.Gauge
@@ -99,6 +100,11 @@ func NewMetrics() *Metrics {
 			Help: "Cumulative model spend across builds, in USD.",
 		}),
 
+		staleRuns: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "kiln_runs_stale_requeued_total",
+			Help: "Running builds returned to the queue because their worker stopped heartbeating. Anything above the occasional dead pod means workers are losing their claims, and builds are being paid for twice.",
+		}),
+
 		unitsBuilt: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kiln_units_total",
 			Help: "Units the pipeline resolved, by outcome. Units gated by the content hash are 'unchanged' and cost nothing.",
@@ -127,7 +133,7 @@ func NewMetrics() *Metrics {
 
 	reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.httpInFlight,
-		m.runsStarted, m.runsFinished, m.runDuration, m.runCost,
+		m.runsStarted, m.runsFinished, m.runDuration, m.runCost, m.staleRuns,
 		m.unitsBuilt, m.pagesWritten, m.activeRuns, m.queueDepth, m.searches,
 		// Go runtime and process collectors: the questions "is it leaking"
 		// and "is it being throttled" are asked of every service, and
@@ -184,6 +190,15 @@ func (m *Metrics) RunFinished(status string, d time.Duration, costUSD float64, c
 		if n > 0 {
 			m.pagesWritten.WithLabelValues(action).Add(float64(n))
 		}
+	}
+}
+
+// StaleRequeued records runs the stale sweep returned to the queue. Healthy
+// workers heartbeat, so each one counted here is a worker that died or was cut
+// off from the database mid-build.
+func (m *Metrics) StaleRequeued(n int) {
+	if n > 0 {
+		m.staleRuns.Add(float64(n))
 	}
 }
 
