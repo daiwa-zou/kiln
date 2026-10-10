@@ -96,6 +96,14 @@ linters:
         text: "G301|G306"
         linters:
           - gosec
+      # G703 on the per-unit scratch directory: its path is the run's own
+      # os.MkdirTemp root joined with sanitize(key), which replaces every path
+      # separator and dot, so taint from the unit key cannot climb out of it.
+      # collectPages walks that same directory.
+      - path: (internal/jobs/pipeline\.go|internal/jobs/collect\.go)$
+        text: "G703"
+        linters:
+          - gosec
       # G122: collectPages runs after the agent process has exited, so nothing
       # is writing to the scratch dir between the EvalSymlinks containment
       # check and the read. The check also reports an escaping symlink as a
