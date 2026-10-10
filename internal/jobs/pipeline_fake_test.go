@@ -21,9 +21,9 @@ func fakeTestMap() *mapper.WorkspaceMap {
 		mapper.Unit{Key: "module:pond", Kind: "module", Title: "Pond",
 			Dir: "apps/pond", Hash: "h2"},
 	)
-	// The map hash gates the architecture synthesis; without it every build
+	// The arch hash gates the architecture synthesis; without it every build
 	// would regenerate arch:overview and no repeat build could be free.
-	m.Hash = "map-hash-1"
+	m.ArchHash = "map-hash-1"
 	return m
 }
 

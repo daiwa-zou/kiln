@@ -55,8 +55,17 @@ type uiAsset struct {
 // its escaping: injected inline script or a foreign fetch target simply does
 // not execute. With no inline blocks left, 'self' covers exactly the two
 // files this binary serves.
+//
+// img-src is 'self' and data: only, deliberately NOT https:. Page markdown is
+// written by a model from arbitrary sources, so an https: image there is a
+// request every reader's browser makes on render, to a host and with a query
+// string the author chose -- a zero-click way to carry data out of the wiki.
+// Nothing in the UI needs a foreign image: figures recovered from documents
+// are served from /api/v1/ (same origin), the avatar is initials drawn in CSS,
+// and the favicon is a data: URI. The renderer turns off-origin markdown
+// images into links; this is the backstop if it ever stops doing so.
 const uiCSP = "default-src 'none'; script-src 'self'; style-src 'self'; " +
-	"img-src 'self' https: data:; connect-src 'self'; " +
+	"img-src 'self' data:; connect-src 'self'; " +
 	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 func mountUI(r chi.Router) {
@@ -70,8 +79,8 @@ func mountUI(r chi.Router) {
 			h.Set("ETag", asset.etag)
 			h.Set("Content-Security-Policy", uiCSP)
 			h.Set("X-Content-Type-Options", "nosniff")
-			// Wiki content may embed external images; the reader's URL is not
-			// the image host's business.
+			// Links out of the wiki (off-origin images render as links, not
+			// loads) should not tell the destination which page they came from.
 			h.Set("Referrer-Policy", "no-referrer")
 			if req.Header.Get("If-None-Match") == asset.etag {
 				w.WriteHeader(http.StatusNotModified)

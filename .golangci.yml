@@ -69,7 +69,7 @@ linters:
       # binary is either the literal "git" or an operator-configured tool path
       # (agent CLI, extractor binaries); URLs and refs are validated before they
       # reach the argument list.
-      - path: (internal/agent/claude\.go|internal/agent/cli_health\.go|internal/connector/git/clone\.go|internal/connector/git/diffrange\.go|internal/extract/extract\.go|internal/publish/git\.go)$
+      - path: (internal/agent/claude\.go|internal/agent/cli_health\.go|internal/connector/git/gitcmd\.go|internal/extract/extract\.go|internal/publish/git\.go)$
         text: "G204"
         linters:
           - gosec

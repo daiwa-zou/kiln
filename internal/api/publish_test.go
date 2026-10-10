@@ -148,7 +148,7 @@ func TestPublishReportsTheLastOutcome(t *testing.T) {
 		t.Fatal("configure failed")
 	}
 
-	if err := js.MarkPublished(t.Context(), wsID, "", "git push: Repository not found."); err != nil {
+	if err := js.MarkPublished(t.Context(), wsID, "", 0, "git push: Repository not found."); err != nil {
 		t.Fatal(err)
 	}
 	var after map[string]any
@@ -158,7 +158,7 @@ func TestPublishReportsTheLastOutcome(t *testing.T) {
 	}
 
 	// A success clears the error and stamps the commit.
-	if err := js.MarkPublished(t.Context(), wsID, "abc123def", ""); err != nil {
+	if err := js.MarkPublished(t.Context(), wsID, "abc123def", 1, ""); err != nil {
 		t.Fatal(err)
 	}
 	get(t, srv, "/api/v1/workspaces/demo/publish", &after)
@@ -182,10 +182,10 @@ func TestMarkPublishedKeepsTheLastGoodCommit(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := js.MarkPublished(t.Context(), wsID, "good123", ""); err != nil {
+	if err := js.MarkPublished(t.Context(), wsID, "good123", 4, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := js.MarkPublished(t.Context(), wsID, "", "network unreachable"); err != nil {
+	if err := js.MarkPublished(t.Context(), wsID, "", 0, "network unreachable"); err != nil {
 		t.Fatal(err)
 	}
 

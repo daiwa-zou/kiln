@@ -82,6 +82,17 @@ func (s *WikiStore) SpendInWindow(ctx context.Context, workspaceID string, windo
 	return spent, nil
 }
 
+// BudgetExceededReview is the review item filed when a workspace has spent its
+// budget within the rolling window. One wording for every place that enforces
+// the window -- the API at enqueue, the worker at claim -- so the queue holds a
+// single deduplicated item however the pause was reached, not one per path.
+func BudgetExceededReview(spent, budget float64, window time.Duration) (title, detail string) {
+	return "budget window exceeded", fmt.Sprintf(
+		"Builds are paused: $%.2f of the $%.2f budget was spent in the last %s. "+
+			"Raise the bench budget or wait for the window to roll on; runs resume as soon as spend is back under the cap.",
+		spent, budget, window)
+}
+
 // WorkspaceBudgetUSD returns the workspace's rolling-window budget cap, or nil
 // when none is set (unlimited).
 func (s *WikiStore) WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error) {

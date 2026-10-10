@@ -205,3 +205,65 @@ func TestStoreFiguresWithoutBlobStoreIsANoOp(t *testing.T) {
 		t.Errorf("recorded %d figures with no blob store to hold their bytes", len(stored))
 	}
 }
+
+// TestStoreFiguresSkipsWhatIsAlreadyStored: a poll that changes nothing must
+// not re-upload every picture on the bench or open a transaction per document.
+func TestStoreFiguresSkipsWhatIsAlreadyStored(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	blobs := &fakeBlobDeleter{}
+	p := testPipeline(store, &structuredRunner{})
+	p.Blobs = blobs
+
+	docA := string(diff.DocKey(diff.UploadOrigin("a.pdf")))
+	docB := string(diff.DocKey(diff.UploadOrigin("b.pdf")))
+	req := BuildRequest{
+		WorkspaceID: "w",
+		Figures: map[string][]extract.Figure{
+			docA: {docFigure("p1-i0", "a1", 10, 10, "A one"), docFigure("p2-i0", "a2", 10, 10, "")},
+			docB: {docFigure("p1-i0", "b1", 10, 10, "B one")},
+		},
+	}
+
+	p.storeFigures(ctx, req, p.logger())
+	if blobs.puts != 3 || store.replaceFigureCalls != 2 {
+		t.Fatalf("first build: %d Puts, %d ReplaceFigures; want 3 and 2", blobs.puts, store.replaceFigureCalls)
+	}
+
+	// Nothing changed.
+	p.storeFigures(ctx, req, p.logger())
+	if blobs.puts != 3 || store.replaceFigureCalls != 2 {
+		t.Errorf("unchanged build did work: %d Puts, %d ReplaceFigures; want 3 and 2",
+			blobs.puts, store.replaceFigureCalls)
+	}
+
+	// Only B changed: it gains a figure. A must not be touched, and B's
+	// existing picture must not be uploaded again.
+	req.Figures[docB] = append(req.Figures[docB], docFigure("p3-i0", "b2", 10, 10, "B two"))
+	p.storeFigures(ctx, req, p.logger())
+	if blobs.puts != 4 {
+		t.Errorf("Puts = %d, want 4: only the new figure should upload", blobs.puts)
+	}
+	if store.replaceFigureCalls != 3 {
+		t.Errorf("ReplaceFigures calls = %d, want 3: only the changed document", store.replaceFigureCalls)
+	}
+	got, _ := store.FiguresForSources(ctx, "w", []string{docB})
+	if len(got) != 2 {
+		t.Errorf("B has %d recorded figures, want 2", len(got))
+	}
+
+	// A caption edit is a change even though no picture is: it must be
+	// recorded, though nothing needs uploading.
+	req.Figures[docA][0].Caption = "A one, revised"
+	p.storeFigures(ctx, req, p.logger())
+	if blobs.puts != 4 || store.replaceFigureCalls != 4 {
+		t.Errorf("caption edit: %d Puts, %d ReplaceFigures; want 4 and 4", blobs.puts, store.replaceFigureCalls)
+	}
+
+	// A removed figure is a change, and its blob is freed.
+	req.Figures[docA] = req.Figures[docA][:1]
+	p.storeFigures(ctx, req, p.logger())
+	if store.replaceFigureCalls != 5 || len(blobs.deleted) != 1 {
+		t.Errorf("removal: %d ReplaceFigures, %d deleted; want 5 and 1", store.replaceFigureCalls, len(blobs.deleted))
+	}
+}

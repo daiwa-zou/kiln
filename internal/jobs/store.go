@@ -25,9 +25,26 @@ type Store interface {
 	// the baseline the incremental skip and cascade deletion are computed from.
 	LoadSources(ctx context.Context, workspaceID string) ([]diff.SourceRecord, error)
 
-	// LoadPages returns live pages, used to resolve wikilinks and rebuild the
-	// index.
+	// LoadPageMeta returns live pages without their bodies -- path, slug, type,
+	// title and frontmatter -- which is all that resolving wikilinks, keeping
+	// created dates and rebuilding the index and overview need. Page.Body is
+	// empty on everything it returns, and callers must not rely on it.
+	//
+	// Prefer this to LoadPages: a bench's prose can run to hundreds of
+	// megabytes, and shipping it to read a slug is the cost this exists to avoid.
+	LoadPageMeta(ctx context.Context, workspaceID string) ([]wiki.Page, error)
+
+	// LoadPages returns live pages with their bodies. For a caller that will
+	// actually read the prose of most of them; one that has chosen a few pages
+	// should ask for just those with LoadPagesBySlug.
 	LoadPages(ctx context.Context, workspaceID string) ([]wiki.Page, error)
+
+	// LoadPagesBySlug returns the named live pages with their bodies.
+	LoadPagesBySlug(ctx context.Context, workspaceID string, slugs []string) ([]wiki.Page, error)
+
+	// LinkingSlugs returns the slugs of live pages that link to the given slug,
+	// from the materialized link table rather than from scanning bodies.
+	LinkingSlugs(ctx context.Context, workspaceID, slug string) ([]string, error)
 
 	// LoadSteering returns the purpose and schema documents injected into every
 	// prompt, plus any pinned corrections for the pages being regenerated. This

@@ -362,6 +362,45 @@ func TestBuildOverviewNamesTheBenchNotItsUUID(t *testing.T) {
 	}
 }
 
+// TestBuildLoadsNoPageBodies: neither a build with nothing to do nor one that
+// regenerates a unit needs the prose of the pages already on record. A no-op
+// poll must not read the pages at all; a real build reads their metadata, which
+// is what the index, overview and wikilink resolution are made from.
+func TestBuildLoadsNoPageBodies(t *testing.T) {
+	store := newMemStore()
+	store.pages["concepts/existing.md"] = wiki.Page{
+		Path: "concepts/existing.md", Slug: "existing",
+		Meta: wiki.Frontmatter{Type: wiki.TypeConcept, Title: "Existing", Created: "2026-01-01"},
+		Body: "# Existing\n\nA long body that a build has no reason to read.\n",
+	}
+	p := testPipeline(store, newScriptedRunner())
+
+	if _, err := p.Build(context.Background(), testRequest(t, testMap(), diff.ChangeSet{})); err != nil {
+		t.Fatalf("no-op Build: %v", err)
+	}
+	if store.pageLoads != 0 || store.metaLoads != 0 {
+		t.Errorf("a build with nothing to do loaded pages: %d with bodies, %d metadata-only",
+			store.pageLoads, store.metaLoads)
+	}
+
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h1"})
+	if _, err := p.Build(context.Background(), testRequest(t, m, diff.ChangeSet{FullRebuild: true})); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if store.pageLoads != 0 {
+		t.Errorf("a build loaded page bodies %d time(s)", store.pageLoads)
+	}
+	if store.metaLoads != 1 {
+		t.Errorf("a build loaded page metadata %d time(s), want 1", store.metaLoads)
+	}
+
+	// The existing page still made it into the index although its body was
+	// never read.
+	if !strings.Contains(store.index, "existing") {
+		t.Errorf("index lost a page it was only given metadata for:\n%s", store.index)
+	}
+}
+
 func TestBuildNoChangesCostsNothing(t *testing.T) {
 	store := newMemStore()
 	runner := newScriptedRunner()
@@ -1384,5 +1423,42 @@ func TestUnitThatPlansPagesAndWritesNoneStillReportsSuccess(t *testing.T) {
 	}
 	if res.Summary.Created != 0 {
 		t.Errorf("Created = %d, want 0 for a generation that wrote nothing", res.Summary.Created)
+	}
+}
+
+// A run's ref is the base of the next incremental range, and only a full SHA
+// can be fetched from a remote; an abbreviation cannot. So the record keeps the
+// full id while everything a reader sees stays at the familiar seven characters.
+func TestBuildRecordsTheFullRefAndShowsTheShortOne(t *testing.T) {
+	const full = "0123456789abcdef0123456789abcdef01234567"
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.filesByAttempt[0] = map[string]string{
+		"entities/ripple.md": validPage("entity", "Ripple"),
+	}
+	p := testPipeline(store, runner)
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"})
+	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
+	req.Ref = full
+
+	res, err := p.Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.Summary.Ref != full {
+		t.Errorf("run summary ref = %q, want the full SHA", res.Summary.Ref)
+	}
+
+	imp := store.lastImport()
+	if imp == nil {
+		t.Fatal("nothing was imported")
+	}
+	if strings.Contains(imp.Overview, full) || !strings.Contains(imp.Overview, full[:7]) {
+		t.Errorf("overview should show the short ref only:\n%s", imp.Overview)
+	}
+	for _, pg := range imp.UpsertPages {
+		if pg.Meta.BuiltAtRef != full[:7] {
+			t.Errorf("page %s BuiltAtRef = %q, want %q", pg.Path, pg.Meta.BuiltAtRef, full[:7])
+		}
 	}
 }

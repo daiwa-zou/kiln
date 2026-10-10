@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -92,6 +93,77 @@ func TestResearchAnswersAQuestionAndLedgersTheRun(t *testing.T) {
 	}
 	if len(store.imports) != 0 {
 		t.Errorf("research imported %d times; it must write nothing", len(store.imports))
+	}
+}
+
+// withoutBodies is what LoadPageMeta hands back: the same pages, prose absent.
+func withoutBodies(pages []wiki.Page) []wiki.Page {
+	out := make([]wiki.Page, len(pages))
+	for i, p := range pages {
+		p.Body = ""
+		out[i] = p
+	}
+	return out
+}
+
+// TestResearchLoadsBodiesOnlyForThePagesItRenders: choosing four pages must not
+// cost reading all of them. The bench here has many pages; the question picks
+// a few by title and by who links to its subject, and only those bodies may be
+// fetched.
+func TestResearchLoadsBodiesOnlyForThePagesItRenders(t *testing.T) {
+	repo := researchRepo(t)
+	store := newMemStore()
+	add := func(slug, title, body string) {
+		path := "concepts/" + slug + ".md"
+		store.pages[path] = wiki.Page{
+			Path: path, Slug: slug,
+			Meta: wiki.Frontmatter{Type: wiki.TypeConcept, Title: title},
+			Body: body,
+		}
+	}
+	add("retry-policy", "Retry policy", "BODY-RETRY the retry policy page.")
+	add("dispatch", "Dispatch", "BODY-DISPATCH leans on [[retry-policy]] for backoff.")
+	add("scheduler", "Scheduler", "BODY-SCHEDULER also cites [[Concepts/Retry-Policy|retries]].")
+	for i := range 40 {
+		add(fmt.Sprintf("filler-%02d", i), fmt.Sprintf("Unrelated topic %02d", i),
+			fmt.Sprintf("BODY-FILLER-%02d nothing relevant.", i))
+	}
+
+	runner := newScriptedRunner()
+	runner.researchResult = &agent.ResearchResult{Findings: "Not answerable from these sources."}
+	p := testPipeline(store, runner)
+
+	if _, err := p.Research(context.Background(), ResearchRequest{
+		RunID: "run-research", WorkspaceID: "ws-1",
+		Source: SourceSpec{Path: repo, Slug: "bench"},
+		Question: Question{
+			Kind: "gap", Title: "retry-policy is referred to but not written",
+			PageSlug: "retry-policy",
+		},
+	}); err != nil {
+		t.Fatalf("Research: %v", err)
+	}
+
+	if store.pageLoads != 0 {
+		t.Errorf("research loaded every page body %d time(s)", store.pageLoads)
+	}
+	got := append([]string(nil), store.bodiesLoaded...)
+	sort.Strings(got)
+	want := []string{"dispatch", "retry-policy", "scheduler"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("bodies loaded for %v, want only the pages rendered: %v", got, want)
+	}
+
+	// And those are the pages the prompt carries, linkers found through the
+	// link table (including the alias and directory-qualified spelling).
+	prompt := runner.calls[0].Prompt
+	for _, w := range []string{"BODY-RETRY", "BODY-DISPATCH", "BODY-SCHEDULER"} {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("prompt is missing %s:\n%s", w, prompt)
+		}
+	}
+	if strings.Contains(prompt, "BODY-FILLER") {
+		t.Error("an unrelated page's body reached the prompt")
 	}
 }
 
@@ -190,6 +262,33 @@ func TestResearchLedgersAFailedPass(t *testing.T) {
 	}
 }
 
+func TestResearchInterruptedByCancellationRecordsNothing(t *testing.T) {
+	// A canceled context is the worker draining (or having lost the claim), not
+	// a research failure. Recording 'failed' would finish the row, and the
+	// requeue that follows is fenced to status 'running' -- so the question would
+	// never be researched. The pass must return the context's error and leave the
+	// row for the worker.
+	repo := researchRepo(t)
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.failWith = context.Canceled
+	p := testPipeline(store, runner)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := p.Research(ctx, ResearchRequest{
+		RunID: "run-research", WorkspaceID: "ws-1",
+		Source:   SourceSpec{Path: repo, Slug: "bench"},
+		Question: Question{Kind: "gap", Title: "What is the retry policy?"},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Research = %v, want the context's error", err)
+	}
+	if len(store.runs) != 0 {
+		t.Errorf("an interrupted pass recorded a terminal status: %+v", store.runs)
+	}
+}
+
 func TestResearchRejectsAnEmptyAnswer(t *testing.T) {
 	repo := researchRepo(t)
 	store := newMemStore()
@@ -272,7 +371,7 @@ func TestRelevantPagesPrefersTheSubjectOfAGap(t *testing.T) {
 	got := relevantPages(Question{
 		Kind: "gap", Title: "retry-policy is referred to but not written",
 		PageSlug: "retry-policy",
-	}, pages)
+	}, withoutBodies(pages), map[string]bool{"dispatch": true})
 
 	if len(got) == 0 {
 		t.Fatal("a gap selected no pages; the pages naming it are the statement of what is missing")
@@ -302,8 +401,9 @@ func TestResearchPromptCarriesTheQuestionAndItsMaterial(t *testing.T) {
 	)
 
 	// The "Question:" line leads, which is the contract the fake runner reads
-	// back and the reason a research prompt is recognisable at all.
-	if !strings.Contains(prompt, "Question: Two retry counts") {
+	// back and the reason a research prompt is recognisable at all. The title
+	// is quoted because it is untrusted single-line text.
+	if !strings.Contains(prompt, `Question: "Two retry counts"`) {
 		t.Errorf("prompt does not lead with the question:\n%s", prompt)
 	}
 	for _, want := range []string{"contradiction", "one says 3", "module:dispatch", "dispatch", "It retries."} {
@@ -358,7 +458,8 @@ func TestResearchPromptSharesOneBudgetAcrossItsUnits(t *testing.T) {
 
 func TestBuildContextIsUnchangedByTheBudgetParameter(t *testing.T) {
 	// The build path passes the limits it always had; its rendering must stay
-	// byte-for-byte what it was.
+	// byte-for-byte what it was, apart from the path headings, which are now
+	// quoted so that a file name cannot inject a line of its own.
 	root := t.TempDir()
 	write(t, root, "a.go", "package a\n")
 	write(t, root, "b.go", "package b\n")
@@ -367,8 +468,8 @@ func TestBuildContextIsUnchangedByTheBudgetParameter(t *testing.T) {
 
 	want := "\n## Source material\n\n" +
 		"This is the content of the unit's inputs. Ground every claim in it.\n" +
-		"\n### a.go\n\n```\npackage a\n\n```\n" +
-		"\n### b.go\n\n```\npackage b\n\n```\n"
+		"\n### \"a.go\"\n\n```\npackage a\n\n```\n" +
+		"\n### \"b.go\"\n\n```\npackage b\n\n```\n"
 	if got != want {
 		t.Errorf("build context changed:\n got %q\nwant %q", got, want)
 	}

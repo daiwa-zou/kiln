@@ -35,11 +35,12 @@ import (
 // is testable against a fake while the SQL stays in internal/store.
 type Store interface {
 	ClaimNextRun(ctx context.Context, workerID string) (*store.QueuedRun, error)
-	// FailRun, RequeueRun and HeartbeatRun are fenced to the worker holding the
-	// claim and return store.ErrClaimLost when it no longer does. RecordRun and
-	// MarkRunItem are fenced the same way, through the claim process() puts on
-	// the pipeline's context.
+	// FailRun, RefuseRunOverBudget, RequeueRun and HeartbeatRun are fenced to the
+	// worker holding the claim and return store.ErrClaimLost when it no longer
+	// does. RecordRun and MarkRunItem are fenced the same way, through the claim
+	// process() puts on the pipeline's context.
 	FailRun(ctx context.Context, runID, workerID, message string) error
+	RefuseRunOverBudget(ctx context.Context, runID, workerID, message string) error
 	HeartbeatRun(ctx context.Context, runID, workerID string) error
 	RequeueStaleRuns(ctx context.Context, olderThan time.Duration) ([]store.StaleRun, error)
 	EnabledConnectors(ctx context.Context, workspaceID string) ([]store.ConnectorRow, error)
@@ -66,7 +67,8 @@ type Store interface {
 	// The pipeline writes the wiki; the worker mirrors it, so these live here
 	// rather than on jobs.Store.
 	PublishTargetFor(ctx context.Context, workspaceID string) (store.PublishTarget, error)
-	MarkPublished(ctx context.Context, workspaceID, commit, publishErr string) error
+	MarkPublished(ctx context.Context, workspaceID, commit string, revision int64, publishErr string) error
+	WikiRevision(ctx context.Context, workspaceID string) (int64, error)
 	LoadPages(ctx context.Context, workspaceID string) ([]wiki.Page, error)
 	LoadArtifact(ctx context.Context, workspaceID, kind string) (string, error)
 	ListFigures(ctx context.Context, workspaceID string) ([]store.FigureRow, error)
@@ -196,8 +198,11 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 // Shutdown drains: cancellation stops claiming immediately, but the run in
 // flight keeps a detached context for DrainGrace so paid-for agent work can
 // land. Only past the grace window is the build interrupted — and then it is
-// requeued, not failed: a rolling deploy must never turn an in-flight build
-// into a permanent failure plus wasted spend.
+// not failed: a rolling deploy must never turn an in-flight build into a
+// permanent failure plus wasted spend. A run that had produced nothing yet is
+// requeued whole. A build that was part-way keeps the units it finished (they
+// are imported and the run is recorded canceled) and a continuation run is
+// queued for the rest.
 func (w *Worker) Run(ctx context.Context) error {
 	log := w.logger().With("worker", w.ID)
 	log.Info("worker started", "poll", w.poll().String())
@@ -290,6 +295,15 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 	started := time.Now()
 	w.metrics().RunStarted(run.Trigger)
 
+	// The rolling budget is judged here, at claim, as well as when a person asks
+	// for a build. Webhook, poll and continuation runs are enqueued without any
+	// budget check, and a run can wait in the queue while the window fills; this
+	// is the one point every run passes through before it can spend.
+	if w.refuseOverBudget(ctx, run, log) {
+		w.metrics().RunFinished(jobs.StatusOverBudget, time.Since(started), 0, 0, 0, 0)
+		return
+	}
+
 	spec, connectors, cleanup, err := w.sourceSpec(ctx, run)
 	if cleanup != nil {
 		defer cleanup()
@@ -380,6 +394,19 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		log.Warn("build interrupted by shutdown; requeuing")
 		w.requeueRun(ctx, run.ID, log)
 		w.metrics().RunFinished("requeued", time.Since(started), 0, 0, 0, 0)
+	case err == nil && res.Summary.Status == jobs.StatusCanceled:
+		// The drain deadline stopped the build part-way. The pipeline imported the
+		// units that finished and recorded the run canceled, so the row is
+		// terminal -- there is nothing left to requeue, and treating this as the
+		// success path below would publish a partial wiki and enqueue the
+		// continuation, both on a context that is already dead. The work the
+		// build did not reach is what the continuation is for.
+		syncErr = "interrupted by shutdown; continuation queued"
+		log.Warn("build interrupted by shutdown; continuing in a new run",
+			"unreached", res.Deferred, "cost_usd", res.Summary.CostUSD)
+		w.metrics().RunFinished(string(res.Summary.Status), time.Since(started),
+			res.Summary.CostUSD, res.Summary.Created, res.Summary.Updated, res.Summary.Deleted)
+		w.continueInterrupted(ctx, run, log)
 	case err != nil:
 		syncErr = err.Error()
 		log.Error("build failed", "error", err)
@@ -413,6 +440,71 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 			log.Error("mark connector sync failed", "error", merr)
 		}
 	}
+}
+
+// refuseOverBudget finishes a just-claimed run as over_budget, without calling
+// the pipeline, when its workspace has already spent its budget within the
+// rolling window. It reports whether it did.
+//
+// The review is the same item the API files for a refused request, so the queue
+// holds one "budget window exceeded" entry however the pause was reached. No
+// continuation follows: nothing was built, so nothing is deferred, and a
+// refused run that enqueued a successor would only be refused again.
+//
+// A run pinned to a connector stamps that connector's sync with the reason. That
+// both shows the pause where the connector is managed and, for a poll
+// connector, spaces the next attempt a full interval out: left unstamped, the
+// connector would stay due and the scheduler would enqueue a run that is
+// refused every minute for as long as the window stays full.
+//
+// A failed lookup lets the run proceed. The API refuses on a lookup error, but a
+// worker holding a claim has no caller to report to, and failing queued builds
+// over a database hiccup trades a possible overspend for a certain outage.
+func (w *Worker) refuseOverBudget(ctx context.Context, run *store.QueuedRun, log *slog.Logger) bool {
+	if w.BudgetWindow <= 0 {
+		return false
+	}
+	budget, err := w.Store.WorkspaceBudgetUSD(ctx, run.WorkspaceID)
+	if err != nil {
+		log.Error("budget lookup failed; running without the window check", "error", err)
+		return false
+	}
+	if budget == nil || *budget <= 0 {
+		return false
+	}
+	spent, err := w.Store.SpendInWindow(ctx, run.WorkspaceID, w.BudgetWindow)
+	if err != nil {
+		log.Error("spend lookup failed; running without the window check", "error", err)
+		return false
+	}
+	if spent < *budget {
+		return false
+	}
+
+	reason := fmt.Sprintf("budget window exceeded: $%.2f of $%.2f spent in the last %s",
+		spent, *budget, w.BudgetWindow)
+	log.Warn("workspace over budget; finishing the claimed run without building",
+		"spent_usd", spent, "budget_usd", *budget, "trigger", run.Trigger)
+
+	// Terminal bookkeeping, so it outlives cancellation like the other terminal
+	// writes in process.
+	done := context.WithoutCancel(ctx)
+	switch err := w.Store.RefuseRunOverBudget(done, run.ID, w.ID, reason); {
+	case errors.Is(err, store.ErrClaimLost):
+		log.Error("over-budget refusal not recorded: the run is no longer claimed by this worker")
+	case err != nil:
+		log.Error("recording over-budget refusal failed", "error", err)
+	}
+	title, detail := store.BudgetExceededReview(spent, *budget, w.BudgetWindow)
+	if err := w.Store.FileReview(done, run.WorkspaceID, "budget", title, detail); err != nil {
+		log.Error("filing budget review failed", "error", err)
+	}
+	if run.ConnectorID != "" {
+		if err := w.Store.MarkConnectorSync(done, run.ConnectorID, reason); err != nil {
+			log.Error("mark connector sync failed", "error", err)
+		}
+	}
+	return true
 }
 
 // research executes a claimed research run: read the bench's sources with one
@@ -591,11 +683,12 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 
 		var (
 			resolved string
+			gitToken string
 			err      error
 		)
 		if remoteURL, _ := c.Config["url"].(string); remoteURL != "" && c.Kind == "git" {
 			var clean func()
-			resolved, clean, err = w.cloneRemote(ctx, c, remoteURL)
+			resolved, gitToken, clean, err = w.cloneRemote(ctx, c, remoteURL)
 			if clean != nil {
 				cleanups = append(cleanups, clean)
 			}
@@ -622,6 +715,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 				return fail2(fmt.Errorf("workspace %s has multiple git connectors; only one is supported", run.WorkspaceSlug))
 			}
 			spec.Path = resolved
+			spec.GitToken = gitToken
 			ids.Git = c.ID
 		case "upload":
 			if spec.DocsDir != "" {
@@ -762,42 +856,52 @@ func stageBlob(ctx context.Context, blobs blob.Store, root *os.Root, f store.Fil
 // Authentication prefers an App installation token (short-lived, repo-scoped,
 // nothing durable to leak) and falls back to a sealed credential decrypted
 // just-in-time. Either way the plaintext lives only in this frame and the
-// clone subprocess's environment.
-func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteURL string) (dir string, cleanup func(), err error) {
-	token := ""
+// clone subprocess's environment. The token is also returned,
+// because an incremental build must fetch with it again to deepen the clone;
+// the caller keeps it in memory only, for the length of the run.
+func (w *Worker) cloneRemote(ctx context.Context, c store.ConnectorRow, remoteURL string) (dir, token string, cleanup func(), err error) {
 	switch {
 	case installationID(c.Config) != 0:
 		if !w.GitHub.AppConfigured() {
-			return "", nil, fmt.Errorf(
+			return "", "", nil, fmt.Errorf(
 				"connector names github installation %d, but no GitHub App is configured (set github.app_id and KILN_GITHUB_PRIVATE_KEY)",
 				installationID(c.Config))
 		}
 		if err := w.checkInstallation(ctx, c); err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 		token, _, err = w.GitHub.InstallationToken(ctx, installationID(c.Config))
 		if err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 	case c.CredentialID != "":
 		token, err = w.openCredential(ctx, c.CredentialID)
 		if err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 	}
 
 	staging, err := os.MkdirTemp("", "kiln-clone-")
 	if err != nil {
-		return "", nil, fmt.Errorf("clone staging: %w", err)
+		return "", "", nil, fmt.Errorf("clone staging: %w", err)
 	}
 	cleanup = func() { os.RemoveAll(staging) }
 
 	if err := gitconn.CloneShallow(ctx, gitconn.CloneOptions{
 		URL: remoteURL, Token: token, Dir: staging,
+		Branch: configuredBranch(c.Config),
 	}); err != nil {
-		return "", cleanup, err
+		return "", "", cleanup, err
 	}
-	return staging, cleanup, nil
+	return staging, token, cleanup, nil
+}
+
+// configuredBranch reads a git connector's optional branch. Empty means the
+// remote's default branch, which is also what its push webhook is matched
+// against (see the api package's connectorBranch).
+func configuredBranch(cfg map[string]any) string {
+	b, _ := cfg["branch"].(string)
+	return strings.TrimSpace(b)
 }
 
 // checkInstallation refuses to mint a token for an installation nobody behind
@@ -1004,6 +1108,27 @@ func (w *Worker) enqueueContinuation(ctx context.Context, run *store.QueuedRun, 
 		log.Error("continuation enqueue failed", "error", err)
 	} else if created {
 		log.Info("continuation enqueued", "deferred", res.Deferred, "retry_partial", retryPartial)
+	}
+}
+
+// continueInterrupted queues the follow-up for a build the drain deadline cut
+// short. It is not enqueueContinuation, and does not share its gates: those
+// exist to stop a chain of runs that fail the same way, and an interruption is
+// not a failure of the work. Even a build that finished nothing is continued,
+// because the cause was the deploy, not the units. The chain is bounded by the
+// deploys that interrupt it.
+//
+// The enqueue is detached from ctx for the same reason the requeue is: ctx is
+// canceled by definition on this path, and a write through it would fail and
+// leave the unreached units waiting for some later trigger.
+func (w *Worker) continueInterrupted(ctx context.Context, run *store.QueuedRun, log *slog.Logger) {
+	id, created, err := w.Store.EnqueueRun(context.WithoutCancel(ctx), run.WorkspaceID, "continuation", run.ConnectorID)
+	switch {
+	case err != nil:
+		log.Error("continuation after interruption not enqueued; the unreached units wait for the next trigger",
+			"error", err)
+	case created:
+		log.Info("continuation enqueued after interruption", "continuation", id)
 	}
 }
 

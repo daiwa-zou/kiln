@@ -23,6 +23,10 @@ import (
 // So the outcome lands on the target row, where it shows up next to the
 // configuration that caused it, the same way a connector's sync error does.
 
+// pushToRepository is the one place the worker reaches the network to publish.
+// A variable so tests can count pushes without a repository.
+var pushToRepository = publish.Push
+
 // publishAfterBuild mirrors the bench's wiki to its configured repository.
 //
 // Best effort throughout, and silent when nothing is configured -- which is the
@@ -41,6 +45,34 @@ func (w *Worker) publishAfterBuild(ctx context.Context, workspaceID, slug, trigg
 	}
 
 	log = log.With("repo", target.RepoURL, "branch", target.Branch)
+
+	// Nothing a mirror contains has changed since the repository last matched
+	// it, so there is nothing to push. This is the common case -- most builds
+	// are polls that find no new source -- and it is decided here, from one
+	// integer, rather than by loading every page body and figure blob, cloning
+	// the repository and staging the tree only to find ErrNothingToPush.
+	//
+	// wikis.revision moves on every path that changes the published tree:
+	// imports, page deletes, restores and deletion cascades. That is why this is
+	// keyed on the revision rather than on whether the build made changes: a page
+	// deleted by hand changes the wiki with no build at all, and must still
+	// publish.
+	//
+	// The revision is read before the pages are, so a write landing mid-push
+	// leaves the recorded revision behind the wiki and the next build pushes
+	// again; the other order could record a revision whose pages were never sent.
+	// If it cannot be read the push goes ahead and records zero ("unknown"),
+	// which never matches.
+	revision, rerr := w.Store.WikiRevision(ctx, workspaceID)
+	if rerr != nil {
+		log.Warn("wiki revision lookup failed; publishing without the skip check", "error", rerr)
+		revision = 0
+	}
+	if revision != 0 && revision == target.PublishedRevision {
+		log.Debug("wiki unchanged since last publish; skipping", "revision", revision)
+		return
+	}
+
 	commit, err := w.pushWiki(ctx, workspaceID, slug, trigger, target)
 
 	switch {
@@ -49,17 +81,17 @@ func (w *Worker) publishAfterBuild(ctx context.Context, workspaceID, slug, trigg
 		// commit: nothing is wrong, and stamping an error here would make an
 		// idle bench look permanently broken.
 		log.Info("wiki already published; nothing to push")
-		if merr := w.Store.MarkPublished(ctx, workspaceID, "", ""); merr != nil {
+		if merr := w.Store.MarkPublished(ctx, workspaceID, "", revision, ""); merr != nil {
 			log.Error("recording publish outcome failed", "error", merr)
 		}
 	case err != nil:
 		log.Error("publishing the wiki failed", "error", err)
-		if merr := w.Store.MarkPublished(ctx, workspaceID, "", err.Error()); merr != nil {
+		if merr := w.Store.MarkPublished(ctx, workspaceID, "", 0, err.Error()); merr != nil {
 			log.Error("recording publish failure failed", "error", merr)
 		}
 	default:
 		log.Info("wiki published", "commit", commit)
-		if merr := w.Store.MarkPublished(ctx, workspaceID, commit, ""); merr != nil {
+		if merr := w.Store.MarkPublished(ctx, workspaceID, commit, revision, ""); merr != nil {
 			log.Error("recording publish outcome failed", "error", merr)
 		}
 	}
@@ -108,7 +140,7 @@ func (w *Worker) pushWiki(ctx context.Context, workspaceID, slug, trigger string
 		return "", err
 	}
 
-	res, err := publish.Push(ctx, publish.PushOptions{
+	res, err := pushToRepository(ctx, publish.PushOptions{
 		Remote:  target.RepoURL,
 		Branch:  target.Branch,
 		Prefix:  target.PathPrefix,

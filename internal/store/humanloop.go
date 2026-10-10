@@ -439,17 +439,40 @@ func (s *WikiStore) LoadApprovedDeletions(ctx context.Context, workspaceID strin
 // source key -- it is both the human-facing summary and what
 // LoadApprovedDeletions parses back out.
 func (s *WikiStore) EnsureDeletionReviews(ctx context.Context, workspaceID string, cands []jobs.DeletionCandidate) error {
+	if len(cands) == 0 {
+		return nil
+	}
+
+	// One statement for the lot: a namespace that vanishes can raise thousands
+	// of candidates, and a round trip each is what this used to cost. A key
+	// repeated in the input is filed once, from its first occurrence -- the
+	// per-candidate version got that for free by seeing its own earlier insert,
+	// which a single statement's NOT EXISTS cannot.
+	var (
+		titles  = make([]string, 0, len(cands))
+		details = make([]string, 0, len(cands))
+		seen    = make(map[string]bool, len(cands))
+	)
 	for _, c := range cands {
-		if _, err := s.pool.Exec(ctx, `
-			INSERT INTO review_items (workspace_id, kind, title, detail, actions)
-			SELECT $1, 'deletion', $2, $3, '["approve","keep"]'::jsonb
-			WHERE NOT EXISTS (
-			    SELECT 1 FROM review_items
-			    WHERE workspace_id = $1 AND kind = 'deletion' AND title = $2
-			      AND status IN ('open','approved'))`,
-			workspaceID, string(c.Key), c.Detail); err != nil {
-			return fmt.Errorf("store: ensure deletion review %s: %w", c.Key, err)
+		title := string(c.Key)
+		if seen[title] {
+			continue
 		}
+		seen[title] = true
+		titles = append(titles, title)
+		details = append(details, c.Detail)
+	}
+
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO review_items (workspace_id, kind, title, detail, actions)
+		SELECT $1, 'deletion', c.title, c.detail, '["approve","keep"]'::jsonb
+		FROM unnest($2::text[], $3::text[]) AS c(title, detail)
+		WHERE NOT EXISTS (
+		    SELECT 1 FROM review_items
+		    WHERE workspace_id = $1 AND kind = 'deletion' AND title = c.title
+		      AND status IN ('open','approved'))`,
+		workspaceID, titles, details); err != nil {
+		return fmt.Errorf("store: ensure deletion reviews: %w", err)
 	}
 	return nil
 }

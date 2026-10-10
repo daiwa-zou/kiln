@@ -38,9 +38,11 @@ type loopStore struct {
 	rows    map[string]*loopRow
 	beats   map[string]int
 	// stale is what the sweeps report as requeued; nil reports one dead pod.
-	stale   []store.StaleRun
-	failed  map[string]string
-	marked  map[string]string
+	stale  []store.StaleRun
+	failed map[string]string
+	marked map[string]string
+	// refused records runs finished as over_budget, by run id.
+	refused map[string]string
 	requeue int
 	sealed  map[string]*store.SealedCredential
 	// pinned is what ConnectorByID returns when set, for scripting a run
@@ -53,6 +55,9 @@ type loopStore struct {
 	budget  *float64
 	spent   float64
 	reviews []string
+	// publishChecks counts looks at the bench's publish target, which is the
+	// first thing a publish attempt does.
+	publishChecks int
 	// requeued and sweeps record drain and GC activity.
 	requeued []string
 	sweeps   int
@@ -69,12 +74,13 @@ type loopStore struct {
 
 func newLoopStore(runs ...*store.QueuedRun) *loopStore {
 	return &loopStore{
-		queue:  runs,
-		rows:   map[string]*loopRow{},
-		beats:  map[string]int{},
-		failed: map[string]string{},
-		marked: map[string]string{},
-		sealed: map[string]*store.SealedCredential{},
+		queue:   runs,
+		rows:    map[string]*loopRow{},
+		beats:   map[string]int{},
+		failed:  map[string]string{},
+		refused: map[string]string{},
+		marked:  map[string]string{},
+		sealed:  map[string]*store.SealedCredential{},
 	}
 }
 
@@ -107,6 +113,17 @@ func (l *loopStore) owns(runID, workerID string, wantRunning bool) bool {
 		return false
 	}
 	return !wantRunning || row.status == "running"
+}
+
+// settle is what the pipeline's own run record does to the row: it finishes a
+// row that is still running. A row already finished is left alone, as the
+// fenced UPDATE would leave it.
+func (l *loopStore) settle(runID, status string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if row, ok := l.rows[runID]; ok && row.status == "running" {
+		row.status = status
+	}
 }
 
 // takeOver simulates another worker winning the run after a stale requeue.
@@ -144,6 +161,17 @@ func (l *loopStore) FailRun(_ context.Context, runID, workerID, msg string) erro
 	}
 	l.rows[runID].status = "failed"
 	l.failed[runID] = msg
+	return nil
+}
+
+func (l *loopStore) RefuseRunOverBudget(_ context.Context, runID, workerID, msg string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.owns(runID, workerID, true) {
+		return store.ErrClaimLost
+	}
+	l.rows[runID].status = "over_budget"
+	l.refused[runID] = msg
 	return nil
 }
 
@@ -195,7 +223,13 @@ func (l *loopStore) PollDueConnectors(context.Context, time.Duration) ([]store.C
 	return l.pollDue, nil
 }
 
-func (l *loopStore) EnqueueRun(_ context.Context, workspaceID, trigger, connectorID string) (string, bool, error) {
+func (l *loopStore) EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error) {
+	// A write through a canceled context fails against a real database, so it
+	// must here: a double that accepts it hides every bug of enqueueing from a
+	// worker that is draining.
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.enqueued = append(l.enqueued, trigger+":"+connectorID)
@@ -665,9 +699,15 @@ func TestRunDrainsInFlightRunOnShutdown(t *testing.T) {
 // A bench with no publish target is the default, so these stubs report exactly
 // that: publishing is opt-in and the loop must be unaffected without it.
 func (l *loopStore) PublishTargetFor(context.Context, string) (store.PublishTarget, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.publishChecks++
 	return store.PublishTarget{}, store.ErrNotFound
 }
-func (l *loopStore) MarkPublished(context.Context, string, string, string) error { return nil }
+func (l *loopStore) MarkPublished(context.Context, string, string, int64, string) error {
+	return nil
+}
+func (l *loopStore) WikiRevision(context.Context, string) (int64, error) { return 0, nil }
 func (l *loopStore) LoadArtifact(context.Context, string, string) (string, error) {
 	return "", nil
 }

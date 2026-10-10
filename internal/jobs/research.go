@@ -85,9 +85,13 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 	}
 	defer mat.Close()
 
-	pages, err := p.Store.LoadPages(ctx, req.WorkspaceID)
+	// Pages are chosen from metadata and the link table, and only the few that
+	// are chosen have their bodies loaded. Research renders at most
+	// maxResearchPages of them; reading every page on the bench to pick four
+	// was most of this call's cost on a large wiki.
+	pages, err := p.relevantPagesFor(ctx, req.WorkspaceID, req.Question)
 	if err != nil {
-		return nil, p.failResearch(ctx, summary, fmt.Errorf("jobs: load pages: %w", err))
+		return nil, p.failResearch(ctx, summary, err)
 	}
 	steering, err := p.Store.LoadSteering(ctx, req.WorkspaceID)
 	if err != nil {
@@ -109,7 +113,7 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 		Timeout:          p.Timeout,
 		SystemPrompt:     researchSystemPrompt(steering),
 		CacheableContext: mat.Map.Summary,
-		Prompt:           researchPrompt(req.Question, req.Source.Path, units, relevantPages(req.Question, pages)),
+		Prompt:           researchPrompt(req.Question, req.Source.Path, units, pages),
 		JSONSchema:       ResearchSchema,
 	})
 
@@ -159,10 +163,27 @@ func (p *Pipeline) Research(ctx context.Context, req ResearchRequest) (*Research
 }
 
 // failResearch ledgers a failed pass and returns the cause. Recording happens
-// on a detached context because the usual reason a research call fails is that
-// the worker is draining, and a run row left 'running' blocks its workspace
-// until the stale deadline.
+// on a detached context so a failure that arrives as the worker is shutting
+// down is still written, rather than leaving the row 'running' until the stale
+// deadline.
+//
+// A canceled context is the exception, and the reason is what the cancellation
+// means. The worker cancels a run's context for exactly two reasons: it is
+// draining past its grace period, in which case the run is not broken and goes
+// back to the queue, or the run's claim was lost, in which case it is no longer
+// this worker's to write. Recording 'failed' is wrong for both. For a drain it
+// finishes the row, so the requeue that follows (fenced to status 'running') is
+// refused and the question is never researched; for a lost claim the fenced
+// write is refused anyway. So an interrupted pass writes nothing, and returns
+// the context's error for the worker to act on. No known spend is lost by it: a
+// call canceled mid-flight returns no result, so there is no cost to ledger, and
+// the requeued run is charged for its own pass.
 func (p *Pipeline) failResearch(ctx context.Context, summary RunSummary, cause error) error {
+	if ctx.Err() != nil {
+		p.logger().Warn("research interrupted; leaving the run for the worker to requeue",
+			"run", summary.RunID, "cause", cause)
+		return ctx.Err()
+	}
 	summary.Status = StatusFailed
 	summary.Err = cause.Error()
 	if err := p.Store.RecordRun(context.WithoutCancel(ctx), summary); err != nil {
@@ -272,11 +293,72 @@ func relevantUnits(q Question, wm *mapper.WorkspaceMap) []mapper.Unit {
 	return out
 }
 
+// relevantPagesFor selects the pages that bear on a question and loads their
+// bodies, and no one else's.
+//
+// Selection needs only what is cheap: titles and slugs from page metadata, and
+// who links to the question's page from the link table. Bodies are fetched last,
+// for the handful of pages that will be rendered. A failed link lookup degrades
+// selection to titles alone rather than failing the pass, since the pages that
+// link to a subject are a refinement of the choice, not its foundation.
+func (p *Pipeline) relevantPagesFor(ctx context.Context, workspaceID string, q Question) ([]wiki.Page, error) {
+	meta, err := p.Store.LoadPageMeta(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("jobs: load pages: %w", err)
+	}
+
+	var linkers map[string]bool
+	if strings.TrimSpace(q.PageSlug) != "" {
+		slugs, lerr := p.Store.LinkingSlugs(ctx, workspaceID, q.PageSlug)
+		if lerr != nil {
+			p.logger().Warn("could not find the pages linking to the question's page; selecting by title only",
+				"slug", q.PageSlug, "err", lerr)
+		}
+		linkers = make(map[string]bool, len(slugs))
+		for _, s := range slugs {
+			linkers[s] = true
+		}
+	}
+
+	chosen := relevantPages(q, meta, linkers)
+	if len(chosen) == 0 {
+		return nil, nil
+	}
+	slugs := make([]string, len(chosen))
+	for i, pg := range chosen {
+		slugs[i] = pg.Slug
+	}
+	full, err := p.Store.LoadPagesBySlug(ctx, workspaceID, slugs)
+	if err != nil {
+		return nil, fmt.Errorf("jobs: load pages: %w", err)
+	}
+
+	// Back into ranked order: the store returns them by path, and the prompt
+	// should lead with the best match, as it did when ranking and loading were
+	// one step. A page deleted between the two reads simply drops out.
+	bySlug := make(map[string]wiki.Page, len(full))
+	for _, pg := range full {
+		bySlug[pg.Slug] = pg
+	}
+	out := make([]wiki.Page, 0, len(chosen))
+	for _, pg := range chosen {
+		if loaded, ok := bySlug[pg.Slug]; ok {
+			out = append(out, loaded)
+		}
+	}
+	return out, nil
+}
+
 // relevantPages picks the wiki's own pages that bear on the question. They
 // matter as much as the sources do: a contradiction is between two things the
 // wiki already says, and a gap is a page other pages have declared they need,
 // so the pages naming it are the statement of what is missing.
-func relevantPages(q Question, pages []wiki.Page) []wiki.Page {
+//
+// It works from metadata alone. linkers is the set of slugs of pages that link
+// to the question's page, which the caller reads from the link table; the old
+// test -- searching every body for the wikilink -- is what made this need every
+// body on the bench.
+func relevantPages(q Question, pages []wiki.Page, linkers map[string]bool) []wiki.Page {
 	terms := terms(q.Title + " " + q.Detail)
 	slug := strings.ToLower(strings.TrimSpace(q.PageSlug))
 
@@ -290,7 +372,7 @@ func relevantPages(q Question, pages []wiki.Page) []wiki.Page {
 		// The page the flag was raised against, and any page linking to the
 		// subject of a gap, are relevant whether or not their titles echo the
 		// question's wording.
-		if slug != "" && (strings.EqualFold(pg.Slug, slug) || strings.Contains(strings.ToLower(pg.Body), "[["+slug+"]]")) {
+		if slug != "" && (strings.EqualFold(pg.Slug, slug) || linkers[pg.Slug]) {
 			s += 10
 		}
 		if s == 0 {
@@ -388,16 +470,18 @@ Rules:
 func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.Page) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "Answer this review item.\n\nQuestion: %s\n", q.Title)
-	fmt.Fprintf(&b, "Kind: %s\n", q.Kind)
+	// The title is a flag a model raised while reading untrusted source, so it
+	// is quoted; see quoted.
+	fmt.Fprintf(&b, "Answer this review item.\n\nQuestion: %s\n", quoted(q.Title))
+	fmt.Fprintf(&b, "Kind: %s\n", quoted(q.Kind))
 	if q.PageSlug != "" {
-		fmt.Fprintf(&b, "Raised against page: %s\n", q.PageSlug)
+		fmt.Fprintf(&b, "Raised against page: %s\n", quoted(q.PageSlug))
 	}
 	if strings.TrimSpace(q.Detail) != "" {
 		b.WriteString("\n## What the build recorded\n\n")
 		// Fenced: the detail is prose a previous model wrote, and it is read
 		// here as the question rather than as instruction.
-		fmt.Fprintf(&b, "```\n%s\n```\n", strings.TrimSpace(q.Detail))
+		b.WriteString(fence(strings.TrimSpace(q.Detail)))
 	}
 
 	switch {
@@ -412,9 +496,9 @@ func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.P
 		// question still renders an identical prompt.
 		remaining := maxResearchContextBytes
 		for i, u := range units {
-			fmt.Fprintf(&b, "\n### unit %s", u.Key)
+			fmt.Fprintf(&b, "\n### unit %s", quoted(string(u.Key)))
 			if u.Title != "" {
-				fmt.Fprintf(&b, " — %s", u.Title)
+				fmt.Fprintf(&b, " — %s", quoted(u.Title))
 			}
 			b.WriteString("\n")
 			share := max(remaining, 0) / (len(units) - i)
@@ -437,12 +521,12 @@ func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.P
 		b.WriteString("\n## What the wiki currently says\n\n")
 		b.WriteString("These pages bear on the question. They may be the source of it.\n")
 		for _, pg := range pages {
-			fmt.Fprintf(&b, "\n### %s (%s)\n\n", pg.Meta.Title, pg.Slug)
+			fmt.Fprintf(&b, "\n### %s (%s)\n\n", quoted(pg.Meta.Title), quoted(pg.Slug))
 			body := pg.Body
 			if len(body) > maxResearchPageBytes {
 				body = body[:maxResearchPageBytes] + "\n…truncated…"
 			}
-			fmt.Fprintf(&b, "```\n%s\n```\n", body)
+			b.WriteString(fence(body))
 		}
 	}
 

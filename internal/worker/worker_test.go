@@ -66,6 +66,9 @@ func (f *fakeStore) FailRun(_ context.Context, runID, _, _ string) error {
 	f.failed = append(f.failed, runID)
 	return nil
 }
+func (f *fakeStore) RefuseRunOverBudget(context.Context, string, string, string) error {
+	return nil
+}
 func (f *fakeStore) HeartbeatRun(context.Context, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -580,7 +583,10 @@ func TestSourceSpecAllowsUploadOnlyWorkspace(t *testing.T) {
 func (f *fakeStore) PublishTargetFor(context.Context, string) (store.PublishTarget, error) {
 	return store.PublishTarget{}, store.ErrNotFound
 }
-func (f *fakeStore) MarkPublished(context.Context, string, string, string) error { return nil }
+func (f *fakeStore) MarkPublished(context.Context, string, string, int64, string) error {
+	return nil
+}
+func (f *fakeStore) WikiRevision(context.Context, string) (int64, error) { return 0, nil }
 func (f *fakeStore) LoadArtifact(context.Context, string, string) (string, error) {
 	return "", nil
 }
