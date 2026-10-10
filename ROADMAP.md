@@ -154,10 +154,11 @@ in M2 with no UI over it — sources were configured with `curl`.*
 4. **WCAG 2.2 AA** — audited across every view in both themes; contrast,
    target sizes, and accessible names fixed. `docs/accessibility.md`.
 
-Still open: activate `digests` for review-queue notifications, and revisit
-the permissive `member`-writes default (members write content; owners shape
-connectors, credentials, and membership -- the split holds, but the default
-role granted on sign-in deserves a second look).
+Still open, and now planned as M11 items 1 and 2: activate `digests` for
+review-queue notifications, and revisit the permissive `member`-writes
+default (members write content; owners shape connectors, credentials, and
+membership -- the split holds, but the default role granted on sign-in
+deserves a second look).
 
 ## Target deployment architecture
 
@@ -221,12 +222,14 @@ control, ingress — uploads possibly a fourth), each with its own
 Deployment and HPA; the CDN absorbs most reads; workers scale on queue
 depth, down to zero.
 
-## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); 1, 2, 5 open
+## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); item 2's webhook half shipped (PR #87); 1, 2's `RealIP` half, and 5 open
 
 *Items 3 and 4 shipped together: `agent.unit_concurrency` drives the bounded
 pool in `internal/jobs/fanout.go`, and the run budget is a reservation taken
-before each call. Items 1, 2, and 5 have no code yet, and they are now the
-urgent ones — raising concurrency invites adding worker pods, which is
+before each call. PR #87 keyed verified webhook deliveries on their
+repository or installation (`hookSubject` in `internal/api/webhook.go`), so
+the cross-tenant 429 is gone. Items 1 and 5, and item 2's `RealIP` half,
+have no code yet, and they are now the urgent ones — raising concurrency invites adding worker pods, which is
 exactly what the pooler gates and what multiplies the per-worker timers.*
 
 *Designed 2026-07-30 from a scaling review. The roles are already split and
@@ -245,11 +248,11 @@ topology; every item pays off at the shipped two-role deployment.*
    clients already`.
 2. **Real client addresses** — `limiterKey` falls back to `r.RemoteAddr`
    with no `RealIP` middleware anywhere, so behind an ingress every
-   unauthenticated caller shares one bucket. `/hooks/github` sits outside
-   `auth.Wrap` by design and always takes that path, so one repo's push
-   storm 429s every other tenant's webhooks. Add trusted-proxy `RealIP`,
-   and key webhook limiting on the delivering installation id — the correct
-   tenant boundary regardless of replica count.
+   unauthenticated caller shares one bucket. Add trusted-proxy `RealIP`
+   for that path. The webhook half shipped in PR #87: a delivery whose
+   HMAC verifies is limited on its repository (else its installation), the
+   correct tenant boundary regardless of replica count, and only
+   unverified deliveries still share the peer-address bucket.
 3. **Intra-run unit fan-out** — the milestone's reason to exist. Generate
    units concurrently against a snapshot with a bounded per-workspace pool,
    then run collision detection, link validation, and `Import` serially.
@@ -331,10 +334,12 @@ cannot read `/metrics`.
 
 *Designed 2026-10-10 from a codebase review. The build engine is the
 strongest part of kiln; what lags is around it — nobody is told when the
-wiki needs them, agents can read but not report, and a regenerated page
-erases its own past. Starts once M9's remaining items land (item 5 hosts
-item 2 below); it comes ahead of M10, which waits for read traffic to ask
-for it.*
+wiki needs them, agents can read but not report, a regenerated page
+erases its own past, and the reader still shows its plumbing (slugs,
+citation chips, a status that contradicts the pages). Starts once M9's
+remaining items land (item 5 hosts item 2 below); it comes ahead of M10,
+which waits for read traffic to ask for it. Item 9 depends on nothing and
+can land first.*
 
 1. **Default sign-in role is configurable** — `auth/pg.go` inserts the
    sign-in membership with the column default, `member`, which writes
@@ -390,7 +395,38 @@ for it.*
    behind the same routes, re-running the WCAG 2.2 AA checks from
    [accessibility.md](docs/accessibility.md) on each. Lands before the
    views it exists for; a Next.js server is ruled out (see Deferred
-   decisions).
+   decisions). The graph is the view to port with the most to gain: its
+   first layout fills about a third of the canvas and its labels overlap.
+   Fit the layout to the viewport on load, label nodes by title, and hide
+   colliding labels until zoomed in.
+9. **The reader reads like prose** — fixes from a UI review on
+   2026-10-10, small enough to land in today's `app.js` ahead of item 8.
+   The port carries them over unchanged.
+   - *Wikilinks show titles.* An unaliased `[[slug]]` renders the slug
+     (`module-1-leading-meritocratically`), although `state.pages` already
+     maps each slug to its title.
+   - *Citations stop interrupting.* Every `(file.md:1–8)` renders inline
+     as a code chip, several per paragraph. Render each as a superscript
+     marker that opens its source on hover or tap, and list them under the
+     page's existing Sources block.
+   - *The deck is not the first sentence twice.* `deckOf` lifts the
+     opening sentence, and the body repeats it a line later. The deck's
+     citations also lose their en-dash (`md:1 8`). Drop the sentence from
+     the body when it becomes the deck, and strip citations from the deck
+     rather than mangling them.
+   - *The run pill tells the truth.* A bench built from the CLI shows "No
+     builds yet" beside pages written two months ago, and Ingest says "No
+     runs yet". When there are pages but no runs, say when they were last
+     written and that they came from outside the queue.
+   - *Phones keep status and the account.* Below the mobile breakpoint the
+     run pill and the account button collapse to zero width, so a phone
+     cannot tell whether a build is running. On desktop the account button
+     is a bare dot; give it a visible label or an initial.
+   - *Hover is never the only way in.* The Index's freshness dots name
+     their state only on hover; show the word. Rail titles truncate with
+     no way to read the rest by pointer; give `treeLink` a `title`.
+   - *A missing page offers a way on.* A dead `#/page/…` hash shows a bare
+     red error; offer search for the slug and the nearest titles instead.
 
 **Verification:** with `auth.default_role = "viewer"`, a fresh sign-in can
 read but every write answers 403; a review item filed after a digest's
@@ -405,7 +441,12 @@ answering `304` makes no extraction and plans no unit; `go build` on a
 machine without Node produces a binary whose UI works, the UI is served
 under the unchanged CSP with no violations in the console, a changed API
 field that the UI reads fails type-checking, and every ported view passes
-the same accessibility audit in both themes.
+the same accessibility audit in both themes; a page's unaliased wikilinks
+show their targets' titles, its body holds no inline citation chips, and its
+deck sentence appears once; a bench built only from the CLI never shows "No
+builds yet"; at 375px the run pill and account button are visible and at
+least 24px wide; the graph's first frame shows every node with no
+overlapping labels.
 
 ## Deferred decisions
 
