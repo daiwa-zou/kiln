@@ -1,10 +1,17 @@
 // Package netguard decides which destination addresses a connector must not
-// reach on a user's behalf.
+// reach on a user's behalf, and owns the one HTTP client that enforces it.
 //
 // Connector configs are API-writable data, so a URL a worker fetches or clones
 // is attacker-shaped. The deny-list lives here, once, because the web fetcher
 // and the git clone each carried their own copy, and a gap fixed in one stayed
 // open in the other.
+//
+// The same reasoning puts the enforcing client here (client.go): NewClient
+// resolves, vets and dials the vetted IP itself on every connection, redirect
+// hops included, so any feature that makes an outbound request to a
+// user-supplied address gets the guard by construction rather than by copy.
+// The git clone is the exception: git does its own connecting, so
+// connector/git can only check Forbidden as a pre-flight, not pin.
 package netguard
 
 import (
@@ -23,16 +30,47 @@ import (
 //   - 198.18.0.0/15: benchmarking, routinely reachable inside a private
 //     network.
 //   - 240.0.0.0/4: reserved, including the 255.255.255.255 broadcast address.
+//   - 168.63.129.16/32: Azure's WireServer, which serves VM provisioning and
+//     health data on a public-looking address, so no category above holds it.
+//   - 192.88.99.0/24: the deprecated 6to4 relay anycast block (RFC 7526).
+//   - ::/96: deprecated IPv4-compatible addresses (::7f00:1 is 127.0.0.1 in
+//     this spelling); :: and ::1 inside it are caught above as well.
+//   - ::ffff:0:0:0/96: IPv4-translated addresses (RFC 2765), another IPv6
+//     spelling of an IPv4 host that Unmap does not convert.
 //   - 64:ff9b::/96: NAT64, which a translator maps back onto IPv4 -- including
 //     the addresses above -- so allowing it reopens every IPv4 range blocked
 //     here.
+//   - 64:ff9b:1::/48: local-use NAT64 (RFC 8215), the same hole by another
+//     prefix.
+//   - 2001::/32: Teredo. IANA lists it as globally reachable, but it tunnels
+//     to an IPv4 address embedded in the IPv6 one, so it is blocked for the
+//     same reason as NAT64. A Teredo-only destination breaks; that is the
+//     intended trade.
+//   - 2002::/16: 6to4, deprecated, and likewise embeds an IPv4 address
+//     (2002:a9fe:a9fe:: carries 169.254.169.254).
+//   - fec0::/10: deprecated site-local, which IsPrivate (fc00::/7) misses.
+//   - 100::/64, 2001:2::/48, 2001:db8::/32, 3fff::/20: discard-only,
+//     benchmarking and documentation space. Nothing legitimate lives there, so
+//     a name resolving into one is misconfigured or hostile.
 var special = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("192.0.0.0/24"),
 	netip.MustParsePrefix("198.18.0.0/15"),
 	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("168.63.129.16/32"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("::/96"),
+	netip.MustParsePrefix("::ffff:0:0:0/96"),
 	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("fec0::/10"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001:2::/48"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("3fff::/20"),
 }
 
 // Forbidden reports whether ip is an address a connector must refuse: loopback,
