@@ -76,8 +76,9 @@ func TestGeneratePromptNamesDeletedPages(t *testing.T) {
 		"unwanted": "",
 	}}
 
-	prompt := generatePrompt("module:ripple", mapper.Unit{Slug: "ripple"},
-		"", "", s, "", nil, 0, nil)
+	ripple := mapper.Unit{Slug: "ripple"}
+	prompt := generatePrompt("module:ripple", ripple, inlineSource("", ripple),
+		"", s, "", nil, 0, nil)
 
 	if !strings.Contains(prompt, "Pages a human has deleted") {
 		t.Fatalf("generate prompt does not mention deleted pages:\n%s", prompt)
@@ -90,7 +91,7 @@ func TestGeneratePromptNamesDeletedPages(t *testing.T) {
 	}
 
 	// Analysis too: a page that must not be written should not be planned.
-	plan := analyzePrompt("module:ripple", mapper.Unit{Slug: "ripple"}, "", s, 0, nil)
+	plan := analyzePrompt("module:ripple", ripple, inlineSource("", ripple), s, 0, nil)
 	if !strings.Contains(plan, "Pages a human has deleted") {
 		t.Error("analyze prompt does not mention deleted pages")
 	}

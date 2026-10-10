@@ -43,6 +43,11 @@ func (f *FakeRunner) Capabilities() Capabilities {
 	return Capabilities{WritesFiles: false, EstimatesCost: false}
 }
 
+// CachesUnit: the fake is API-shaped, so it is handed the unit's source in
+// Request.CacheableUnit exactly as APIRunner is. Taking the same path is what
+// lets a dev build exercise the request shape the real runner depends on.
+func (f *FakeRunner) CachesUnit() bool { return true }
+
 // FakeOptions tunes the fake's behavior. The zero value is a free, instant,
 // always-succeeding runner.
 type FakeOptions struct {
@@ -102,7 +107,7 @@ func (f *FakeRunner) Run(ctx context.Context, req Request) (*Result, error) {
 		DurationMS:     f.opts.Latency.Milliseconds(),
 		// Rough token shapes so the dashboard's token column reads plausibly.
 		Usage: Usage{
-			InputTokens:  len(req.Prompt) / 4,
+			InputTokens:  (len(req.Prompt) + len(req.CacheableUnit)) / 4,
 			OutputTokens: 200,
 		},
 	}
@@ -169,8 +174,10 @@ func (f *FakeRunner) generate(unit string, req Request) *GenerationResult {
 
 	// The fingerprint makes the body a function of the unit's rendered source
 	// context: it changes exactly when the sources change, and stays stable
-	// when they do not.
-	sum := sha256.Sum256([]byte(req.Prompt))
+	// when they do not. The source material travels in CacheableUnit, not in
+	// Prompt, so it has to be part of what is hashed or a changed source file
+	// would leave the page unchanged.
+	sum := sha256.Sum256([]byte(req.CacheableUnit + "\x00" + req.Prompt))
 	fingerprint := hex.EncodeToString(sum[:])[:12]
 
 	out := &GenerationResult{

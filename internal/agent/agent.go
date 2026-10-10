@@ -21,8 +21,9 @@ const (
 	// StepAnalyze investigates read-only and returns a structured plan. Its
 	// output is validated before any money is spent on generation.
 	StepAnalyze Step = "analyze"
-	// StepGenerate writes pages, resuming the analyze session so the source
-	// context stays prompt-cached between the two.
+	// StepGenerate writes pages. On the CLI runner it resumes the analyze
+	// session -- forked, so every attempt starts from the analysis alone -- and
+	// the source material is therefore not repeated in its prompt.
 	StepGenerate Step = "generate"
 	// StepResearch answers one review item against the whole corpus and
 	// returns findings, writing nothing. It is not part of a generation pass:
@@ -50,9 +51,9 @@ func (s Step) Valid() bool {
 type Request struct {
 	Step Step
 	// SessionID ties analyze and generate together on the CLI runner, which
-	// resumes the session. The API runner is stateless and ignores it; the
-	// pipeline compensates by passing the analysis plan explicitly in the
-	// generate prompt.
+	// resumes the session (see BuildArgs for why every generate attempt forks
+	// it). The API runner is stateless and ignores it; the pipeline compensates
+	// by passing the analysis plan explicitly in the generate prompt.
 	SessionID string
 	// WorkDir is the process working directory: the materialized sources. The
 	// installed CLI has no --cwd flag, so this is set on the command itself.
@@ -80,6 +81,19 @@ type Request struct {
 	// breakpoint after it, so all but the first unit reads it at a tenth of the
 	// input rate. Must be byte-identical between units or nothing caches.
 	CacheableContext string
+	// CacheableUnit is the unit's source material, for runners that report
+	// CachesUnit. APIRunner sends it as the first content block of the user
+	// message and puts a cache breakpoint after it, ahead of the step
+	// instructions in Prompt, so analyze, generate and every generate retry of
+	// one unit share a cached prefix. It must be byte-identical across those
+	// calls or nothing caches.
+	//
+	// Runners that do not report CachesUnit never see a populated value: the
+	// pipeline puts the material in Prompt for them instead, because a runner
+	// that ignored this field would be sent no source at all. ClaudeRunner is
+	// one of those -- it has its own session to resume, and the material rides
+	// the analyze prompt only.
+	CacheableUnit string
 	// MaxTokens caps the response. Zero uses the runner's default.
 	MaxTokens int64
 }
@@ -117,6 +131,20 @@ func (req Request) Validate(c Capabilities) error {
 		return fmt.Errorf("agent: unknown step %q", req.Step)
 	}
 	return nil
+}
+
+// CachesUnit reports whether a runner takes the unit's source material in
+// Request.CacheableUnit, and caches it, rather than reading it from Prompt.
+//
+// It is an opt-in separate from Capabilities because the default has to be the
+// safe one: a runner that has never heard of CacheableUnit and is sent a request
+// with the source moved there would write pages from a prompt that names the
+// unit and contains none of it. The in-tree API-shaped runners (APIRunner and
+// FakeRunner) say yes; everything else is handed the material in Prompt as it
+// always was.
+func CachesUnit(r Runner) bool {
+	c, ok := r.(interface{ CachesUnit() bool })
+	return ok && c.CachesUnit()
 }
 
 // StandInCapabilities is what a runner that merely stands in for the real ones

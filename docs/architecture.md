@@ -522,9 +522,34 @@ sequenceDiagram
     end
 ```
 
-**Prompt caching.** The rendered map summary is identical for every unit in a
-run, so it rides the cache breakpoint — all but the first unit reads it at a
-fraction of the input rate.
+**Prompt caching.** A cache is a prefix match, so the build is laid out to keep
+the front of every request identical across the calls that can share it.
+
+- *One system prompt for both steps.* The shared framing and the human steering
+  are the system prompt; each step's rules open its task message instead. Analyze
+  and generate therefore send the same system bytes (the CLI resumes a session,
+  and current CLI builds reuse the first system prompt recorded for it, so rules
+  left there would not have reached generate at all).
+- *Map summary.* Identical for every unit in a run, so it rides the first cache
+  breakpoint (API runner) — all but the first unit reads it at a fraction of the
+  input rate.
+- *Unit source material, API runner.* Sent once per call as the first content
+  block of the user message, with the second breakpoint, ahead of the step
+  instructions, the plan and any retry feedback. Analyze, generate and each retry
+  share it. Two of the four breakpoints the API allows; a prefix under the model's
+  minimum cacheable length is simply not cached.
+- *Unit source material, CLI runner.* In the analyze prompt only. Generate
+  resumes that session (`--resume`) and says where the material is instead of
+  repeating it, and forks it (`--fork-session`) on every attempt, so a retry is
+  the analysis plus its own feedback rather than the analysis plus every failed
+  attempt.
+
+What this does not buy: the structured-output schema (analyze) and the CLI's
+`StructuredOutput` tool both differ between analyze and generate, and a request
+parameter that changes the rendered prefix can keep generate from reading
+analyze's cache. Generate retries are the calls guaranteed to benefit; whether
+generate's first attempt also hits is read off `usage.cache_read_input_tokens`
+on a real run.
 
 **Retries escalate.** The fallback model is used only on the final attempt,
 rather than starting expensive.

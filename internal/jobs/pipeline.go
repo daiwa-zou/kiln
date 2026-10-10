@@ -642,17 +642,26 @@ func (p *Pipeline) generateUnit(
 		res.Err = errRunBudgetExhausted
 		return res
 	}
+	// One system prompt for both steps, and the unit's source material rendered
+	// once for all of them: see buildSystemPrompt and buildSources. What differs
+	// between the calls about this unit is only the task message.
+	system := buildSystemPrompt(sc.steering)
+	analyzeSrc, generateSrc, cacheableUnit := buildSources(p.Runner, req.SourceDir, unit)
+
 	analyzeRes, aerr := p.Runner.Run(ctx, agent.Request{
 		Step: agent.StepAnalyze, SessionID: sessionID,
 		WorkDir: workDir, Model: p.AnalyzeModel,
 		BudgetUSD: p.Budget.AnalyzeUSD, Timeout: p.Timeout,
-		SystemPrompt: analyzeSystemPrompt(sc.steering),
+		SystemPrompt: system,
 		// The rendered map is identical for every unit in the run, so it
 		// rides the cache breakpoint and all but the first unit reads it at
 		// a fraction of the input rate.
 		CacheableContext: req.Map.Summary,
-		Prompt:           analyzePrompt(key, unit, req.SourceDir, sc.steering, 0, nil),
-		JSONSchema:       AnalysisSchema,
+		// The unit's own material is identical for every call about this unit,
+		// so it rides a second breakpoint (API runner only; empty otherwise).
+		CacheableUnit: cacheableUnit,
+		Prompt:        analyzePrompt(key, unit, analyzeSrc, sc.steering, 0, nil),
+		JSONSchema:    AnalysisSchema,
 	})
 	sc.ledger.settle(want, costOf(analyzeRes))
 	p.account(&res, key, analyzeRes)
@@ -696,9 +705,10 @@ func (p *Pipeline) generateUnit(
 			WorkDir: workDir, ScratchDir: scratch,
 			Model: p.modelFor(attempt), FallbackModel: p.FallbackModel,
 			BudgetUSD: p.Budget.PageUSD, Timeout: p.Timeout,
-			SystemPrompt:     generateSystemPrompt(sc.steering),
+			SystemPrompt:     system,
 			CacheableContext: req.Map.Summary,
-			Prompt:           generatePrompt(key, unit, req.SourceDir, scratch, sc.steering, plan, sc.figures[key], attempt, lastViolations),
+			CacheableUnit:    cacheableUnit,
+			Prompt:           generatePrompt(key, unit, generateSrc, scratch, sc.steering, plan, sc.figures[key], attempt, lastViolations),
 		})
 		sc.ledger.settle(want, costOf(genRes))
 		p.account(&res, key, genRes)
