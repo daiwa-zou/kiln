@@ -1,0 +1,23 @@
+{
+  // Tests and build configs: Node for the loader and the generators, DOM for
+  // the jsdom environment the tests run in. The eslint bypass fixtures are
+  // deliberately broken code and are linted, never type-checked.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "tsBuildInfoFile": "node_modules/.tmp/tsconfig.node.tsbuildinfo"
+  },
+  "include": ["test", "src", "vite.config.ts", "vitest.config.ts"],
+  "exclude": ["test/eslint-fixtures"]
+}

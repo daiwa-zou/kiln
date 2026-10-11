@@ -1,0 +1,171 @@
+{
+  "generatedFrom": "internal/api/ui/app.js",
+  "bench": {
+    "now": "2026-06-15T12:00:00Z",
+    "pages": [
+      {
+        "slug": "glaze-chemistry",
+        "title": "Glaze chemistry",
+        "type": "concept",
+        "builtAtRef": "r3",
+        "updated": "2026-06-14"
+      },
+      {
+        "slug": "kiln-firing-schedule",
+        "title": "Kiln firing schedule",
+        "type": "concept",
+        "builtAtRef": "r2",
+        "updated": "2026-06-01"
+      },
+      {
+        "slug": "cone-ratings",
+        "title": "Cone ratings",
+        "type": "entity",
+        "builtAtRef": "r1"
+      },
+      {
+        "slug": "reduction-firing",
+        "title": "Reduction firing",
+        "type": "concept",
+        "builtAtRef": "r0",
+        "updated": "2026-05-20T08:30:00Z"
+      },
+      {
+        "slug": "studio-safety",
+        "title": "Studio safety",
+        "type": "synthesis"
+      },
+      {
+        "slug": "clay-bodies",
+        "title": "Clay bodies",
+        "type": "source",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "acquisitions",
+        "title": "Equipment acquisitions",
+        "type": "query",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "kiln-wash",
+        "title": "",
+        "type": "entity",
+        "builtAtRef": "r3"
+      }
+    ],
+    "refs": [
+      "r3",
+      "r2",
+      "r1"
+    ]
+  },
+  "cases": [
+    {
+      "name": "deck present",
+      "body": "Glaze chemistry balances fluxes, stabilizers and glass formers. The rest follows.\n\n## Oxides\n\nMore.",
+      "output": {
+        "deck": "Glaze chemistry balances fluxes, stabilizers and glass formers.",
+        "rest": "The rest follows.\n\n## Oxides\n\nMore.",
+        "cites": []
+      }
+    },
+    {
+      "name": "deck with citation",
+      "body": "Cone 6 glazes mature near 1222 degrees Celsius (notes/cones.md:4-9). Details below.",
+      "output": {
+        "deck": "Cone 6 glazes mature near 1222 degrees Celsius.",
+        "rest": "Details below.",
+        "cites": [
+          {
+            "path": "notes/cones.md",
+            "ranges": [
+              "4–9"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "deck with wikilink and link",
+      "body": "A [[reduction-firing]] starves the kiln of oxygen to shift [colour](https://e.example/c) in iron glazes.",
+      "output": {
+        "deck": "A Reduction firing starves the kiln of oxygen to shift colour in iron glazes.",
+        "rest": "",
+        "cites": []
+      }
+    },
+    {
+      "name": "deck under heading only",
+      "body": "# Firing\n\nA firing schedule sets the rate the kiln climbs and holds.\n\n## Ramp\n\nDetail.",
+      "output": {
+        "deck": "A firing schedule sets the rate the kiln climbs and holds.",
+        "rest": "# Firing\n\n\n## Ramp\n\nDetail.",
+        "cites": []
+      }
+    },
+    {
+      "name": "deck absent: opens with list",
+      "body": "- first item\n- second item\n\nThen prose.",
+      "output": {
+        "deck": "",
+        "rest": "- first item\n- second item\n\nThen prose.",
+        "cites": []
+      }
+    },
+    {
+      "name": "deck absent: opens with table",
+      "body": "| a | b |\n|---|---|\n| 1 | 2 |",
+      "output": {
+        "deck": "",
+        "rest": "| a | b |\n|---|---|\n| 1 | 2 |",
+        "cites": []
+      }
+    },
+    {
+      "name": "deck absent: sentence too short",
+      "body": "Too short. Then more text follows here.",
+      "output": {
+        "deck": "",
+        "rest": "Too short. Then more text follows here.",
+        "cites": []
+      }
+    },
+    {
+      "name": "deck absent: sentence too long",
+      "body": "A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going until it ends.",
+      "output": {
+        "deck": "",
+        "rest": "A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going A very long sentence that keeps going until it ends.",
+        "cites": []
+      }
+    },
+    {
+      "name": "deck absent: abbreviation is not an end",
+      "body": "Cones e.g. six and ten are common in studios that fire stoneware",
+      "output": {
+        "deck": "",
+        "rest": "Cones e.g. six and ten are common in studios that fire stoneware",
+        "cites": []
+      }
+    },
+    {
+      "name": "empty body",
+      "body": "",
+      "output": {
+        "deck": "",
+        "rest": "",
+        "cites": []
+      }
+    },
+    {
+      "name": "frontmatter then deck",
+      "body": "---\ntitle: X\n---\nClay bodies differ in plasticity, shrinkage and firing range.\n\nMore.",
+      "output": {
+        "deck": "Clay bodies differ in plasticity, shrinkage and firing range.",
+        "rest": "\nMore.",
+        "cites": []
+      }
+    }
+  ]
+}

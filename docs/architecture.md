@@ -115,6 +115,19 @@ the case where there is no reachable URL to give one (see
 --with-worker` runs the first two in one process, which is the right shape for a
 single node.
 
+**The reading UI** is static files embedded in the binary and served from
+`/ui/` under a strict CSP (`script-src 'self'`, no inline code). It is moving
+view by view from hand-written JavaScript (`internal/api/ui/app.js`,
+`sources.js`) to TypeScript and Preact in `web/`, which Vite builds into
+`internal/api/ui/dist`. That output is committed, so building and testing kiln
+needs no Node; CI rebuilds it and fails on any difference. The HTML shell is
+part of the build: its source is `web/index.html`, and `/` serves
+`dist/index.html`. Only hashed files under `/ui/assets/` are cached as
+immutable; `/ui/` and `/ui/index.html` redirect to `/`, and any other miss
+under `/ui/` is a 404, never the shell. The two halves meet at `window.kiln`:
+the legacy router mounts any view the bundle has registered, and falls back to
+its own otherwise.
+
 Only `serve` and `worker` touch Postgres, which is why only those two have
 pool settings. `build` needs neither a server nor a database; `mcp` needs a
 reachable `serve`.

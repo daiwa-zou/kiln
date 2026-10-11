@@ -182,9 +182,16 @@ the only route to anything.
 
 ## Re-running the audit
 
-There is no automated a11y gate in CI — the UI has no test harness, and adding
-a headless browser to run one check would cost more than it returns at this
-size. The audit is a browser-console pass over the running UI: for each view,
+Part of it is automated. `TestUIThemeContrast` (`make test`, no Node) parses
+the theme tokens in `style.css` and asserts every text/background pair above
+at 4.5:1 and the type and link colours at 3:1, in both themes; the
+`--ink-faint` on `--sunk` shortfall is excluded by name. The typed UI in `web/`
+has a vitest + jsdom harness with axe-core installed, and each view ported to
+it gets an axe test for names, roles and labels in its own PR. jsdom has no
+layout, so rendered contrast, reflow at 375px, target sizes and focus order
+stay manual.
+
+The manual audit is a browser-console pass over the running UI: for each view,
 compute contrast of every text node against its resolved background, measure
 the bounding box of every control, and assert every control has a name. Re-run
-it when the palette or a component's spacing changes.
+it when the palette or a component's spacing changes, and on every view port.
