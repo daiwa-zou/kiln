@@ -158,7 +158,10 @@ Still open, and now planned as M11 items 1 and 2: activate `digests` for
 review-queue notifications, and revisit the permissive `member`-writes
 default (members write content; owners shape connectors, credentials, and
 membership -- the split holds, but the default role granted on sign-in
-deserves a second look).
+deserves a second look). *M11 item 1 corrected the premise: the default
+role applies to memberships `kiln admin token create --org` creates, and
+is now `auth.default_role`; GitHub sign-in creates no membership at all.
+Auto-joining a sign-in to an org is a follow-up.*
 
 ## Target deployment architecture
 
@@ -334,7 +337,7 @@ network policies enabled, a worker cannot open a connection to a
 destination outside its allowlist, and a pod outside the scraper namespace
 cannot read `/metrics`.
 
-## M11 — The Edges Catch Up — item 9 shipped (2026-10-10)
+## M11 — The Edges Catch Up — items 1 and 9 shipped (2026-10-10)
 
 *Designed 2026-10-10 from a codebase review. The build engine is the
 strongest part of kiln; what lags is around it — nobody is told when the
@@ -345,12 +348,28 @@ remaining items land (item 5 hosts item 2 below); it comes ahead of M10,
 which waits for read traffic to ask for it. Item 9 depended on nothing and
 landed first.*
 
-1. **Default sign-in role is configurable** — `auth/pg.go` inserts the
+1. **Default role for CLI-minted memberships is configurable** ✅ shipped
+   (2026-10-10) —
+   `auth/pg.go` inserts the
    sign-in membership with the column default, `member`, which writes
    content and steering. Add `auth.default_role` (`viewer` | `member`),
    defaulting to `member` so upgrades change nothing; hosted deployments
    set `viewer`. Closes the M8 open question without deciding it for
    everyone.
+   - *Premise corrected.* GitHub sign-in creates no membership at all:
+     `UpsertGitHubUser` writes only `users`, so a fresh sign-in sees no
+     benches. The column-default insert in `auth/pg.go` is `auth.Mint`,
+     the `kiln admin token create --org` path, and that is where the
+     setting applies. Anything else is refused at startup (`owner`
+     included, and matching is exact). A re-mint leaves an existing
+     membership's role alone, and `--admin` tokens write regardless of
+     role. The legacy UI shows a viewer's 403 as read-only copy rather
+     than an error.
+   - *Follow-ups, not done here.* Sign-in auto-join — giving a GitHub
+     sign-in a membership at all — is a new access grant and needs a
+     product decision. And the first-user admin bootstrap in
+     `store/users.go` (`NOT EXISTS (SELECT 1 FROM users)` then insert)
+     races: two concurrent first sign-ins can both become admin.
 2. **Digests** — the `digests` table (`001_initial.sql`: channel, target,
    cadence, enabled, last_sent_at) has had no reader or writer since M0.
    The scheduler role sends, per enabled row, what changed since
@@ -438,8 +457,8 @@ landed first.*
      search for the slug, the nearest titles and the Index; a failed fetch
      still shows the error with Reload.
 
-**Verification:** with `auth.default_role = "viewer"`, a fresh sign-in can
-read but every write answers 403; a review item filed after a digest's
+**Verification:** with `auth.default_role = "viewer"`, a token minted with
+`--org` can read but every write answers 403; a review item filed after a digest's
 `last_sent_at` appears in exactly one digest and a disabled row sends
 nothing; a digest target resolving to a private address is refused; an MCP
 `propose_correction` under a read-scoped token is refused, and under a

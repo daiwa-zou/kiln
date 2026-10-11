@@ -69,6 +69,9 @@ func applyDefaults(v setter, role Role) {
 	// Token auth by default: a shared deployment should have to opt out of
 	// authentication deliberately rather than ship open by omission.
 	v.SetDefault("auth.mode", string(AuthToken))
+	// "member" is the role the column default has always granted, so an
+	// upgrade changes nothing; a hosted deployment opts in to "viewer".
+	v.SetDefault("auth.default_role", "member")
 
 	// A month-long browser session; sessions are server-side rows, so a
 	// stolen cookie is revocable regardless of this.

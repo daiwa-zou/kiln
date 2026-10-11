@@ -25,6 +25,12 @@ config:
   # "token" is the only defensible deployment value: "none" makes every caller
   # an admin, and kiln refuses it on a non-loopback bind anyway.
   authMode: token
+  # The role `kiln admin token create --org` gives a membership it creates:
+  # "member" or "viewer". Empty keeps kiln's default, member. Existing
+  # memberships keep their role, and --admin tokens bypass it. Only the
+  # process running `token create` reads it: set here, it reaches a
+  # `kubectl exec` into these pods, not a token minted from your laptop.
+  authDefaultRole: ""
   corsOrigins: []
   # CIDRs (or bare IPs) of the proxies in front of the API -- the ingress
   # controller's pod or Service IPs and the load balancer's addresses, never

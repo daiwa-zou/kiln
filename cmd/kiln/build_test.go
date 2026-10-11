@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 )
@@ -77,6 +78,24 @@ func TestSmallHelpers(t *testing.T) {
 	}
 	if got := splitScopes(" read, write ,"); len(got) != 2 || got[0] != "read" || got[1] != "write" {
 		t.Errorf("splitScopes = %v", got)
+	}
+}
+
+// token create names the role the owner ends up with, and says so when the
+// configured default did not apply because the membership already existed.
+func TestMembershipNote(t *testing.T) {
+	for _, tc := range []struct {
+		m    auth.Membership
+		want string
+	}{
+		{auth.Membership{}, ""},
+		{auth.Membership{Org: "acme", Role: "viewer", Created: true}, "membership in acme as viewer"},
+		{auth.Membership{Org: "acme", Role: "owner"}, "already a member of acme as owner; existing role kept"},
+	} {
+		got := membershipNote(tc.m)
+		if (tc.want == "") != (got == "") || !strings.HasPrefix(got, tc.want) {
+			t.Errorf("membershipNote(%+v) = %q, want prefix %q", tc.m, got, tc.want)
+		}
 	}
 }
 

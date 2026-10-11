@@ -127,6 +127,11 @@ const (
 // Auth holds API authentication settings.
 type Auth struct {
 	Mode AuthMode `mapstructure:"mode"`
+	// DefaultRole is the org role a membership gets when `kiln admin token
+	// create --org` creates it: "member" (writes content and steering) or
+	// "viewer" (reads only). Kept as a plain string because config must not
+	// import store, which owns the role list.
+	DefaultRole string `mapstructure:"default_role"`
 }
 
 // Database holds Postgres connection and pool settings.
