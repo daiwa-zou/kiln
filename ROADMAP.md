@@ -213,19 +213,15 @@ Prometheus ──► metrics listener (cluster-internal)
   `_FILE` variables, never inline environment values.
 - **Metrics** — the separate listener stays cluster-internal.
 
-**Interim settings while M9 is open.** Each open item has a setting that
-makes the cloud tier safe today, and is retired by the item:
-
-| Open item | Until it lands |
-| --- | --- |
-| M9·2 Real client addresses | Every anonymous caller behind the load balancer, GitHub included, shares one rate-limit bucket. Raise the API's limits and rate-limit at the load balancer or WAF |
+**Interim settings while M9 was open** are retired: the pooler, trusted-proxy
+client addresses, and the scheduler role all shipped (2026-10-10/11).
 
 **After M10.** The API runs as three profiles of one image (reader,
 control, ingress — uploads possibly a fourth), each with its own
 Deployment and HPA; the CDN absorbs most reads; workers scale on queue
 depth, down to zero.
 
-## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); item 2's webhook half shipped (PR #87); item 1 shipped (2026-10-10); item 5 shipped (2026-10-11); 2's `RealIP` half open
+## M9 — Make Builds Parallel ✅ shipped (items 3–4 2026-07-30, PR #27; 2's webhook half PR #87; 1, 2's trusted-proxy half, and 5 2026-10-10/11)
 
 *Items 3 and 4 shipped together: `agent.unit_concurrency` drives the bounded
 pool in `internal/jobs/fanout.go`, and the run budget is a reservation taken
@@ -237,16 +233,18 @@ transaction-mode pooler (migrations take a transaction-scoped lock,
 source scan pins the absence of session state), compose runs api and workers
 through PgBouncer, the chart can deploy one (`pooler.enabled`), and CI runs the
 integration suite through it in both exec modes; sizing is in
-[docs/deployment.md](docs/deployment.md#connection-pooling). Item 5 shipped:
-`kiln scheduler` (`internal/scheduler`) runs the stale requeue, polling, the GC
-sweep and the queue gauge once for the deployment, each duty on its own period
-and timeout; the chart (`scheduler.enabled`, on by default) and compose deploy
-one and set `worker.scheduler_duties = false` on the workers, while its default
-of true keeps an image-only upgrade unchanged and `serve --with-worker` always
-runs the duties. Overlap is harmless by contract, so there is no lease; the
-upgrade matrix is in
-[docs/deployment.md](docs/deployment.md#the-scheduler). Item 2's `RealIP`
-half has no code yet.*
+[docs/deployment.md](docs/deployment.md#connection-pooling). Item 2's other half
+shipped too: `trusted_proxies` lets unauthenticated callers behind a load
+balancer key on the address the proxy appended to `X-Forwarded-For`
+(`internal/api/clientip.go`), IPv6 keys are per /64, and the limiter map is
+capped. Item 5 shipped: `kiln scheduler` (`internal/scheduler`) runs the stale
+requeue, polling, the GC sweep and the queue gauge once for the deployment,
+each duty on its own period and timeout; the chart (`scheduler.enabled`, on by
+default) and compose deploy one and set `worker.scheduler_duties = false` on
+the workers, while its default of true keeps an image-only upgrade unchanged
+and `serve --with-worker` always runs the duties. Overlap is harmless by
+contract, so there is no lease; the upgrade matrix is in
+[docs/deployment.md](docs/deployment.md#the-scheduler).*
 
 *Designed 2026-07-30 from a scaling review. The roles are already split and
 already scale independently; what does not scale is one bench. A run walks
@@ -265,7 +263,9 @@ topology; every item pays off at the shipped two-role deployment.*
 2. **Real client addresses** — `limiterKey` falls back to `r.RemoteAddr`
    with no `RealIP` middleware anywhere, so behind an ingress every
    unauthenticated caller shares one bucket. Add trusted-proxy `RealIP`
-   for that path. The webhook half shipped in PR #87: a delivery whose
+   for that path. *Shipped as `trusted_proxies`: headers are read only from
+   a listed peer and walked right to left; chi's `RealIP` was rejected
+   because it trusts any peer and rewrites `RemoteAddr`.* The webhook half shipped in PR #87: a delivery whose
    HMAC verifies is limited on its repository (else its installation), the
    correct tenant boundary regardless of replica count, and only
    unverified deliveries still share the peer-address bucket.
@@ -435,6 +435,11 @@ landed first.*
    first layout fills about a third of the canvas and its labels overlap.
    Fit the layout to the viewport on load, label nodes by title, and hide
    colliding labels until zoomed in.
+   *In progress: the toolchain and the bridge (8a) are in — `web/`, the
+   committed `internal/api/ui/dist`, the `ui` CI job, `window.kiln` in
+   `route()`, characterization fixtures for the legacy renderer, and a
+   token contrast test. No view is ported yet; the type contract (8b) is
+   next.*
 9. **The reader reads like prose** ✅ shipped (2026-10-10) — fixes from a
    UI review on 2026-10-10, small enough to land in today's `app.js` ahead
    of item 8. The port carries them over unchanged.

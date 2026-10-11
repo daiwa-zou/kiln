@@ -1,0 +1,165 @@
+{
+  "generatedFrom": "internal/api/ui/app.js",
+  "bench": {
+    "now": "2026-06-15T12:00:00Z",
+    "pages": [
+      {
+        "slug": "glaze-chemistry",
+        "title": "Glaze chemistry",
+        "type": "concept",
+        "builtAtRef": "r3",
+        "updated": "2026-06-14"
+      },
+      {
+        "slug": "kiln-firing-schedule",
+        "title": "Kiln firing schedule",
+        "type": "concept",
+        "builtAtRef": "r2",
+        "updated": "2026-06-01"
+      },
+      {
+        "slug": "cone-ratings",
+        "title": "Cone ratings",
+        "type": "entity",
+        "builtAtRef": "r1"
+      },
+      {
+        "slug": "reduction-firing",
+        "title": "Reduction firing",
+        "type": "concept",
+        "builtAtRef": "r0",
+        "updated": "2026-05-20T08:30:00Z"
+      },
+      {
+        "slug": "studio-safety",
+        "title": "Studio safety",
+        "type": "synthesis"
+      },
+      {
+        "slug": "clay-bodies",
+        "title": "Clay bodies",
+        "type": "source",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "acquisitions",
+        "title": "Equipment acquisitions",
+        "type": "query",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "kiln-wash",
+        "title": "",
+        "type": "entity",
+        "builtAtRef": "r3"
+      }
+    ],
+    "refs": [
+      "r3",
+      "r2",
+      "r1"
+    ]
+  },
+  "cases": [
+    {
+      "text": "One (a.md:1) and two (b.md:2-3).",
+      "output": [
+        {
+          "start": 4,
+          "end": 12,
+          "refs": [
+            {
+              "path": "a.md",
+              "ranges": [
+                "1"
+              ]
+            }
+          ]
+        },
+        {
+          "start": 21,
+          "end": 31,
+          "refs": [
+            {
+              "path": "b.md",
+              "ranges": [
+                "2–3"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "text": "Nested ((a.md:1)) parens.",
+      "output": [
+        {
+          "start": 8,
+          "end": 16,
+          "refs": [
+            {
+              "path": "a.md",
+              "ranges": [
+                "1"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "text": "Code `(a.md:1)` then (b.md:2).",
+      "output": [
+        {
+          "start": 21,
+          "end": 29,
+          "refs": [
+            {
+              "path": "b.md",
+              "ranges": [
+                "2"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "text": "A [link](x.md:1) is not a cite (c.md:9).",
+      "output": [
+        {
+          "start": 8,
+          "end": 16,
+          "refs": [
+            {
+              "path": "x.md",
+              "ranges": [
+                "1"
+              ]
+            }
+          ]
+        },
+        {
+          "start": 31,
+          "end": 39,
+          "refs": [
+            {
+              "path": "c.md",
+              "ranges": [
+                "9"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "text": "No groups here.",
+      "output": []
+    },
+    {
+      "text": "Unclosed (a.md:1",
+      "output": []
+    }
+  ]
+}

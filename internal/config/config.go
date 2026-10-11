@@ -53,6 +53,12 @@ type Config struct {
 	// CORSOrigins are browser origins allowed to call the API, for a
 	// separately hosted frontend. Empty means same-origin only.
 	CORSOrigins []string `mapstructure:"cors_origins"`
+	// TrustedProxies are the CIDRs (or bare addresses) of reverse proxies
+	// whose X-Forwarded-For is believed when keying unauthenticated rate
+	// limits. Empty means headers are never read and the caller is the TCP
+	// peer, which behind a load balancer is the balancer itself. List only
+	// proxies that append the address they received from.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
 
 	Database Database `mapstructure:"database"`
 	Storage  Storage  `mapstructure:"storage"`

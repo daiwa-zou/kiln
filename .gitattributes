@@ -1,0 +1,7 @@
+# Generated, so collapsed in review and left out of language stats, but never
+# -diff: the bundle and the lockfile are what actually runs, and a reviewer
+# must still be able to open the diff. CI's ui job proves dist matches a
+# rebuild of web/. web/modules.txt is deliberately absent: it is the
+# one-screen summary of what reaches the browser, so it stays expanded.
+internal/api/ui/dist/** linguist-generated=true
+web/package-lock.json linguist-generated=true
