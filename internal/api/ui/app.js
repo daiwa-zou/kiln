@@ -3096,10 +3096,11 @@ function reviewDetailHTML(r) {
       ${r.unit ? `<span class="mono">${esc(unitSource(r.unit).name)}</span>` : ""}
       ${r.pageSlug ? `<a href="#/page/${encodeURIComponent(r.pageSlug)}">${esc(r.pageSlug)}</a>` : ""}
       <span class="meta-when">${r.status === "open"
-        ? `filed ${esc(relTime(r.created))}`
+        ? `filed ${filerLabel(r) ? `by ${esc(filerLabel(r))} ` : ""}${esc(relTime(r.created))}`
         : `${esc(r.status)} ${esc(relTime(r.resolved || r.created))}`}</span>
     </div>
     <h2>${esc(r.title)}</h2>
+    ${proposalBlockHTML(r)}
     <div class="detail">${esc(r.detail)}</div>
     ${researchBlockHTML(r)}
     ${r.researching ? `<p class="hint" role="status">A worker is reading the sources
@@ -3117,9 +3118,57 @@ function reviewDetailHTML(r) {
               title="Starts a new research run. Like a build, it uses the model and is billed.">Try again</button>`
           : `<button class="btn quiet" data-research="${esc(r.id)}">Research</button>`)
         : ""}
+      ${r.promotable ? `<button class="btn" id="promote-open" aria-expanded="false"
+          aria-controls="promote-form">Pin as a correction…</button>` : ""}
       <span class="action-hint">↑↓ to move · shortcuts work anywhere on this screen</span>
     </div>`}
+    ${r.promotable && r.status === "open" ? promoteFormHTML(r) : ""}
     <div id="review-note" class="hint" role="status"></div>`;
+}
+
+// filerLabel names who filed a review, for the line under its kind. Decided by
+// originKind, never by the name: a key's name is whatever its minter typed,
+// and a key called "session" must still read as a key.
+function filerLabel(r) {
+  switch (r.originKind) {
+    case "key": return `key “${r.origin}”`;
+    case "session": return "a member";
+    case "local": return "this instance";
+    default: return "";
+  }
+}
+
+// proposalBlockHTML shows a proposed correction's text verbatim and read-only,
+// apart from the agent's rationale below it: this is the text that would be
+// pinned, and it has to be read as written before anyone decides to.
+function proposalBlockHTML(r) {
+  if (r.kind !== "correction" || !r.proposed) return "";
+  return `<div class="research-findings">
+      <div class="rf-label">Proposed correction${filerLabel(r)
+        ? ` · from <span class="rf-name">${esc(filerLabel(r))}</span>` : ""}</div>
+      <div class="detail">${esc(r.proposed)}</div>
+    </div>`;
+}
+
+// promoteFormHTML is the inline form behind "Pin as a correction". The
+// textarea starts as the proposal and may be edited; what is pinned is what it
+// holds when confirmed, never the proposal itself. Confirming needs the
+// explicit "I have read this text" tick, because a pinned correction steers
+// every future rebuild of the page and this one was written by an agent.
+// No keyboard shortcut: this is the one inbox action that changes a page.
+function promoteFormHTML(r) {
+  return `<div class="promote-form" id="promote-form" hidden>
+      <label class="group-label" for="promote-text">Correction to pin — edit it if needed</label>
+      <textarea id="promote-text" rows="6">${esc(r.proposed)}</textarea>
+      <label class="check">
+        <input type="checkbox" id="promote-read">
+        I have read this text, and it should guide every rebuild of ${esc(r.pageSlug)}.
+      </label>
+      <div class="action-bar">
+        <button class="btn" id="promote-confirm" data-promote="${esc(r.id)}">Pin correction</button>
+        <button class="btn quiet" id="promote-cancel">Cancel</button>
+      </div>
+    </div>`;
 }
 
 // wireInbox binds the pane once per render: rows, pills, actions, and the
@@ -3271,6 +3320,50 @@ function wireInbox(view) {
         }
       });
     }
+
+    // Pinning a proposed correction: the form opens in place under the
+    // proposal, and confirming needs the "I have read this text" tick. The
+    // tick is checked on click rather than by disabling the button, so the
+    // button stays reachable and says what is missing.
+    const promoteOpen = $("promote-open");
+    const promoteForm = $("promote-form");
+    if (promoteOpen && promoteForm) {
+      promoteOpen.addEventListener("click", () => {
+        promoteForm.hidden = false;
+        promoteOpen.setAttribute("aria-expanded", "true");
+        $("promote-text").focus();
+      });
+      $("promote-cancel").addEventListener("click", () => {
+        promoteForm.hidden = true;
+        $("promote-text").value = reviewRows[selectedReviewIndex]?.proposed ?? "";
+        $("promote-read").checked = false;
+        promoteOpen.setAttribute("aria-expanded", "false");
+        promoteOpen.focus();
+      });
+      const confirmBtn = $("promote-confirm");
+      once(confirmBtn, async () => {
+        const text = $("promote-text").value.trim();
+        if (!$("promote-read").checked) {
+          note("Tick “I have read this text” to pin it.");
+          $("promote-read").focus();
+          return;
+        }
+        if (!text) {
+          note("The correction is empty; there is nothing to pin.");
+          return;
+        }
+        try {
+          await api(`/workspaces/${encodeURIComponent(state.workspace)}/reviews/${encodeURIComponent(confirmBtn.dataset.promote)}/promote`,
+            { method: "POST", body: { text } });
+          updateReviewsBadge(Number($("reviews-badge").textContent || 1) - 1);
+          toast("Correction pinned — applies from the next rebuild");
+          document.body.classList.remove("inbox-detail-open");
+          showReviews(false);
+        } catch (err) {
+          if (!err.handled) note(err.message);
+        }
+      });
+    }
   }
   wireDetail();
   sizeBars($("inbox-detail"));
@@ -3280,6 +3373,15 @@ function wireInbox(view) {
   const onKey = (e) => {
     if (!view.current()) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // While a correction is being pinned, the pane holds edits a shortcut
+    // would sweep away (the arrows rebuild it, X dismisses the review), so
+    // none of them apply -- wherever focus is, including Pin and Cancel.
+    // Escape is Cancel.
+    const promoting = $("promote-form");
+    if (promoting && !promoting.hidden) {
+      if (e.key === "Escape") { e.preventDefault(); $("promote-cancel")?.click(); }
+      return;
+    }
     // Suppressed while typing: without this, an "a" in the rail's filter box
     // would resolve whatever review happens to be selected.
     const t = e.target;
@@ -4743,12 +4845,19 @@ async function showMCP() {
 
       <div class="group-label">3 · Keys</div>
       ${keys
-        ? `<p class="hint">A key carries the read scope and nothing else, and sees
-             exactly the benches you do. It is shown once — kiln stores only a
-             hash — so copy it when it appears.</p>
+        ? `<p class="hint">A key reads exactly the benches you do and never changes
+             them. It is shown once — kiln stores only a hash — so copy it when it
+             appears.</p>
+           <input id="mcp-key-name" type="text" placeholder="What is it for? e.g. laptop Claude"
+                  aria-label="Key name" maxlength="60">
+           ${state.workspace ? `<label class="check">
+             <input type="checkbox" id="mcp-key-propose" aria-describedby="mcp-key-propose-hint">
+             Can file questions and corrections for review; cannot change pages.
+           </label>
+           <p class="hint" id="mcp-key-propose-hint">Files into
+             <strong>${esc(currentBench()?.name || state.workspace)}</strong> only. A person
+             reads everything it files, and only a person can pin a correction.</p>` : ""}
            <div class="meta">
-             <input id="mcp-key-name" type="text" placeholder="What is it for? e.g. laptop Claude"
-                    aria-label="Key name" maxlength="60">
              <button class="btn" id="mcp-key-new">Generate a key</button>
            </div>
            <div id="mcp-key-note" class="hint" role="status"></div>
@@ -4761,14 +4870,18 @@ async function showMCP() {
              : esc(keysErr || "This instance does not issue keys.")}</div>`}
 
       <div class="group-label">4 · What the agent gets</div>
-      <p class="hint">Seven tools. <span class="mono">search_wiki</span> and
+      <p class="hint">Seven reading tools. <span class="mono">search_wiki</span> and
         <span class="mono">read_page</span> carry most traffic, with
         <span class="mono">wiki_overview</span> for orientation,
         <span class="mono">list_benches</span> and <span class="mono">list_pages</span>
         for enumeration, <span class="mono">page_backlinks</span> for context, and
         <span class="mono">wiki_gaps</span> — which is what lets an agent tell
         <em>"the wiki says nothing about X"</em> from
-        <em>"the wiki has not covered X yet"</em>.</p>`)) return;
+        <em>"the wiki has not covered X yet"</em>.</p>
+      <p class="hint">A key that can file questions and corrections also gets
+        <span class="mono">request_gap</span>, <span class="mono">file_question</span> and
+        <span class="mono">propose_correction</span>. Everything they send lands under
+        Reviews for a person; none of them changes a page.</p>`)) return;
 
     wireCopyButtons();
 
@@ -4797,10 +4910,17 @@ async function showMCP() {
     once($("mcp-key-new"), async () => {
       note("");
       try {
+        // A filing key is pinned to the bench open now; the server checks that
+        // this reader may write to it.
+        const propose = Boolean($("mcp-key-propose")?.checked);
         const made = await api("/tokens", {
-          method: "POST", body: { name: $("mcp-key-name").value },
+          method: "POST",
+          body: propose
+            ? { name: $("mcp-key-name").value, allowPropose: true, workspace: state.workspace }
+            : { name: $("mcp-key-name").value },
         });
         $("mcp-key-name").value = "";
+        if ($("mcp-key-propose")) $("mcp-key-propose").checked = false;
         // Shown once, in full, with the warning attached to the thing itself
         // rather than to a paragraph above it that has already been read.
         $("mcp-key-fresh").innerHTML = `
@@ -4858,13 +4978,25 @@ function keyRows(keys) {
   }
   return `<div class="review">${keys.map((k) => `
     <div class="row">
-      <span>${esc(k.name)} <span class="count">${(k.scopes || []).join(", ")}</span></span>
+      <span>${esc(k.name)} <span class="count">${esc(keyScopesText(k.scopes))}</span></span>
       <span>
         <span class="count">${k.lastUsed ? `last used ${esc(relTime(k.lastUsed))}` : "never used"}</span>
         ${k.expires ? `<span class="count">expires ${esc(k.expires.slice(0, 10))}</span>` : ""}
         <button class="btn quiet" data-revoke="${esc(k.id)}">revoke</button>
       </span>
     </div>`).join("")}</div>`;
+}
+
+// keyScopesText says what a key can do in words. A filing scope arrives as
+// "propose:<bench id>", which names the bench by the one handle a reader cannot
+// read, so it is shown by the bench's name when this reader can see it.
+function keyScopesText(scopes) {
+  return (scopes || []).map((s) => {
+    if (!s.startsWith("propose:")) return s;
+    const id = s.slice("propose:".length);
+    const b = state.benches.find((x) => x.id === id);
+    return `can file into ${b ? b.name : id}`;
+  }).join(", ");
 }
 
 // wireCopyButtons binds every [data-copy] to the id it names. Falls back to

@@ -18,18 +18,15 @@ type PGSource struct {
 
 // IdentityForToken looks up a live token by hash.
 func (s *PGSource) IdentityForToken(ctx context.Context, tokenHash string) (Identity, error) {
-	var (
-		id      Identity
-		tokenID string
-	)
+	var id Identity
 	err := s.Pool.QueryRow(ctx, `
-		SELECT t.id, t.user_id, u.is_admin, t.scopes
+		SELECT t.id, t.name, t.user_id, u.is_admin, t.scopes
 		FROM tokens t
 		JOIN users u ON u.id = t.user_id
 		WHERE t.token_hash = $1
 		  AND t.revoked_at IS NULL
 		  AND (t.expires_at IS NULL OR t.expires_at > now())`,
-		tokenHash).Scan(&tokenID, &id.UserID, &id.Admin, &id.Scopes)
+		tokenHash).Scan(&id.TokenID, &id.TokenName, &id.UserID, &id.Admin, &id.Scopes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Identity{}, ErrUnauthenticated
 	}
@@ -43,7 +40,7 @@ func (s *PGSource) IdentityForToken(ctx context.Context, tokenHash string) (Iden
 		UPDATE tokens SET last_used_at = now()
 		WHERE id = $1
 		  AND (last_used_at IS NULL OR last_used_at < now() - interval '60 seconds')`,
-		tokenID)
+		id.TokenID)
 
 	return id, nil
 }

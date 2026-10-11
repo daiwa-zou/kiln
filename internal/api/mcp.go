@@ -44,13 +44,15 @@ const (
 	// results stream back; shorter than the five minutes Claude waits, so the
 	// server gives up first and says so.
 	mcpTimeout = 4 * time.Minute
-	// mcpScope is the only scope the tools need: every one of them is a read.
-	mcpScope = "read"
+	// mcpScope is the scope the endpoint requires: every tool reads, and the
+	// filing tools are additionally checked by the routes they call.
+	mcpScope = auth.ScopeRead
 )
 
 // mountMCP registers the MCP endpoint and its discovery documents.
 //
-// Requires Store, which every deployment has; the tools are all reads.
+// Requires Store, which every deployment has. The filing tools need Writes as
+// well, and say so through the API's own 404 where it is absent.
 func (s *Server) mountMCP(r chi.Router) {
 	if s.Store == nil {
 		return
@@ -93,8 +95,31 @@ func (s *Server) mcpServerFor(r *http.Request) *mcp.Server {
 		Title:   "kiln wiki",
 		Version: observability.Version,
 	}, nil)
-	kilnmcp.NewServer(client, "", observability.Version).Register(srv)
+	writes, benches := s.mcpWrites(r)
+	kilnmcp.NewServer(client, "", observability.Version).WithWrites(writes, benches...).Register(srv)
 	return srv
+}
+
+// mcpWrites decides whether the caller is shown the filing tools, and which
+// benches they file into. An authless instance and a write token file
+// anywhere they can write; a propose key files into the benches its scopes
+// name; anything else -- a read-only key -- sees no filing tools at all. The
+// API enforces the same rule on every filing; this only keeps the tool list
+// honest about it.
+func (s *Server) mcpWrites(r *http.Request) (bool, []string) {
+	if s.Auth == nil {
+		return true, nil
+	}
+	info := mcpauth.TokenInfoFromContext(r.Context())
+	if info == nil {
+		return false, nil
+	}
+	id := auth.Identity{Scopes: info.Scopes}
+	if id.HasScope(auth.ScopeWrite) {
+		return true, nil
+	}
+	benches := id.ProposeWorkspaces()
+	return len(benches) > 0, benches
 }
 
 // mcpAuth guards the endpoint.
@@ -117,10 +142,12 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 	}
 	opts := &mcpauth.RequireBearerTokenOptions{
 		ResourceMetadataURL: strings.TrimRight(s.PublicURL, "/") + resourceMetadataPath,
-		// Every tool is a read, and read is the scope kiln gives a token by
-		// default. Requiring it here turns a token that cannot read into one
-		// clean 403 at the door, rather than seven tools that each fail
-		// somewhere inside with a message about the wiki.
+		// Every token that may use the endpoint reads -- even a key that can
+		// file carries read beside its propose scope -- and read is the scope
+		// kiln gives a token by default. Requiring it here turns a token that
+		// cannot read into one clean 403 at the door, rather than tools that
+		// each fail somewhere inside with a message about the wiki. Filing is
+		// checked per request by the API the tools call.
 		Scopes: []string{mcpScope},
 		// kiln tokens are opaque and long-lived; the tokens table holds the
 		// expiry and IdentityForToken already refuses a lapsed one. There is no

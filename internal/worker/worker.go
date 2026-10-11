@@ -531,6 +531,7 @@ func (w *Worker) research(ctx context.Context, run *store.QueuedRun, spec jobs.S
 			Title:    q.Title,
 			Detail:   q.Detail,
 			PageSlug: q.PageSlug,
+			FiledBy:  q.FiledBy,
 		},
 	})
 	stopHeartbeat() // see process: the run row is settled, so a beat would only fail

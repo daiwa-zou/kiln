@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -9,30 +10,39 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/daiwa-zou/kiln/internal/auth"
+	"github.com/daiwa-zou/kiln/internal/store"
 )
 
 // API keys for agents: the MCP server reads this instance over HTTP, so an
 // agent needs a bearer token, and the only way to get one used to be a shell
 // on the host running `kiln admin token create`.
 //
-// Everything minted here carries the read scope and nothing else. That is what
-// MCP needs -- every tool it exposes is a read -- and it means the endpoint
-// cannot be turned into a way to acquire more authority than the session
-// already has: a writer or an admin asking for an agent key gets a key that
-// can only read, which is a reduction rather than an escalation. The token is
+// Everything minted here reads, and never writes. A key carries the read scope
+// and, when the caller asks for it (allowPropose), "propose:<bench>": the
+// right to file questions and proposed corrections into that one bench, which
+// is what the MCP filing tools need and nothing more -- it reaches the two
+// filing routes and no other mutation, so it cannot pin a correction, resolve
+// a review or delete a page. Either way the endpoint cannot be turned into a
+// way to acquire more authority than the session already has: a writer or an
+// admin asking for an agent key gets a reduction, never an escalation, and a
+// propose key is minted only for a bench the caller may write to. The token is
 // attached to the caller's own user, so it sees exactly the benches they do.
 //
 // Minting is a write, so the middleware's scope rule already requires the
 // write scope to reach it. That is the property worth keeping rather than
-// working around: a key issued here cannot issue another, so a leaked one
-// cannot mint itself a fresh long-lived replacement and outlive the
-// revocation of the original. A person signed in at the browser has the write
-// scope; a read-only automation token does not, and is refused.
+// working around: a key issued here cannot issue another (propose is not
+// write, and /tokens is not a filing route), so a leaked one cannot mint
+// itself a fresh long-lived replacement and outlive the revocation of the
+// original. A person signed in at the browser has the write scope; an agent
+// key does not, and is refused.
 const (
-	agentTokenScope = "read"
+	agentTokenScope = auth.ScopeRead
 	// Long enough to be useful in a config file, short enough that a key
 	// pasted somewhere and forgotten stops working.
 	agentTokenTTL = 365 * 24 * time.Hour
+	// maxLiveAgentKeys bounds the keys one person holds at once. Filing
+	// buckets are per key, so without it more keys would mean more filing.
+	maxLiveAgentKeys = 20
 )
 
 // callerUser resolves the caller to the user a key would belong to.
@@ -75,25 +85,54 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name string `json:"name"`
+		Name         string `json:"name"`
+		AllowPropose bool   `json:"allowPropose"`
+		Workspace    string `json:"workspace"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
 
 	// The name is a label for the reader's own benefit, so it is the one thing
-	// the caller does choose -- bounded, since it is displayed back.
-	name := strings.TrimSpace(body.Name)
+	// the caller does choose -- bounded, since it is displayed back (and shown
+	// in the review queue as the filer of whatever the key files).
+	name := cleanLine(body.Name)
 	if name == "" {
 		name = "agent"
 	}
-	if len(name) > 60 {
-		name = name[:60]
+	if r := []rune(name); len(r) > 60 {
+		name = string(r[:60])
 	}
 
-	// Scope and lifetime are the server's decision, not the caller's.
+	// Scope and lifetime are the server's decision, not the caller's. The one
+	// choice offered is whether the key may file into the bench named here;
+	// a bench is required, because a propose key is pinned to exactly one.
+	scopes := []string{agentTokenScope}
+	if body.AllowPropose {
+		ws, ok := s.proposeTarget(w, r, body.Workspace)
+		if !ok {
+			return
+		}
+		scopes = append(scopes, auth.ProposeScope(ws.ID))
+	} else if body.Workspace != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "workspace names the bench a key may file into; send it with allowPropose"})
+		return
+	}
+
+	live, err := auth.ListForUser(r.Context(), s.SessionPool, userID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if len(live) >= maxLiveAgentKeys {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf(
+			"you already have %d live keys; revoke one you no longer use first", len(live))})
+		return
+	}
+
 	plain, info, err := auth.MintForUser(
-		r.Context(), s.SessionPool, userID, name, []string{agentTokenScope}, agentTokenTTL)
+		r.Context(), s.SessionPool, userID, name, scopes, agentTokenTTL)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -104,6 +143,47 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 	payload := tokenJSON(info)
 	payload["token"] = plain
 	writeJSON(w, http.StatusCreated, payload)
+}
+
+// proposeTarget resolves the bench a propose key is for. The caller must be
+// able to write to it: a key that files into a bench is minted only by
+// someone whose own role there would let them file, so a viewer cannot hand
+// an agent more than they have.
+func (s *Server) proposeTarget(w http.ResponseWriter, r *http.Request, ref string) (store.WorkspaceRow, bool) {
+	if s.Writes == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this instance has no review queue to file into"})
+		return store.WorkspaceRow{}, false
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "allowPropose needs workspace: the bench the key may file into"})
+		return store.WorkspaceRow{}, false
+	}
+	uid, admin := s.scope(r)
+	ws, err := s.Store.ResolveWorkspace(r.Context(), ref, uid, admin)
+	var amb *store.AmbiguousWorkspaceError
+	switch {
+	case errors.As(err, &amb):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "that bench name is ambiguous; send its id"})
+		return store.WorkspaceRow{}, false
+	case errors.Is(err, store.ErrNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+		return store.WorkspaceRow{}, false
+	case err != nil:
+		s.fail(w, err)
+		return store.WorkspaceRow{}, false
+	}
+	_, allowed, err := s.canWrite(r, ws)
+	if err != nil {
+		s.fail(w, err)
+		return store.WorkspaceRow{}, false
+	}
+	if !allowed {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "workspace role does not permit writes"})
+		return store.WorkspaceRow{}, false
+	}
+	return ws, true
 }
 
 func (s *Server) handleTokenRevoke(w http.ResponseWriter, r *http.Request) {

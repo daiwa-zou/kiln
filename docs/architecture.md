@@ -1041,6 +1041,19 @@ the HTTP method — `read` for safe methods, `write` for everything else — so 
 mutating route added tomorrow is covered the day it is added rather than the day
 someone remembers.
 
+**One exception: `propose:<workspace id>`.** An agent key minted with *Can file
+questions and corrections* carries `read` plus a propose scope pinned to one
+bench, and that scope satisfies `write` on exactly two routes: `POST
+/workspaces/{ws}/reviews` and `POST /workspaces/{ws}/gaps/{slug}/request`, for
+that bench only. The router opts them in by chi route pattern (it asks the
+finished router which pattern a request reaches, so there is no second URL
+parser to disagree with it), and a test walks every mutating route to prove no
+other one admits the scope. The reason is that a `write` token can already pin
+corrections, resolve deletion reviews and delete pages, so "nothing an agent
+sends changes a page" has to be true of the agent's key, not only of its tools.
+Filing is rate-limited per key and per user, and capped at 20 open items per
+key and 200 key-filed items per bench.
+
 Admin routes (connectors, credentials, members) are gated **twice**: the token
 must carry the `admin` scope, *and* the caller must be an instance admin or an
 **owner** of that bench's org. A token minted for automation should not be able
@@ -1072,7 +1085,8 @@ the MCP tools address benches by id.
 | Runs | `GET /runs`, `GET /runs/{id}/items`, `POST /runs` |
 | Sources *(admin)* | `GET`/`POST /connectors`, `PATCH`/`DELETE /connectors/{id}`, `GET`/`POST /credentials`, `DELETE /credentials/{id}` |
 | Files | `GET /files`, `POST` upload, `PATCH`/`DELETE /files/{id}` |
-| Human loop | `GET`/`PUT /steering[/{kind}]`, `GET`/`POST /corrections/*`, `PATCH /correction/{id}`, `GET /reviews`, `POST /reviews/{id}/resolve`, `POST /reviews/{id}/research` |
+| Human loop | `GET`/`PUT /steering[/{kind}]`, `GET`/`POST /corrections/*`, `PATCH /correction/{id}`, `GET /reviews`, `POST /reviews/{id}/resolve`, `POST /reviews/{id}/research`, `POST /reviews/{id}/promote` (pins a proposed correction; `write` only) |
+| Filing *(write, or propose for the bench)* | `POST /reviews` (kind `uncertain`, `contradiction` or `correction`), `POST /gaps/{slug}/request` |
 | Members *(admin)* | `GET`/`POST /members`, `PATCH`/`DELETE /members/{userID}` |
 
 **Auth modes.** `token` is the default — a shared deployment must opt *out* of
@@ -1148,10 +1162,17 @@ same API: its tool calls are dispatched back into the router in-process, so they
 pass every visibility rule the handlers enforce rather than reaching around
 them. No socket, no port to discover, and no internal hop anyone else can reach.
 
-**Search-first, seven tools.** An agent that can search, read, and follow links
-has what it needs; a tool per endpoint would spend the model's attention on
-choosing between them. `search_wiki` returns slugs and snippets, `read_page`
-takes those slugs back.
+**Search-first, seven reading tools.** An agent that can search, read, and
+follow links has what it needs; a tool per endpoint would spend the model's
+attention on choosing between them. `search_wiki` returns slugs and snippets,
+`read_page` takes those slugs back.
+
+**Three filing tools, none of which changes a page.** `request_gap`,
+`file_question` and `propose_correction` file into the review queue and are
+listed only for a key that can file (`write`, or `propose:<bench>`, in which
+case the descriptions name that bench). A proposed correction becomes a pinned
+one only when a member promotes it with the text they confirmed; promotion is
+not an MCP tool. Ten tools in all.
 
 **Failures are tool errors, not protocol errors.** An unknown bench or a missing
 page is a normal thing for an agent to hit, so each one returns text naming the

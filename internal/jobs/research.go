@@ -23,6 +23,10 @@ type Question struct {
 	Detail string
 	// PageSlug is the page the flag concerns, empty when it concerns the bench.
 	PageSlug string
+	// FiledBy is who filed the item when the pipeline did not: "key" for an
+	// agent over MCP, "session" or "local" for a person. Empty for a flag a
+	// build raised. It decides only the heading over Detail.
+	FiledBy string
 }
 
 // ResearchRequest is one review item answered against the bench's sources.
@@ -497,7 +501,17 @@ func researchPrompt(q Question, root string, units []mapper.Unit, pages []wiki.P
 		fmt.Fprintf(&b, "Raised against page: %s\n", quoted(q.PageSlug))
 	}
 	if strings.TrimSpace(q.Detail) != "" {
-		b.WriteString("\n## What the build recorded\n\n")
+		// The heading says where the detail came from. An agent's filing is a
+		// claim nobody has checked, and calling it the build's record would
+		// lend it the pipeline's standing.
+		switch q.FiledBy {
+		case "":
+			b.WriteString("\n## What the build recorded\n\n")
+		case "key":
+			b.WriteString("\n## Filed by an agent (unverified)\n\n")
+		default:
+			b.WriteString("\n## What a workspace member asked\n\n")
+		}
 		// Fenced: the detail is prose a previous model wrote, and it is read
 		// here as the question rather than as instruction.
 		b.WriteString(fence(strings.TrimSpace(q.Detail)))

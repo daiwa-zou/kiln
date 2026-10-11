@@ -26,6 +26,11 @@ const (
 	writeRefillEach  = 3 * time.Second
 	uploadBurst      = 60
 	uploadRefillEach = time.Second
+	// Filing (questions, proposed corrections, gap requests) is what an
+	// agent does in a loop, so its per-key bucket is tighter than a person's:
+	// ten at once, then one every six seconds.
+	filingBurst      = 10
+	filingRefillEach = 6 * time.Second
 )
 
 // Bounds on the bucket map. Unauthenticated keys are chosen by the caller --
@@ -153,6 +158,31 @@ func limiterKey(r *http.Request) string {
 		return "a:" + addrKey(a)
 	}
 	return "a:" + host
+}
+
+// filingKey buckets a filing by the API key that made it, so two agents a
+// person runs have an allowance each; a session or an authless caller falls
+// back to limiterKey.
+func filingKey(r *http.Request) string {
+	if id, ok := auth.FromContext(r.Context()); ok && id.TokenID != "" {
+		return "t:" + id.TokenID
+	}
+	return limiterKey(r)
+}
+
+// filingLimiter is writeLimiter keyed by filingKey. It sits beside the write
+// limiter on the filing routes, never instead of it.
+func filingLimiter(l *limiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !l.take(filingKey(r)) {
+				w.Header().Set("Retry-After", "6")
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "filing rate limit exceeded"})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // addrKey renders a canonical address as a bucket key: IPv4 as the address,

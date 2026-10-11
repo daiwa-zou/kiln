@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // Identity is what a valid token authenticates: a user, their admin bit, and
@@ -17,11 +19,72 @@ type Identity struct {
 	UserID string
 	Admin  bool
 	Scopes []string
+	// TokenID and TokenName identify the API token that authenticated the
+	// request, empty for a browser session. The id keys the per-key filing
+	// bucket and caps; the name is what the review queue shows as the filer.
+	TokenID   string
+	TokenName string
+}
+
+// Scopes a token can carry. read and write split on the HTTP method (see
+// requiredScope); admin gates the operator surfaces.
+//
+// propose is narrower than write and is never granted bare: it is stored as
+// "propose:<workspace id>" and lets a token file questions and proposed
+// corrections into that one bench -- the two filing routes the API opts in
+// with Middleware.WithPropose -- and nothing else. That is what makes
+// "nothing an agent sends changes a page" true of the token rather than only
+// of the MCP tools: a write token can pin corrections, resolve deletion
+// reviews and delete pages over plain REST.
+const (
+	ScopeRead  = "read"
+	ScopeWrite = "write"
+	ScopeAdmin = "admin"
+	// ScopeProposePrefix is followed by a workspace id; see ProposeScope.
+	ScopeProposePrefix = "propose:"
+)
+
+// ProposeScope is the scope that lets a token file into one workspace.
+func ProposeScope(workspaceID string) string { return ScopeProposePrefix + workspaceID }
+
+// ProposeWorkspace parses a propose scope, returning the workspace id it is
+// pinned to. Anything that is not exactly "propose:" plus a canonical UUID is
+// rejected, so a malformed or bare "propose" grants nothing.
+func ProposeWorkspace(scope string) (string, bool) {
+	rest, ok := strings.CutPrefix(scope, ScopeProposePrefix)
+	if !ok {
+		return "", false
+	}
+	u, err := uuid.Parse(rest)
+	if err != nil || u.String() != rest {
+		return "", false
+	}
+	return rest, true
 }
 
 // HasScope reports whether the token grants a scope.
 func (id Identity) HasScope(scope string) bool {
 	return slices.Contains(id.Scopes, scope)
+}
+
+// ProposeWorkspaces lists the workspaces the token may file into through a
+// propose scope. A write token files anywhere it can write and needs none.
+func (id Identity) ProposeWorkspaces() []string {
+	var out []string
+	for _, s := range id.Scopes {
+		if ws, ok := ProposeWorkspace(s); ok {
+			out = append(out, ws)
+		}
+	}
+	return out
+}
+
+// CanProposeIn reports whether a token without write may file into a
+// workspace: it must read, and hold the propose scope pinned to exactly that
+// workspace.
+func (id Identity) CanProposeIn(workspaceID string) bool {
+	return workspaceID != "" && id.HasScope(ScopeRead) &&
+		slices.Contains(id.ProposeWorkspaces(), workspaceID)
 }
 
 // ErrUnauthenticated is returned by a Source when no live token matches.
@@ -50,6 +113,21 @@ type Middleware struct {
 	// turned sign-in on.
 	Sessions SessionSource
 	Log      *slog.Logger
+
+	// propose decides whether a mutating request from a token that lacks
+	// write, but holds a propose scope, is one of the filing routes for a
+	// workspace that scope names. Nil (the zero value) admits no such
+	// request, so the narrow scope is useless until a router opts in.
+	propose func(*http.Request, Identity) bool
+}
+
+// WithPropose returns a copy of the middleware that admits propose-scoped
+// tokens wherever f answers true. The router supplies f because only it knows
+// which handler a request will reach and which workspace it names; the scope
+// check stays here, in the one place every route passes through.
+func (m Middleware) WithPropose(f func(*http.Request, Identity) bool) *Middleware {
+	m.propose = f
+	return &m
 }
 
 // Wrap enforces authentication and the read scope on the wrapped handler.
@@ -111,11 +189,21 @@ func (m *Middleware) handled(w http.ResponseWriter, err error, id Identity, r *h
 		deny(w, http.StatusInternalServerError, "internal error")
 		return false
 	}
-	if !id.HasScope(requiredScope(r.Method)) {
+	if !id.HasScope(requiredScope(r.Method)) && !m.proposeAdmits(r, id) {
 		deny(w, http.StatusForbidden, "token lacks the required scope")
 		return false
 	}
 	return true
+}
+
+// proposeAdmits is the one exception to "mutations need write": a token that
+// reads and holds a propose scope, on a route the router opted in. Every
+// condition is checked here rather than trusted to the router's func, so a
+// careless matcher can at worst admit a propose token, never a read-only one.
+func (m *Middleware) proposeAdmits(r *http.Request, id Identity) bool {
+	return m.propose != nil && mutating(r.Method) &&
+		id.HasScope(ScopeRead) && len(id.ProposeWorkspaces()) > 0 &&
+		m.propose(r, id)
 }
 
 func mutating(method string) bool {
@@ -129,9 +217,9 @@ func mutating(method string) bool {
 func requiredScope(method string) string {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return "read"
+		return ScopeRead
 	default:
-		return "write"
+		return ScopeWrite
 	}
 }
 
