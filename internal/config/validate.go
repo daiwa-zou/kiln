@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -50,6 +51,11 @@ func (c *Config) Validate() error {
 	if c.Database.MinConns > c.Database.MaxConns {
 		problems = append(problems, fmt.Sprintf(
 			"database: min_conns (%d) exceeds max_conns (%d)", c.Database.MinConns, c.Database.MaxConns))
+	}
+	if m := c.Database.QueryExecMode; m != "" && !slices.Contains(ValidQueryExecModes, m) {
+		problems = append(problems, fmt.Sprintf(
+			"database: unknown query_exec_mode %q (want empty for the pgx default, or one of %s)",
+			m, strings.Join(ValidQueryExecModes, ", ")))
 	}
 
 	switch c.Storage.Backend {
@@ -155,6 +161,10 @@ func (c *Config) Validate() error {
 		problems = append(problems, fmt.Sprintf(
 			"worker: stale_after (%s) must be at least three times heartbeat_interval (%s), or one missed heartbeat would let a second worker claim a live run",
 			c.Worker.StaleAfter, c.Worker.HeartbeatInterval))
+	}
+
+	if _, err := ParseTrustedProxies(c.TrustedProxies); err != nil {
+		problems = append(problems, err.Error())
 	}
 
 	switch c.Auth.Mode {

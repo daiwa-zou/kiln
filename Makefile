@@ -5,6 +5,11 @@ LDFLAGS := -X '$(PKG)/internal/observability.Version=$(VERSION)'
 
 TEST_DB_URL := postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
 
+# The PgBouncer image the compose stack, the chart, CI and `make test-pooled`
+# run. Pinned by digest; bump docker-compose.yml, deploy/helm/kiln/values.yaml
+# and .github/workflows/ci.yml with it.
+POOLER_IMAGE := edoburu/pgbouncer:v1.26.0-p0@sha256:b17551c776ef7e5769ef80b956d20f85e2fd25dd8912d31d58f782aad495b711
+
 # The local-hosting configuration: fake agent runner, filesystem blobs, and a
 # kiln_dev database kept apart from the one the integration tests drop. Defined
 # up here because the admin targets below use it too, not just the dev section.
@@ -14,10 +19,10 @@ DEV_CONFIG := config.dev.toml
 GOLANGCI := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
 .PHONY: help all build clean fmt tidy lint vulncheck \
-        test test-verbose test-integration test-claude cover ui ui-check \
+        test test-verbose test-integration test-pooled test-claude cover ui ui-check \
         db-up db-down migrate doctor token status \
         dev dev-cli dev-up dev-seed dev-db migrate-dev dev-build dev-clean \
-        image compose-up compose-down manifests helm-lint \
+        image compose-up compose-down manifests helm-lint helm-test \
         k8s-up k8s-down k8s-purge k8s-status k8s-logs k8s-token \
         k8s-sync k8s-reauth k8s-shell k8s-doctor k8s-migrate
 
@@ -56,6 +61,54 @@ test-verbose: ## unit tests, verbose and race-enabled
 # with spurious "relation ... does not exist" errors.
 test-integration: db-up ## full suite against a real Postgres
 	KILN_TEST_DATABASE_URL="$(TEST_DB_URL)" go test ./... -count=1 -p 1
+
+# The same suite through PgBouncer in transaction mode: the proof that nothing
+# kiln does relies on session state. CI runs it in both exec modes:
+#
+#   make test-pooled                       # cache_describe, the pooled default
+#   make test-pooled MODE=cache_statement  # pgx's default, via PgBouncer's
+#                                          # prepared-statement tracking
+#
+# MODE=cache_describe runs PgBouncer with max_prepared_statements=0, as a
+# pooler without prepared-statement tracking would: if the mode did not reach
+# pgx, named statements would fail with 42P05 and the run would say so.
+#
+# It runs against a private database it creates (kiln_pooled_<pid>) and drops
+# afterwards, never kiln or kiln_dev, so it can run beside test-integration.
+# POOLED_DB=name reuses an existing database instead and leaves it in place.
+# The pooler reaches the kiln-test container through the host's published
+# port; on Linux Docker set POOLER_DB_HOST to the bridge gateway (172.17.0.1).
+MODE           ?= cache_describe
+POOLER_DB_HOST ?= host.docker.internal
+POOLER_PORT    ?= 56432
+
+test-pooled: db-up ## full suite through PgBouncer (MODE=cache_describe|cache_statement)
+	@set -eu; \
+	case "$(POOLED_DB)" in kiln|kiln_dev) echo "refusing POOLED_DB=$(POOLED_DB): the suite drops its schema"; exit 1;; esac; \
+	name=kiln-pgbouncer-$$$$; db="$(POOLED_DB)"; own=0; \
+	if [ -z "$$db" ]; then db=kiln_pooled_$$$$; own=1; fi; \
+	cleanup() { \
+		docker rm -f "$$name" >/dev/null 2>&1 || true; \
+		if [ "$$own" = 1 ]; then docker exec kiln-test psql -U kiln -qc "DROP DATABASE IF EXISTS $$db WITH (FORCE)" >/dev/null 2>&1 || true; fi; \
+	}; \
+	trap cleanup EXIT; trap 'exit 130' INT TERM; \
+	if [ "$$own" = 1 ]; then docker exec kiln-test psql -U kiln -qc "CREATE DATABASE $$db" >/dev/null; fi; \
+	docker run -d --rm --name "$$name" -p 127.0.0.1:$(POOLER_PORT):6432 \
+		-v "$(CURDIR)/deploy/pgbouncer:/etc/pgbouncer:ro" \
+		-e PGBOUNCER_DB_HOST=$(POOLER_DB_HOST) -e PGBOUNCER_RESOLVE_HOST=1 -e PGBOUNCER_DB_PORT=55432 \
+		-e PGBOUNCER_DB_NAME="$$db" -e PGBOUNCER_DB_PASSWORD=kiln \
+		-e PGBOUNCER_SET="default_pool_size=20 query_wait_timeout=10 $(if $(filter cache_describe,$(MODE)),max_prepared_statements=0)" \
+		--entrypoint /bin/sh $(POOLER_IMAGE) /etc/pgbouncer/start.sh >/dev/null; \
+	ready=0; deadline=$$(( $$(date +%s) + 60 )); \
+	while [ "$$(date +%s)" -lt "$$deadline" ]; do \
+		if docker exec "$$name" psql "postgres://kiln:kiln@127.0.0.1:6432/$$db?sslmode=disable" -qtAc 'select 1' >/dev/null 2>&1; then ready=1; break; fi; \
+		sleep 1; \
+	done; \
+	if [ "$$ready" != 1 ]; then docker logs "$$name" 2>&1 | tail -20; echo "pgbouncer never became ready"; exit 1; fi; \
+	echo "pooled suite: $$db through pgbouncer on :$(POOLER_PORT), $(MODE)"; \
+	KILN_TEST_DIRECT_DATABASE_URL="postgres://kiln:kiln@localhost:55432/$$db?sslmode=disable" \
+	KILN_TEST_DATABASE_URL="postgres://kiln:kiln@localhost:$(POOLER_PORT)/$$db?sslmode=disable&default_query_exec_mode=$(MODE)" \
+		go test ./... -count=1 -p 1
 
 # Coverage profile plus the badge CI commits. Needs the database for the same
 # reason CI measures coverage in the integration job: without it internal/store
@@ -350,6 +403,13 @@ k8s-shell: ## a shell in the worker pod
 
 helm-lint: ## lint the Helm chart
 	helm lint deploy/helm/kiln --set secrets.existingSecret=kiln-secrets
+	helm lint deploy/helm/kiln --set secrets.existingSecret=kiln-secrets \
+		--set pooler.enabled=true --set config.database.host=postgres
+
+# What CI runs for the chart: lint, then assertions over rendered output and a
+# kubeconform schema check (scripts/helm-assert.sh).
+helm-test: helm-lint ## lint the chart and assert on its renders
+	./scripts/helm-assert.sh
 
 # Renders the chart to plain YAML for GitOps repositories and Kustomize
 # overlays. Deliberately gitignored: a generated manifest committed beside its

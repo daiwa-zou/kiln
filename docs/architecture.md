@@ -1083,8 +1083,13 @@ revocable.
 repository (or App installation), taken from the payload only *after* its HMAC
 verified, because behind an ingress every delivery shares the proxy's address
 and GitHub never redelivers a 429. Deliveries that fail verification are limited
-by peer address instead (never `X-Forwarded-For`), and signed ones never touch
-that bucket. **Uploads** get a 5-minute timeout
+by client address instead, and signed ones never touch that bucket.
+Unauthenticated writes are keyed the same way. The client address is the TCP
+peer unless the peer is in `trusted_proxies`. Then `X-Forwarded-For` is walked
+right to left past the trusted hops, at most 32 entries, and the first untrusted
+address wins. The header is never read from any other peer, and `RemoteAddr` is
+never rewritten. IPv6 callers are bucketed per /64. The bucket map is capped at
+10,000 keys. Beyond that it is in a degraded mode, and new keys share 64 overflow buckets chosen by a seeded hash. **Uploads** get a 5-minute timeout
 instead of the API-wide 30 seconds, and accept up to 32 MiB per file — a reverse
 proxy in front of kiln needs its body limit raised to match (nginx:
 `client_max_body_size 34m`).
@@ -1216,6 +1221,7 @@ deliver them.
 | `mcp_authorization_server` | — | Issuer URL of an OAuth authorization server that mints tokens for `/mcp`. Empty omits `authorization_servers` from the protected-resource metadata. |
 | `log_level` | `info` | |
 | `cors_origins` | — | Empty means same-origin only. |
+| `trusted_proxies` | — | CIDRs or bare IPs of reverse proxies whose `X-Forwarded-For` is believed when keying unauthenticated rate limits. Empty means the header is never read. List only proxies that append the address they received from, and list every hop. Startup warns on IPv4 /8, IPv6 /32 or broader. |
 
 ### Database
 
@@ -1230,6 +1236,7 @@ deliver them.
 | `database.min_conns` | `2` | |
 | `database.max_conn_lifetime` | `1h` | |
 | `database.max_conn_idle_time` | `15m` | |
+| `database.query_exec_mode` | — (pgx default) | `cache_statement`, `cache_describe` or `exec`. Behind a transaction-mode pooler set `cache_describe`; see [deployment.md](deployment.md#connection-pooling). |
 
 ### Agent
 

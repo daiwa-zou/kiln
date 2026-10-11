@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/daiwa-zou/kiln/internal/config"
 )
 
 func TestLoopbackAddr(t *testing.T) {
@@ -59,6 +64,39 @@ func TestServeAndDrainCancelsAfterServeFails(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("serveAndDrain hung: the failed listener never cancelled the background goroutines")
+	}
+}
+
+func TestTrustedProxiesLogsListAndWarnings(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+
+	got, err := trustedProxies(&config.Config{TrustedProxies: []string{"10.0.0.5", " 0.0.0.0/0"}}, log)
+	if err != nil {
+		t.Fatalf("trustedProxies: %v", err)
+	}
+	if len(got) != 2 || got[0].String() != "10.0.0.5/32" {
+		t.Errorf("prefixes = %v", got)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "0.0.0.0/0") {
+		t.Errorf("no warning for the all-addresses prefix:\n%s", out)
+	}
+	if !strings.Contains(out, "level=INFO") || !strings.Contains(out, "10.0.0.5/32") {
+		t.Errorf("effective list not logged at info:\n%s", out)
+	}
+
+	// An empty list is today's behaviour and says nothing about proxies.
+	buf.Reset()
+	if got, err := trustedProxies(&config.Config{}, log); err != nil || len(got) != 0 {
+		t.Errorf("empty list = %v, %v", got, err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("empty list logged:\n%s", buf.String())
+	}
+
+	if _, err := trustedProxies(&config.Config{TrustedProxies: []string{"nope"}}, log); err == nil {
+		t.Error("a bad entry was accepted")
 	}
 }
 

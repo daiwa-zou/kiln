@@ -45,9 +45,12 @@ const maxWebhookBytes = 1 << 20
 // So the two cases are limited on different keys:
 //
 //   - A delivery that fails verification has no identity worth trusting, so it
-//     is limited by the peer address (never X-Forwarded-For, which the sender
-//     writes). Behind a proxy that address is shared, which is acceptable here:
-//     it can only slow down other unauthenticated requests, never a signed one.
+//     is limited by the client address. That is the peer address, unless the
+//     peer is a configured trusted proxy, in which case it is the address the
+//     proxy appended to X-Forwarded-For (see clientip.go); entries the sender
+//     wrote itself are never believed. Without a trusted proxy list the
+//     address behind a proxy is shared, which is acceptable here: it can only
+//     slow down other unauthenticated requests, never a signed one.
 //   - A delivery whose HMAC verified came from the holder of the webhook
 //     secret, so its repository (or installation) is trustworthy, and that is
 //     the key. One noisy repository can then only exhaust its own bucket.
@@ -98,7 +101,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 // rejectHook answers a delivery that failed before verification, charging it to
-// the peer address's bucket. Once that bucket is empty the answer becomes a
+// the client address's bucket. Once that bucket is empty the answer becomes a
 // 429, which is what bounds an unauthenticated flood.
 func (s *Server) rejectHook(w http.ResponseWriter, r *http.Request, status int, msg string) {
 	if !s.hookRejectLimit.take(limiterKey(r)) {

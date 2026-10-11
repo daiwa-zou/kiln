@@ -40,6 +40,10 @@ spec:
       # so paid-for agent work lands instead of being requeued. Cutting this
       # below drainGrace turns every deploy into wasted spend.
       terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      {{- if .Values.pooler.enabled }}
+      initContainers:
+        {{- include "kiln.poolerWaitInit" . | nindent 8 }}
+      {{- end }}
       containers:
         - name: worker
           image: {{ include "kiln.image" . }}
@@ -49,6 +53,7 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           env:
             {{- include "kiln.env" . | nindent 12 }}
+            {{- include "kiln.databaseEnv" (dict "root" . "direct" false) | nindent 12 }}
             {{- include "kiln.secretEnv" . | nindent 12 }}
             - name: KILN_WORKER_POLL_INTERVAL
               value: {{ .Values.config.worker.pollInterval | quote }}
@@ -65,7 +70,7 @@ spec:
             # Databases size differently per role: the API issues many short
             # queries, a worker holds a few long transactions during import.
             - name: KILN_DATABASE_MAX_CONNS
-              value: {{ .Values.config.database.workerMaxConns | quote }}
+              value: {{ ternary .Values.pooler.workerMaxConns .Values.config.database.workerMaxConns .Values.pooler.enabled | quote }}
           {{- if .Values.config.metricsAddr }}
           ports:
             # A worker's only listener. Scrape it for queue depth, build

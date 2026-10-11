@@ -34,12 +34,15 @@ spec:
           image: {{ include "kiln.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # Advisory-locked and idempotent, so parallel releases serialize
-          # rather than race, and a re-run applies nothing.
+          # rather than race, and a re-run applies nothing. Always direct to
+          # Postgres, never through the pooler: this hook runs before a
+          # chart-deployed pooler exists, and DDL gains nothing from one.
           args: ["admin", "migrate"]
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           env:
             {{- include "kiln.env" . | nindent 12 }}
+            {{- include "kiln.databaseEnv" (dict "root" . "direct" true) | nindent 12 }}
             {{- include "kiln.secretEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.migrations.resources | nindent 12 }}
