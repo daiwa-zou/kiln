@@ -52,7 +52,10 @@ envval() {
 	'
 }
 
-has() { grep -q -- "$1"; }
+# Reads all of its input: grep -q exits at the first match, and a producer
+# piped into it (doc ... | has) can then die of SIGPIPE, which pipefail turns
+# into a failed check.
+has() { grep -- "$1" >/dev/null; }
 
 expect_env() { # label, doc-file, var, want
 	local got
