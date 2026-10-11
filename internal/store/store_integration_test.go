@@ -89,17 +89,29 @@ func TestMigrateConcurrentlyIsSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	type result struct {
+		applied []int
+		err     error
+	}
 	const racers = 4
-	errs := make(chan error, racers)
+	results := make(chan result, racers)
 	for range racers {
 		go func() {
-			_, err := Migrate(ctx, pool)
-			errs <- err
+			applied, err := Migrate(ctx, pool)
+			results <- result{applied, err}
 		}()
 	}
+	// Each migration is reported by exactly the run that applied it: a run
+	// that lost the race for a version must not claim it too, or an operator
+	// reading two rollout logs sees the same migration applied twice.
+	reported := map[int]int{}
 	for range racers {
-		if err := <-errs; err != nil {
-			t.Errorf("concurrent Migrate: %v", err)
+		r := <-results
+		if r.err != nil {
+			t.Errorf("concurrent Migrate: %v", r.err)
+		}
+		for _, v := range r.applied {
+			reported[v]++
 		}
 	}
 
@@ -116,6 +128,14 @@ func TestMigrateConcurrentlyIsSafe(t *testing.T) {
 	}
 	if count != len(migrations) {
 		t.Errorf("schema_migrations has %d rows, want %d; a migration was applied twice or skipped", count, len(migrations))
+	}
+	for _, m := range migrations {
+		if n := reported[m.version]; n != 1 {
+			t.Errorf("migration %d was reported applied by %d runs, want exactly 1", m.version, n)
+		}
+	}
+	if len(reported) != len(migrations) {
+		t.Errorf("runs reported %d distinct migrations, want %d", len(reported), len(migrations))
 	}
 }
 

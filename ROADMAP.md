@@ -158,7 +158,10 @@ Still open, and now planned as M11 items 1 and 2: activate `digests` for
 review-queue notifications, and revisit the permissive `member`-writes
 default (members write content; owners shape connectors, credentials, and
 membership -- the split holds, but the default role granted on sign-in
-deserves a second look).
+deserves a second look). *M11 item 1 corrected the premise: the default
+role applies to memberships `kiln admin token create --org` creates, and
+is now `auth.default_role`; GitHub sign-in creates no membership at all.
+Auto-joining a sign-in to an org is a follow-up.*
 
 ## Target deployment architecture
 
@@ -213,8 +216,6 @@ makes the cloud tier safe today, and is retired by the item:
 
 | Open item | Until it lands |
 | --- | --- |
-| M9·1 Connection pooler | The chart's ceilings (10 API × 20 conns, 20 workers × 6) reach 320 connections. Put RDS Proxy or PgBouncer in front, or keep `maxReplicas` low enough to fit `max_connections` |
-| M9·2 Real client addresses | Every anonymous caller behind the load balancer, GitHub included, shares one rate-limit bucket. Raise the API's limits and rate-limit at the load balancer or WAF |
 | M9·5 Scheduler role | Polling, sweeps, and requeues run in every worker. Harmless at a handful of workers; hold the worker count there |
 
 **After M10.** The API runs as three profiles of one image (reader,
@@ -222,15 +223,25 @@ control, ingress — uploads possibly a fourth), each with its own
 Deployment and HPA; the CDN absorbs most reads; workers scale on queue
 depth, down to zero.
 
-## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); item 2's webhook half shipped (PR #87); 1, 2's `RealIP` half, and 5 open
+## M9 — Make Builds Parallel — items 1–4 shipped (3–4 2026-07-30, PR #27; 2's webhook half PR #87; 1 and 2's trusted-proxy half 2026-10-10); 5 open
 
 *Items 3 and 4 shipped together: `agent.unit_concurrency` drives the bounded
 pool in `internal/jobs/fanout.go`, and the run budget is a reservation taken
 before each call. PR #87 keyed verified webhook deliveries on their
 repository or installation (`hookSubject` in `internal/api/webhook.go`), so
-the cross-tenant 429 is gone. Items 1 and 5, and item 2's `RealIP` half,
-have no code yet, and they are now the urgent ones — raising concurrency invites adding worker pods, which is
-exactly what the pooler gates and what multiplies the per-worker timers.*
+the cross-tenant 429 is gone. Item 1 shipped: kiln is correct behind a
+transaction-mode pooler (migrations take a transaction-scoped lock,
+`database.query_exec_mode = cache_describe` leaves no named statements, and a
+source scan pins the absence of session state), compose runs api and workers
+through PgBouncer, the chart can deploy one (`pooler.enabled`), and CI runs the
+integration suite through it in both exec modes; sizing is in
+[docs/deployment.md](docs/deployment.md#connection-pooling). Item 2's other half
+shipped too: `trusted_proxies` lets unauthenticated callers behind a load
+balancer key on the address the proxy appended to `X-Forwarded-For`
+(`internal/api/clientip.go`), IPv6 keys are per /64, and the limiter map is
+capped. Item 5 has no code yet, and it is now the urgent one — raising
+concurrency invites adding worker pods, which multiplies the per-worker
+timers.*
 
 *Designed 2026-07-30 from a scaling review. The roles are already split and
 already scale independently; what does not scale is one bench. A run walks
@@ -249,7 +260,9 @@ topology; every item pays off at the shipped two-role deployment.*
 2. **Real client addresses** — `limiterKey` falls back to `r.RemoteAddr`
    with no `RealIP` middleware anywhere, so behind an ingress every
    unauthenticated caller shares one bucket. Add trusted-proxy `RealIP`
-   for that path. The webhook half shipped in PR #87: a delivery whose
+   for that path. *Shipped as `trusted_proxies`: headers are read only from
+   a listed peer and walked right to left; chi's `RealIP` was rejected
+   because it trusts any peer and rewrites `RemoteAddr`.* The webhook half shipped in PR #87: a delivery whose
    HMAC verifies is limited on its repository (else its installation), the
    correct tenant boundary regardless of replica count, and only
    unverified deliveries still share the peer-address bucket.
@@ -280,7 +293,9 @@ wikilink to a page written by another unit of the same run resolves rather
 than validating as dead; a run canceled mid-flight still imports completed
 units in one transaction and is still ledgered; a run with `run_budget_usd`
 set never exceeds it at any concurrency, checked against the ledger rather
-than the summary; with the scheduler running and workers at zero, the
+than the summary; the integration suite passes through PgBouncer in
+transaction mode, in both `cache_describe` and `cache_statement`; with the
+scheduler running and workers at zero, the
 queue-depth gauge is still published; with N workers, exactly one GC sweep
 occurs per hour.
 
@@ -330,7 +345,7 @@ network policies enabled, a worker cannot open a connection to a
 destination outside its allowlist, and a pod outside the scraper namespace
 cannot read `/metrics`.
 
-## M11 — The Edges Catch Up — items 3 and 9 shipped (2026-10-10)
+## M11 — The Edges Catch Up — items 1, 3 and 9 shipped (2026-10-10)
 
 *Designed 2026-10-10 from a codebase review. The build engine is the
 strongest part of kiln; what lags is around it — nobody is told when the
@@ -341,12 +356,28 @@ remaining items land (item 5 hosts item 2 below); it comes ahead of M10,
 which waits for read traffic to ask for it. Item 9 depended on nothing and
 landed first.*
 
-1. **Default sign-in role is configurable** — `auth/pg.go` inserts the
+1. **Default role for CLI-minted memberships is configurable** ✅ shipped
+   (2026-10-10) —
+   `auth/pg.go` inserts the
    sign-in membership with the column default, `member`, which writes
    content and steering. Add `auth.default_role` (`viewer` | `member`),
    defaulting to `member` so upgrades change nothing; hosted deployments
    set `viewer`. Closes the M8 open question without deciding it for
    everyone.
+   - *Premise corrected.* GitHub sign-in creates no membership at all:
+     `UpsertGitHubUser` writes only `users`, so a fresh sign-in sees no
+     benches. The column-default insert in `auth/pg.go` is `auth.Mint`,
+     the `kiln admin token create --org` path, and that is where the
+     setting applies. Anything else is refused at startup (`owner`
+     included, and matching is exact). A re-mint leaves an existing
+     membership's role alone, and `--admin` tokens write regardless of
+     role. The legacy UI shows a viewer's 403 as read-only copy rather
+     than an error.
+   - *Follow-ups, not done here.* Sign-in auto-join — giving a GitHub
+     sign-in a membership at all — is a new access grant and needs a
+     product decision. And the first-user admin bootstrap in
+     `store/users.go` (`NOT EXISTS (SELECT 1 FROM users)` then insert)
+     races: two concurrent first sign-ins can both become admin.
 2. **Digests** — the `digests` table (`001_initial.sql`: channel, target,
    cadence, enabled, last_sent_at) has had no reader or writer since M0.
    The scheduler role sends, per enabled row, what changed since
@@ -416,6 +447,11 @@ landed first.*
    first layout fills about a third of the canvas and its labels overlap.
    Fit the layout to the viewport on load, label nodes by title, and hide
    colliding labels until zoomed in.
+   *In progress: the toolchain and the bridge (8a) are in — `web/`, the
+   committed `internal/api/ui/dist`, the `ui` CI job, `window.kiln` in
+   `route()`, characterization fixtures for the legacy renderer, and a
+   token contrast test. No view is ported yet; the type contract (8b) is
+   next.*
 9. **The reader reads like prose** ✅ shipped (2026-10-10) — fixes from a
    UI review on 2026-10-10, small enough to land in today's `app.js` ahead
    of item 8. The port carries them over unchanged.
@@ -451,8 +487,8 @@ landed first.*
      search for the slug, the nearest titles and the Index; a failed fetch
      still shows the error with Reload.
 
-**Verification:** with `auth.default_role = "viewer"`, a fresh sign-in can
-read but every write answers 403; a review item filed after a digest's
+**Verification:** with `auth.default_role = "viewer"`, a token minted with
+`--org` can read but every write answers 403; a review item filed after a digest's
 `last_sent_at` appears in exactly one digest and a disabled row sends
 nothing; a digest target resolving to a private address is refused; an MCP
 `propose_correction` under a read-scoped token is refused, and under a

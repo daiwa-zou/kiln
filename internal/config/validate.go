@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -50,6 +51,11 @@ func (c *Config) Validate() error {
 	if c.Database.MinConns > c.Database.MaxConns {
 		problems = append(problems, fmt.Sprintf(
 			"database: min_conns (%d) exceeds max_conns (%d)", c.Database.MinConns, c.Database.MaxConns))
+	}
+	if m := c.Database.QueryExecMode; m != "" && !slices.Contains(ValidQueryExecModes, m) {
+		problems = append(problems, fmt.Sprintf(
+			"database: unknown query_exec_mode %q (want empty for the pgx default, or one of %s)",
+			m, strings.Join(ValidQueryExecModes, ", ")))
 	}
 
 	switch c.Storage.Backend {
@@ -157,6 +163,10 @@ func (c *Config) Validate() error {
 			c.Worker.StaleAfter, c.Worker.HeartbeatInterval))
 	}
 
+	if _, err := ParseTrustedProxies(c.TrustedProxies); err != nil {
+		problems = append(problems, err.Error())
+	}
+
 	switch c.Auth.Mode {
 	case AuthToken, AuthNone:
 	case "":
@@ -164,6 +174,18 @@ func (c *Config) Validate() error {
 		// always fills it in.
 	default:
 		problems = append(problems, fmt.Sprintf("auth: unknown mode %q (want token or none)", c.Auth.Mode))
+	}
+
+	// "owner" is deliberately not accepted: a default that hands out
+	// connector, credential and membership control to whoever is minted in
+	// is never what a typo should produce. Matching is exact, so "Viewer"
+	// fails here rather than silently granting the column default.
+	switch c.Auth.DefaultRole {
+	case "viewer", "member":
+	case "":
+		// As with mode: Load fills it in, and Mint treats empty as member.
+	default:
+		problems = append(problems, fmt.Sprintf("auth: unknown default_role %q (want viewer or member)", c.Auth.DefaultRole))
 	}
 
 	if len(problems) == 0 {

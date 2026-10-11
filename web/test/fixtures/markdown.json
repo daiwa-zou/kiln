@@ -1,0 +1,418 @@
+{
+  "generatedFrom": "internal/api/ui/app.js",
+  "bench": {
+    "now": "2026-06-15T12:00:00Z",
+    "pages": [
+      {
+        "slug": "glaze-chemistry",
+        "title": "Glaze chemistry",
+        "type": "concept",
+        "builtAtRef": "r3",
+        "updated": "2026-06-14"
+      },
+      {
+        "slug": "kiln-firing-schedule",
+        "title": "Kiln firing schedule",
+        "type": "concept",
+        "builtAtRef": "r2",
+        "updated": "2026-06-01"
+      },
+      {
+        "slug": "cone-ratings",
+        "title": "Cone ratings",
+        "type": "entity",
+        "builtAtRef": "r1"
+      },
+      {
+        "slug": "reduction-firing",
+        "title": "Reduction firing",
+        "type": "concept",
+        "builtAtRef": "r0",
+        "updated": "2026-05-20T08:30:00Z"
+      },
+      {
+        "slug": "studio-safety",
+        "title": "Studio safety",
+        "type": "synthesis"
+      },
+      {
+        "slug": "clay-bodies",
+        "title": "Clay bodies",
+        "type": "source",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "acquisitions",
+        "title": "Equipment acquisitions",
+        "type": "query",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "kiln-wash",
+        "title": "",
+        "type": "entity",
+        "builtAtRef": "r3"
+      }
+    ],
+    "refs": [
+      "r3",
+      "r2",
+      "r1"
+    ]
+  },
+  "cases": [
+    {
+      "name": "headings at page offset",
+      "src": "# Top\n\n## Section\n\n### Sub\n\nText under it.",
+      "output": {
+        "html": "<h2>Top</h2><h3>Section</h3><h4>Sub</h4><p>Text under it.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "headings at artifact offset",
+      "src": "# Title\n\n## Part\n\nBody.",
+      "headingOffset": 0,
+      "output": {
+        "html": "<h1>Title</h1><h2>Part</h2><p>Body.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "frontmatter is stripped",
+      "src": "---\ntitle: Glaze\ntype: concept\n---\n# Glaze\n\nBody text.",
+      "output": {
+        "html": "<h2>Glaze</h2><p>Body text.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "hard-wrapped paragraph joins",
+      "src": "A paragraph hard wrapped\nat a narrow column\nstays one paragraph.\n\nA second one.",
+      "output": {
+        "html": "<p>A paragraph hard wrapped at a narrow column stays one paragraph.</p><p>A second one.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "emphasis and code",
+      "src": "Some *emphasis*, **strong**, ~~struck~~ and `inline code`.",
+      "output": {
+        "html": "<p>Some <em>emphasis</em>, <strong>strong</strong>, <del>struck</del> and <code>inline code</code>.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "live wikilink shows title",
+      "src": "See [[glaze-chemistry]] for the oxides.",
+      "output": {
+        "html": "<p>See <a class=\"wikilink\" href=\"#/page/glaze-chemistry\">Glaze chemistry</a> for the oxides.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "aliased wikilink",
+      "src": "See [[glaze-chemistry|the glaze page]].",
+      "output": {
+        "html": "<p>See <a class=\"wikilink\" href=\"#/page/glaze-chemistry\">the glaze page</a>.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "dead wikilink keeps slug",
+      "src": "See [[no-such-page]] and [[Another Missing]].",
+      "output": {
+        "html": "<p>See <span class=\"wikilink dead\" title=\"No page for no-such-page yet\">no-such-page</span> and <span class=\"wikilink dead\" title=\"No page for Another Missing yet\">Another Missing</span>.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "wikilink to untitled page",
+      "src": "Use [[kiln-wash]] on shelves.",
+      "output": {
+        "html": "<p>Use <a class=\"wikilink\" href=\"#/page/kiln-wash\">kiln-wash</a> on shelves.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "unordered list",
+      "src": "- one\n- two with [[cone-ratings]]\n- three",
+      "output": {
+        "html": "<ul><li>one</li><li>two with <a class=\"wikilink\" href=\"#/page/cone-ratings\">Cone ratings</a></li><li>three</li></ul>",
+        "cites": []
+      }
+    },
+    {
+      "name": "ordered list",
+      "src": "1. first\n2. second\n3. third",
+      "output": {
+        "html": "<ol><li>first</li><li>second</li><li>third</li></ol>",
+        "cites": []
+      }
+    },
+    {
+      "name": "list then paragraph",
+      "src": "- a\n- b\n\nAfter the list.",
+      "output": {
+        "html": "<ul><li>a</li><li>b</li></ul><p>After the list.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "table",
+      "src": "| Cone | Temp |\n|---|---|\n| 06 | 999 C |\n| 6 | 1222 C |",
+      "output": {
+        "html": "<table><thead><tr><th>Cone</th><th>Temp</th></tr></thead><tbody><tr><td>06</td><td>999 C</td></tr><tr><td>6</td><td>1222 C</td></tr></tbody></table>",
+        "cites": []
+      }
+    },
+    {
+      "name": "fenced code",
+      "src": "```\nconst x = 1 < 2;\n```\n\nAfter.",
+      "output": {
+        "html": "<pre><code>const x = 1 &lt; 2;\n</code></pre><p>After.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "blockquote",
+      "src": "> A quoted line\n> and another.",
+      "output": {
+        "html": "<blockquote>A quoted line</blockquote><blockquote>and another.</blockquote>",
+        "cites": []
+      }
+    },
+    {
+      "name": "horizontal rule",
+      "src": "Above.\n\n---\n\nBelow.",
+      "output": {
+        "html": "<p>Above.</p><hr><p>Below.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "markdown link",
+      "src": "Read [the docs](https://docs.example.org/glaze) and [local](#/page/clay-bodies).",
+      "output": {
+        "html": "<p>Read <a href=\"https://docs.example.org/glaze\" target=\"_blank\" rel=\"noopener\">the docs</a> and <a href=\"#/page/clay-bodies\">local</a>.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "off-origin image becomes a link",
+      "src": "![Firing curve](https://cdn.example.net/curve.png?ref=wiki)",
+      "output": {
+        "html": "<p><a class=\"ext-image\" href=\"https://cdn.example.net/curve.png?ref=wiki\" target=\"_blank\" rel=\"noopener noreferrer\">Firing curve</a><span class=\"hint\"> (external image on cdn.example.net, not loaded)</span></p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "off-origin image without alt",
+      "src": "![](https://cdn.example.net/raw.png)",
+      "output": {
+        "html": "<p><a class=\"ext-image\" href=\"https://cdn.example.net/raw.png\" target=\"_blank\" rel=\"noopener noreferrer\">cdn.example.net</a><span class=\"hint\"> (external image, not loaded)</span></p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "same-origin image",
+      "src": "![Kiln](/api/v1/workspaces/w/figures/abc.png)",
+      "output": {
+        "html": "<figure class=\"page-figure\"><img src=\"/api/v1/workspaces/w/figures/abc.png\" alt=\"Kiln\" loading=\"lazy\" decoding=\"async\" referrerpolicy=\"no-referrer\"><figcaption>Kiln</figcaption></figure>",
+        "cites": []
+      }
+    },
+    {
+      "name": "data image",
+      "src": "![dot](data:image/png;base64,iVBORw0KGgo=)",
+      "output": {
+        "html": "<p>![dot](data:image/png;base64,iVBORw0KGgo=)</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "single citation",
+      "src": "Cone 6 is about 1222 C (notes/cones.md:4-9).",
+      "output": {
+        "html": "<p>Cone 6 is about 1222 C<sup class=\"cite\"><button type=\"button\" class=\"cite-btn\" data-src=\"notes/cones.md\" data-lines=\"4–9\" aria-label=\"Source 1, lines 4 to 9\">1</button></sup>.</p>",
+        "cites": [
+          {
+            "path": "notes/cones.md",
+            "ranges": [
+              "4–9"
+            ],
+            "num": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "en dash citation",
+      "src": "Bisque first (notes/firing.md:1–8).",
+      "output": {
+        "html": "<p>Bisque first<sup class=\"cite\"><button type=\"button\" class=\"cite-btn\" data-src=\"notes/firing.md\" data-lines=\"1–8\" aria-label=\"Source 1, lines 1 to 8\">1</button></sup>.</p>",
+        "cites": [
+          {
+            "path": "notes/firing.md",
+            "ranges": [
+              "1–8"
+            ],
+            "num": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "multi-file citation",
+      "src": "Both agree (a.md:3, b.md:4-5, 7).",
+      "output": {
+        "html": "<p>Both agree<sup class=\"cite\"><button type=\"button\" class=\"cite-btn\" data-src=\"a.md\" data-lines=\"3\" aria-label=\"Source 1, line 3\">1</button></sup><sup class=\"cite\"><button type=\"button\" class=\"cite-btn\" data-src=\"b.md\" data-lines=\"4–5, 7\" aria-label=\"Source 2, lines 4 to 5, 7\">2</button></sup>.</p>",
+        "cites": [
+          {
+            "path": "a.md",
+            "ranges": [
+              "3"
+            ],
+            "num": 1
+          },
+          {
+            "path": "b.md",
+            "ranges": [
+              "4–5",
+              "7"
+            ],
+            "num": 2
+          }
+        ]
+      }
+    },
+    {
+      "name": "repeated citation numbers once",
+      "src": "First (x.md:1). Again (x.md:2). Other (y.md:3).",
+      "output": {
+        "html": "<p>First<sup class=\"cite\"><button type=\"button\" class=\"cite-btn\" data-src=\"x.md\" data-lines=\"1\" aria-label=\"Source 1, line 1\">1</button></sup>. Again<sup class=\"cite\"><button type=\"button\" class=\"cite-btn\" data-src=\"x.md\" data-lines=\"2\" aria-label=\"Source 1, line 2\">1</button></sup>. Other<sup class=\"cite\"><button type=\"button\" class=\"cite-btn\" data-src=\"y.md\" data-lines=\"3\" aria-label=\"Source 2, line 3\">2</button></sup>.</p>",
+        "cites": [
+          {
+            "path": "x.md",
+            "ranges": [
+              "1",
+              "2"
+            ],
+            "num": 1
+          },
+          {
+            "path": "y.md",
+            "ranges": [
+              "3"
+            ],
+            "num": 2
+          }
+        ]
+      }
+    },
+    {
+      "name": "citation inside code span stays code",
+      "src": "Literal `(x.md:1)` here, and `y.md:4` as a cite.",
+      "output": {
+        "html": "<p>Literal <code>(x.md:1)</code> here, and<sup class=\"cite\"><button type=\"button\" class=\"cite-btn\" data-src=\"y.md\" data-lines=\"4\" aria-label=\"Source 1, line 4\">1</button></sup> as a cite.</p>",
+        "cites": [
+          {
+            "path": "y.md",
+            "ranges": [
+              "4"
+            ],
+            "num": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "citation lead-in word",
+      "src": "This holds (see glazes/notes.md:10-12).",
+      "output": {
+        "html": "<p>This holds (see glazes/notes.md:10-12).</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "parenthetical that is not a citation",
+      "src": "Hot (very hot, really) kilns.",
+      "output": {
+        "html": "<p>Hot (very hot, really) kilns.</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "heading with citation",
+      "src": "## Firing (notes/firing.md:2)\n\nBody.",
+      "output": {
+        "html": "<h3>Firing</h3><p>Body.</p>",
+        "cites": [
+          {
+            "path": "notes/firing.md",
+            "ranges": [
+              "2"
+            ],
+            "num": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "hostile script tag",
+      "src": "<script>alert(1)</script> and <img src=x onerror=alert(1)>",
+      "output": {
+        "html": "<p>&lt;script&gt;alert(1)&lt;/script&gt; and &lt;img src=x onerror=alert(1)&gt;</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "hostile javascript link",
+      "src": "[click](javascript:alert(1)) and [x](JaVaScRiPt:alert(2))",
+      "output": {
+        "html": "<p>[click](javascript:alert(1)) and [x](JaVaScRiPt:alert(2))</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "hostile attribute break in link",
+      "src": "[a](https://e.example/\"onmouseover=\"alert(1)) [[x\" onclick=\"y]]",
+      "output": {
+        "html": "<p><a href=\"https://e.example/&quot;onmouseover=&quot;alert(1\" target=\"_blank\" rel=\"noopener\">a</a>) <span class=\"wikilink dead\" title=\"No page for x&quot; onclick=&quot;y yet\">x&quot; onclick=&quot;y</span></p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "hostile image url",
+      "src": "![x](javascript:alert(1)) ![y](https://e.example/a.png\"onerror=\"alert(1))",
+      "output": {
+        "html": "<p>![x](javascript:alert(1)) <a class=\"ext-image\" href=\"https://e.example/a.png&quot;onerror=&quot;alert(1\" target=\"_blank\" rel=\"noopener noreferrer\">y</a><span class=\"hint\"> (external image on e.example, not loaded)</span>)</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "hostile wikilink alias",
+      "src": "[[glaze-chemistry|<b onmouseover=alert(1)>bold</b>]]",
+      "output": {
+        "html": "<p><a class=\"wikilink\" href=\"#/page/glaze-chemistry\">&lt;b onmouseover=alert(1)&gt;bold&lt;/b&gt;</a></p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "hostile entities",
+      "src": "&lt;script&gt; &amp; &#x3C;svg/onload=alert(1)&#x3E;",
+      "output": {
+        "html": "<p>&amp;lt;script&amp;gt; &amp;amp; &amp;#x3C;svg/onload=alert(1)&amp;#x3E;</p>",
+        "cites": []
+      }
+    },
+    {
+      "name": "empty body",
+      "src": "",
+      "output": {
+        "html": "",
+        "cites": []
+      }
+    }
+  ]
+}

@@ -49,6 +49,12 @@ type Config struct {
 	// CORSOrigins are browser origins allowed to call the API, for a
 	// separately hosted frontend. Empty means same-origin only.
 	CORSOrigins []string `mapstructure:"cors_origins"`
+	// TrustedProxies are the CIDRs (or bare addresses) of reverse proxies
+	// whose X-Forwarded-For is believed when keying unauthenticated rate
+	// limits. Empty means headers are never read and the caller is the TCP
+	// peer, which behind a load balancer is the balancer itself. List only
+	// proxies that append the address they received from.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
 
 	Database Database `mapstructure:"database"`
 	Storage  Storage  `mapstructure:"storage"`
@@ -121,6 +127,11 @@ const (
 // Auth holds API authentication settings.
 type Auth struct {
 	Mode AuthMode `mapstructure:"mode"`
+	// DefaultRole is the org role a membership gets when `kiln admin token
+	// create --org` creates it: "member" (writes content and steering) or
+	// "viewer" (reads only). Kept as a plain string because config must not
+	// import store, which owns the role list.
+	DefaultRole string `mapstructure:"default_role"`
 }
 
 // Database holds Postgres connection and pool settings.
@@ -142,7 +153,21 @@ type Database struct {
 	MinConns        int32         `mapstructure:"min_conns"`
 	MaxConnLifetime time.Duration `mapstructure:"max_conn_lifetime"`
 	MaxConnIdleTime time.Duration `mapstructure:"max_conn_idle_time"`
+
+	// QueryExecMode selects how pgx sends queries: empty keeps pgx's default
+	// (named server-side prepared statements, cached per connection), which a
+	// transaction-mode pooler without prepared-statement tracking breaks.
+	// Behind PgBouncer or RDS Proxy set cache_describe: it keeps parameter
+	// types server-inferred but leaves no named statement on the server
+	// connection. See ValidQueryExecModes for the accepted values.
+	QueryExecMode string `mapstructure:"query_exec_mode"`
 }
+
+// ValidQueryExecModes are the accepted database.query_exec_mode values, in
+// pgx's own spelling. describe_exec (pgx documents it as unsafe behind
+// poolers) and simple_protocol (client-side argument interpolation) are
+// deliberately absent.
+var ValidQueryExecModes = []string{"cache_statement", "cache_describe", "exec"}
 
 // StorageBackend selects where blobs live.
 type StorageBackend string

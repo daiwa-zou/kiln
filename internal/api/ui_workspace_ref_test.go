@@ -1,16 +1,22 @@
 package api
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// The UI has no JS test harness, so these are source-level guards for the
-// rules that keep it safe: it routes by workspace id (slugs repeat across
-// orgs, and a bare slug can resolve to someone else's bench), builds every
-// workspace URL through encodeURIComponent, and stays inside the CSP, which
-// forbids inline styles and inline handlers.
+// Source-level guards for the rules that keep the UI safe: it routes by
+// workspace id (slugs repeat across orgs, and a bare slug can resolve to
+// someone else's bench), builds every workspace URL through
+// encodeURIComponent, and stays inside the CSP, which forbids inline styles
+// and inline handlers. They read the legacy files from the embed and the
+// typed UI's sources (web/) from disk, so they run in the Go suite without
+// Node. Behaviour is tested in web/test under vitest; these catch the rules a
+// reviewer has to otherwise remember.
 
 func uiSource(t *testing.T, name string) string {
 	t.Helper()
@@ -21,12 +27,47 @@ func uiSource(t *testing.T, name string) string {
 	return string(b)
 }
 
+// webSources reads every .ts/.tsx file under web/src, keyed by its path
+// relative to the repository root. Missing web/src is a failure, not an empty
+// result: the guards below would otherwise pass by scanning nothing.
+func webSources(t *testing.T) map[string]string {
+	t.Helper()
+	root := filepath.Join("..", "..", "web", "src")
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if ext := filepath.Ext(p); ext != ".ts" && ext != ".tsx" {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out[filepath.ToSlash(strings.TrimPrefix(p, filepath.Join("..", "..")+string(filepath.Separator)))] = string(b)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("reading web/src: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("web/src has no .ts/.tsx files; the guard is out of date")
+	}
+	return out
+}
+
 func TestUIWorkspaceURLsAreEncoded(t *testing.T) {
 	interp := regexp.MustCompile(`/workspaces/\$\{([^}]*(?:\([^)]*\))?[^}]*)\}`)
-	for _, file := range []string{"app.js", "sources.js"} {
-		src := uiSource(t, file)
+	sources := map[string]string{"app.js": uiSource(t, "app.js"), "sources.js": uiSource(t, "sources.js")}
+	for name, src := range webSources(t) {
+		sources[name] = src
+	}
+	for file, src := range sources {
 		matches := interp.FindAllStringSubmatch(src, -1)
-		if len(matches) == 0 {
+		// The legacy files build dozens of workspace URLs; finding none means
+		// the pattern drifted. A web/src file may simply not build any yet.
+		if len(matches) == 0 && !strings.HasPrefix(file, "web/") {
 			t.Fatalf("%s: found no workspace URLs; the guard is out of date", file)
 		}
 		for _, m := range matches {
@@ -96,8 +137,22 @@ func TestUIRoutesByWorkspaceID(t *testing.T) {
 func TestUIStaysInsideTheCSP(t *testing.T) {
 	inlineStyle := regexp.MustCompile(`\sstyle\s*=\s*["'{]`)
 	inlineHandler := regexp.MustCompile(`\son[a-z]+\s*=\s*["']`)
-	for _, file := range []string{"app.js", "sources.js", "index.html"} {
-		src := uiSource(t, file)
+	sources := map[string]string{}
+	// The served shell is the build output; web/index.html is its source.
+	for _, file := range []string{"app.js", "sources.js", "dist/index.html"} {
+		sources["internal/api/ui/"+file] = uiSource(t, file)
+	}
+	shell, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources["web/index.html"] = string(shell)
+	// In JSX, style={...} is the same inline style attribute once rendered,
+	// and a string-valued on*= is an inline handler; onClick={fn} is neither.
+	for name, src := range webSources(t) {
+		sources[name] = src
+	}
+	for file, src := range sources {
 		if loc := inlineStyle.FindStringIndex(src); loc != nil {
 			t.Errorf("%s: inline style attribute: %q", file, src[loc[0]:min(loc[1]+30, len(src))])
 		}

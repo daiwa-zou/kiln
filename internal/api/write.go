@@ -28,6 +28,11 @@ const (
 	maxResolveBytes    = 4 << 10
 )
 
+// errRoleReadOnly is the 403 a viewer's write gets. The UI matches it
+// verbatim to show read-only copy instead of a fault, so changing it here
+// means changing app.js too (ui_errors_test.go holds the two together).
+const errRoleReadOnly = "workspace role does not permit writes"
+
 // canWrite decides whether the caller may mutate this workspace. Admin tokens
 // and auth-disabled deployments may; otherwise any org role except "viewer"
 // may. "member" -- the historical default -- writes, because locking existing
@@ -65,7 +70,7 @@ func (s *Server) guardWrite(w http.ResponseWriter, r *http.Request, maxBytes int
 		return store.WorkspaceRow{}, "", false
 	}
 	if !allowed {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "workspace role does not permit writes"})
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": errRoleReadOnly})
 		return store.WorkspaceRow{}, "", false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)

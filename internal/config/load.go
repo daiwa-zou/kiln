@@ -120,11 +120,11 @@ func searchPaths() []string {
 func bindEnv(v *viper.Viper) error {
 	keys := []string{
 		"http_addr", "metrics_addr", "public_url", "log_level", "cors_origins",
-		"tls_cert", "tls_key", "mcp_authorization_server",
+		"tls_cert", "tls_key", "mcp_authorization_server", "trusted_proxies",
 		"database.url", "database.host", "database.port", "database.name",
 		"database.user", "database.password", "database.sslmode", "database.sslrootcert",
 		"database.max_conns", "database.min_conns",
-		"database.max_conn_lifetime", "database.max_conn_idle_time",
+		"database.max_conn_lifetime", "database.max_conn_idle_time", "database.query_exec_mode",
 		"storage.backend", "storage.endpoint", "storage.region", "storage.bucket",
 		"storage.access_key", "storage.secret_key", "storage.use_ssl",
 		"storage.path_style", "storage.path",
@@ -135,7 +135,7 @@ func bindEnv(v *viper.Viper) error {
 		"agent.run_budget_usd", "agent.max_pages_per_run", "agent.unit_concurrency", "agent.warn_turns",
 		"agent.budget_window",
 		"agent.fake_cost_usd", "agent.fake_fail_units", "agent.fake_latency",
-		"auth.mode",
+		"auth.mode", "auth.default_role",
 		"worker.poll_interval", "worker.stale_after", "worker.permitted_source_roots",
 		"worker.source_poll_interval", "worker.drain_grace", "worker.heartbeat_interval",
 		"github.client_id", "github.app_id",

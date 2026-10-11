@@ -1,0 +1,144 @@
+{
+  "generatedFrom": "internal/api/ui/app.js",
+  "bench": {
+    "now": "2026-06-15T12:00:00Z",
+    "pages": [
+      {
+        "slug": "glaze-chemistry",
+        "title": "Glaze chemistry",
+        "type": "concept",
+        "builtAtRef": "r3",
+        "updated": "2026-06-14"
+      },
+      {
+        "slug": "kiln-firing-schedule",
+        "title": "Kiln firing schedule",
+        "type": "concept",
+        "builtAtRef": "r2",
+        "updated": "2026-06-01"
+      },
+      {
+        "slug": "cone-ratings",
+        "title": "Cone ratings",
+        "type": "entity",
+        "builtAtRef": "r1"
+      },
+      {
+        "slug": "reduction-firing",
+        "title": "Reduction firing",
+        "type": "concept",
+        "builtAtRef": "r0",
+        "updated": "2026-05-20T08:30:00Z"
+      },
+      {
+        "slug": "studio-safety",
+        "title": "Studio safety",
+        "type": "synthesis"
+      },
+      {
+        "slug": "clay-bodies",
+        "title": "Clay bodies",
+        "type": "source",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "acquisitions",
+        "title": "Equipment acquisitions",
+        "type": "query",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "kiln-wash",
+        "title": "",
+        "type": "entity",
+        "builtAtRef": "r3"
+      }
+    ],
+    "refs": [
+      "r3",
+      "r2",
+      "r1"
+    ]
+  },
+  "cases": [
+    {
+      "inner": "notes/cones.md:4-9",
+      "output": [
+        {
+          "path": "notes/cones.md",
+          "ranges": [
+            "4–9"
+          ]
+        }
+      ]
+    },
+    {
+      "inner": "notes/firing.md:1–8",
+      "output": [
+        {
+          "path": "notes/firing.md",
+          "ranges": [
+            "1–8"
+          ]
+        }
+      ]
+    },
+    {
+      "inner": "a.md:3, b.md:4-5, 7",
+      "output": [
+        {
+          "path": "a.md",
+          "ranges": [
+            "3"
+          ]
+        },
+        {
+          "path": "b.md",
+          "ranges": [
+            "4–5",
+            "7"
+          ]
+        }
+      ]
+    },
+    {
+      "inner": "see glazes/notes.md:10-12",
+      "output": null
+    },
+    {
+      "inner": "path with spaces.md:2",
+      "output": [
+        {
+          "path": "path with spaces.md",
+          "ranges": [
+            "2"
+          ]
+        }
+      ]
+    },
+    {
+      "inner": "Source: x.md:1",
+      "output": null
+    },
+    {
+      "inner": "x.md",
+      "output": null
+    },
+    {
+      "inner": "very hot, really",
+      "output": null
+    },
+    {
+      "inner": "x.md:",
+      "output": null
+    },
+    {
+      "inner": "cf. y.md:3",
+      "output": null
+    },
+    {
+      "inner": "",
+      "output": null
+    }
+  ]
+}

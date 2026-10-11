@@ -10,11 +10,8 @@
 # which is a committed artifact, not build output.
 /coverage.*
 
-# Node / Next.js
+# Node (web/). The build output, internal/api/ui/dist, is committed.
 node_modules/
-web/.next/
-web/out/
-web/.turbo/
 
 # Local state
 .env

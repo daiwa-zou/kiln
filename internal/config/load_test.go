@@ -96,6 +96,112 @@ func TestLoadEnvOverridesDefaults(t *testing.T) {
 	}
 }
 
+// A pooled deployment sets the exec mode through the environment (compose and
+// the Helm chart both do), so the key must bind without a config file.
+func TestQueryExecModeEnv(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("KILN_DATABASE_QUERY_EXEC_MODE", "cache_describe")
+
+	cfg, err := Load(Options{Role: RoleWorker})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Database.QueryExecMode != "cache_describe" {
+		t.Errorf("query_exec_mode = %q, want cache_describe from the environment", cfg.Database.QueryExecMode)
+	}
+}
+
+// Adding pooler support must not move anyone who does not use a pooler: the
+// exec mode stays pgx's own default and the pool sizes are what they were.
+func TestPoolerDefaults(t *testing.T) {
+	for _, tt := range []struct {
+		role     Role
+		maxConns int32
+	}{
+		{RoleServer, 20},
+		{RoleWorker, 6},
+	} {
+		isolateEnv(t)
+		cfg, err := Load(Options{Role: tt.role})
+		if err != nil {
+			t.Fatalf("Load(%s): %v", tt.role, err)
+		}
+		if cfg.Database.QueryExecMode != "" {
+			t.Errorf("%s: query_exec_mode = %q, want empty (pgx default)", tt.role, cfg.Database.QueryExecMode)
+		}
+		if cfg.Database.MaxConns != tt.maxConns {
+			t.Errorf("%s: max_conns = %d, want %d", tt.role, cfg.Database.MaxConns, tt.maxConns)
+		}
+		if cfg.Database.MinConns != 2 {
+			t.Errorf("%s: min_conns = %d, want 2", tt.role, cfg.Database.MinConns)
+		}
+	}
+}
+
+// The default is the role the column default always granted, so an upgrade
+// changes nothing; a deployment opts in to viewer through the environment.
+func TestAuthDefaultRole(t *testing.T) {
+	isolateEnv(t)
+	cfg, err := Load(Options{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.DefaultRole != "member" {
+		t.Errorf("default_role = %q, want member", cfg.Auth.DefaultRole)
+	}
+
+	t.Setenv("KILN_AUTH_DEFAULT_ROLE", "viewer")
+	cfg, err = Load(Options{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.DefaultRole != "viewer" {
+		t.Errorf("default_role = %q with KILN_AUTH_DEFAULT_ROLE=viewer, want viewer", cfg.Auth.DefaultRole)
+	}
+
+	// A typo stops startup rather than quietly minting members.
+	t.Setenv("KILN_AUTH_DEFAULT_ROLE", "viewr")
+	if _, err := Load(Options{}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("Load with default_role=viewr: err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestValidateDefaultRole(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Role: RoleServer, HTTPAddr: ":8080",
+			Database: Database{Host: "h", Port: 5432, Name: "kiln", MaxConns: 10, MinConns: 2},
+			Storage:  Storage{Backend: BackendFS, Path: "/tmp/blobs"},
+			Agent:    Agent{Runner: RunnerFake, Timeout: time.Minute, MaxPagesPerRun: 12, UnitConcurrency: 1},
+		}
+	}
+
+	for _, tc := range []struct {
+		role string
+		ok   bool
+	}{
+		{"", true}, // a hand-built Config; Load fills in member
+		{"viewer", true},
+		{"member", true},
+		// owner would hand connector and membership control to anyone minted
+		// in; matching is exact, so a capitalised or misspelt role is refused.
+		{"owner", false},
+		{"admin", false},
+		{"Viewer", false},
+		{"viewr", false},
+	} {
+		c := base()
+		c.Auth.DefaultRole = tc.role
+		err := c.Validate()
+		if tc.ok && err != nil {
+			t.Errorf("default_role %q rejected: %v", tc.role, err)
+		}
+		if !tc.ok && (err == nil || !strings.Contains(err.Error(), "default_role")) {
+			t.Errorf("default_role %q: err = %v, want a default_role problem", tc.role, err)
+		}
+	}
+}
+
 func TestLoadFileOverriddenByEnv(t *testing.T) {
 	isolateEnv(t)
 

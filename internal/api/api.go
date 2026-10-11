@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -80,6 +81,10 @@ type Server struct {
 	// CORSOrigins are origins allowed to call the API from a browser, for a
 	// separately hosted frontend. Empty means same-origin only.
 	CORSOrigins []string
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For is
+	// believed when keying unauthenticated rate limits; see clientip.go.
+	// Empty leaves the headers unread and the request path unchanged.
+	TrustedProxies []netip.Prefix
 	// PublicURL is the absolute origin clients reach this instance on. It is
 	// the only thing that survives a reverse proxy, so the MCP discovery
 	// documents are built from it rather than from the inbound request.
@@ -144,7 +149,7 @@ type Server struct {
 
 	// hookLimit buckets webhook deliveries that passed signature verification,
 	// per repository (or installation). hookRejectLimit buckets those that did
-	// not, per remote host. Both are created by Router(); see handleGitHubWebhook
+	// not, per client address (limiterKey). Both are created by Router(); see handleGitHubWebhook
 	// for why the two are keyed differently.
 	hookLimit       *limiter
 	hookRejectLimit *limiter
@@ -202,6 +207,9 @@ func (s *Server) Router() http.Handler {
 	mux := r
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
+	if len(s.TrustedProxies) > 0 {
+		r.Use(clientIPMiddleware(s.TrustedProxies))
+	}
 	if s.Metrics != nil {
 		// Outermost of the observability middleware so it sees the status
 		// Recoverer produces for a panic, rather than reporting the request

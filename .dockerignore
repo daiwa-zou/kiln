@@ -11,9 +11,9 @@ blobs/
 coverage.*
 *.test
 node_modules/
-web/.next/
-web/out/
-web/.turbo/
+# The UI's sources and toolchain. The image embeds the committed build
+# (internal/api/ui/dist, which the root-anchored dist/ above does not match).
+web/
 .env
 .env.local
 *.local.toml

@@ -115,6 +115,19 @@ the case where there is no reachable URL to give one (see
 --with-worker` runs the first two in one process, which is the right shape for a
 single node.
 
+**The reading UI** is static files embedded in the binary and served from
+`/ui/` under a strict CSP (`script-src 'self'`, no inline code). It is moving
+view by view from hand-written JavaScript (`internal/api/ui/app.js`,
+`sources.js`) to TypeScript and Preact in `web/`, which Vite builds into
+`internal/api/ui/dist`. That output is committed, so building and testing kiln
+needs no Node; CI rebuilds it and fails on any difference. The HTML shell is
+part of the build: its source is `web/index.html`, and `/` serves
+`dist/index.html`. Only hashed files under `/ui/assets/` are cached as
+immutable; `/ui/` and `/ui/index.html` redirect to `/`, and any other miss
+under `/ui/` is a 404, never the shell. The two halves meet at `window.kiln`:
+the legacy router mounts any view the bundle has registered, and falls back to
+its own otherwise.
+
 Only `serve` and `worker` touch Postgres, which is why only those two have
 pool settings. `build` needs neither a server nor a database; `mcp` needs a
 reachable `serve`.
@@ -336,7 +349,7 @@ flowchart LR
         Local["or a local folder"]
     end
     subgraph web["web connector"]
-        URLs["Configured URLs"] --> Fetch["Fetch via pinned dialer"]
+        URLs["Configured URLs"] --> Fetch["Fetch via netguard client<br/><i>pinned dial, public only</i>"]
     end
 
     Clone --> RM["repomap"]
@@ -403,6 +416,24 @@ naming a local path is checked against `worker.permitted_source_roots`, and an
 empty allowlist denies every local path — otherwise a connector config would be
 a local-file-inclusion primitive. The CLI, whose paths come from the operator's
 own command line, is not subject to this.
+
+**Outbound requests.** A URL in a connector config is attacker-shaped for the
+same reason, so every HTTP request kiln makes to an address a user supplied
+goes through one client, `netguard.NewClient`. Its dialer resolves the name,
+refuses the host if *any* answer is loopback, private, link-local, or in one of
+the special ranges `netguard` lists (NAT64, 6to4, Teredo and the other
+IPv4-embedding prefixes among them), and then connects to the vetted IP itself
+rather than to the name. Because that check runs on every connection, a
+redirect hop or a DNS answer that changes between requests meets the same wall
+as the first request. Refusing on any answer rather than on all is deliberate:
+a host with a public A record and a private AAAA, or a split-horizon answer
+mixing the two, is refused outright, because which address a client ends up on
+otherwise depends on dial order, and a rebinding attacker controls both. The
+client never uses a proxy from the environment, speaks https only, strips
+`Authorization` and `Cookie` on redirect, and its callers cap how much of a
+body they read. The git clone is the one exception: git opens its own
+connections, so `connector/git` checks the resolved addresses before cloning
+but cannot pin them.
 
 **Credentials.** Clone auth prefers a GitHub App installation token (short-lived
 and repo-scoped, nothing durable to leak) and falls back to a sealed PAT
@@ -1066,8 +1097,13 @@ revocable.
 repository (or App installation), taken from the payload only *after* its HMAC
 verified, because behind an ingress every delivery shares the proxy's address
 and GitHub never redelivers a 429. Deliveries that fail verification are limited
-by peer address instead (never `X-Forwarded-For`), and signed ones never touch
-that bucket. **Uploads** get a 5-minute timeout
+by client address instead, and signed ones never touch that bucket.
+Unauthenticated writes are keyed the same way. The client address is the TCP
+peer unless the peer is in `trusted_proxies`. Then `X-Forwarded-For` is walked
+right to left past the trusted hops, at most 32 entries, and the first untrusted
+address wins. The header is never read from any other peer, and `RemoteAddr` is
+never rewritten. IPv6 callers are bucketed per /64. The bucket map is capped at
+10,000 keys. Beyond that it is in a degraded mode, and new keys share 64 overflow buckets chosen by a seeded hash. **Uploads** get a 5-minute timeout
 instead of the API-wide 30 seconds, and accept up to 32 MiB per file — a reverse
 proxy in front of kiln needs its body limit raised to match (nginx:
 `client_max_body_size 34m`).
@@ -1206,6 +1242,7 @@ deliver them.
 | `mcp_authorization_server` | — | Issuer URL of an OAuth authorization server that mints tokens for `/mcp`. Empty omits `authorization_servers` from the protected-resource metadata. |
 | `log_level` | `info` | |
 | `cors_origins` | — | Empty means same-origin only. |
+| `trusted_proxies` | — | CIDRs or bare IPs of reverse proxies whose `X-Forwarded-For` is believed when keying unauthenticated rate limits. Empty means the header is never read. List only proxies that append the address they received from, and list every hop. Startup warns on IPv4 /8, IPv6 /32 or broader. |
 
 ### Database
 
@@ -1220,6 +1257,7 @@ deliver them.
 | `database.min_conns` | `2` | |
 | `database.max_conn_lifetime` | `1h` | |
 | `database.max_conn_idle_time` | `15m` | |
+| `database.query_exec_mode` | — (pgx default) | `cache_statement`, `cache_describe` or `exec`. Behind a transaction-mode pooler set `cache_describe`; see [deployment.md](deployment.md#connection-pooling). |
 
 ### Agent
 
@@ -1274,6 +1312,7 @@ deliver them.
 | Key | Default | Notes |
 | --- | --- | --- |
 | `auth.mode` | `token` | `none` refused on a non-loopback bind. |
+| `auth.default_role` | `member` | Role for a membership `kiln admin token create --org` creates: `viewer` or `member`, nothing else. Existing memberships keep theirs; admin tokens bypass the role. |
 | `github.client_id` | — | Empty disables sign-in. |
 | `github.app_id` | — | For installation tokens. |
 | `github.base_url` / `.api_base_url` | github.com | For GitHub Enterprise. |

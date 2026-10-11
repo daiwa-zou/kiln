@@ -7,10 +7,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/daiwa-zou/kiln/internal/auth"
 	"github.com/daiwa-zou/kiln/internal/diff"
@@ -434,4 +436,112 @@ func TestWriteScopeIsRequiredForMutation(t *testing.T) {
 	if code != http.StatusForbidden {
 		t.Errorf("write with read scope = %d, want 403 from the scope check", code)
 	}
+}
+
+// AC-1 end to end: a token minted the way `kiln admin token create --org`
+// mints it, resolved by the real token source. Under default_role=viewer the
+// token reads, and every write is refused by the role (not the scope -- the
+// token carries write) with the exact message the UI maps to read-only copy.
+func TestViewerMintedTokenReadsButCannotWrite(t *testing.T) {
+	dsn := os.Getenv("KILN_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("KILN_TEST_DATABASE_URL not set; skipping API integration test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
+		t.Fatalf("reset schema: %v", err)
+	}
+	if _, err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	js := store.NewWikiStore(pool)
+	wsID, err := js.EnsureWorkspace(ctx, "test-org", "demo", "Demo")
+	if err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	seed(t, js, wsID)
+
+	srv := httptest.NewServer((&Server{
+		Store: js, Writes: js, Runs: js, Admin: js, Pages: js, Workspaces: js,
+		DB:   &store.DB{Pool: pool},
+		Auth: &auth.Middleware{Source: &auth.PGSource{Pool: pool}},
+	}).Router())
+	t.Cleanup(srv.Close)
+
+	mint := func(login, role string) string {
+		t.Helper()
+		plain, err := auth.Mint(ctx, pool, auth.MintRequest{
+			Login: login, Org: "test-org", Role: role,
+			Scopes: []string{"read", "write"}, Admin: false,
+		})
+		if err != nil {
+			t.Fatalf("Mint %s as %s: %v", login, role, err)
+		}
+		return plain
+	}
+
+	// call returns the status and, for errors, the {"error": ...} message.
+	call := func(method, path, token string, body any) (int, string) {
+		t.Helper()
+		var buf bytes.Buffer
+		if body != nil {
+			if err := json.NewEncoder(&buf).Encode(body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		req, err := http.NewRequest(method, srv.URL+"/api/v1/workspaces/demo"+path, &buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var out struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(res.Body).Decode(&out)
+		return res.StatusCode, out.Error
+	}
+
+	t.Run("viewer", func(t *testing.T) {
+		tok := mint("vera", "viewer")
+		if code, msg := call(http.MethodGet, "/reviews", tok, nil); code != http.StatusOK {
+			t.Fatalf("viewer GET reviews = %d (%s), want 200", code, msg)
+		}
+		for _, w := range []struct {
+			method, path string
+			body         any
+		}{
+			{http.MethodPost, "/corrections/ripple", map[string]string{"body": "Ripple retries."}},
+			{http.MethodPut, "/steering/purpose", map[string]string{"body": "x"}},
+			{http.MethodPost, "/reviews/" + uuid.NewString() + "/resolve", map[string]string{"action": "dismiss"}},
+			// Not ripple: if this write wrongly succeeded, the member control
+			// below would fail for a missing page instead of passing.
+			{http.MethodDelete, "/pages/architecture", nil},
+		} {
+			code, msg := call(w.method, w.path, tok, w.body)
+			if code != http.StatusForbidden || msg != errRoleReadOnly {
+				t.Errorf("viewer %s %s = %d %q, want 403 %q", w.method, w.path, code, msg, errRoleReadOnly)
+			}
+		}
+	})
+
+	// Control: the same token shape minted under the default role writes, so
+	// the refusal above is the role and nothing else.
+	t.Run("member", func(t *testing.T) {
+		tok := mint("mona", "member")
+		if code, msg := call(http.MethodPost, "/corrections/ripple", tok,
+			map[string]string{"body": "Ripple retries."}); code != http.StatusCreated {
+			t.Errorf("member POST correction = %d (%s), want 201", code, msg)
+		}
+	})
 }

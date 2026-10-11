@@ -14,9 +14,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -37,8 +36,6 @@ const (
 	maxPageBytes = 2 << 20 // 2 MiB of HTML is an article, not a tarball
 	maxRedirects = 5
 	fetchTimeout = 30 * time.Second
-	// idleConnTimeout bounds how long a kept-alive connection may sit unused.
-	idleConnTimeout = 30 * time.Second
 )
 
 // Connector fetches a fixed set of URLs.
@@ -141,7 +138,15 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 	if extractors == nil {
 		extractors = extract.DefaultExtractors()
 	}
-	client := c.client()
+	// The pinned-dial client: the address guard runs on every connection it
+	// opens, redirect hops included. The test escape hatch relaxes the scheme
+	// too, because httptest servers speak plain http.
+	client := netguard.NewClient(netguard.Options{
+		AllowPrivate: c.allowPrivate,
+		AllowHTTP:    c.allowPrivate,
+		Timeout:      fetchTimeout,
+		MaxRedirects: maxRedirects,
+	})
 	// Each Sync builds its own transport, so nothing else will ever reuse or
 	// reap its keep-alive connections. Close them here, or every poll interval
 	// strands a connection, its goroutines and a file descriptor until the
@@ -211,12 +216,12 @@ func (c *Connector) fetchOne(ctx context.Context, client *http.Client, extractor
 		return nil, fmt.Errorf("fetch: %s", res.Status)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(res.Body, maxPageBytes+1))
+	body, err := netguard.ReadCapped(res.Body, maxPageBytes)
+	if errors.Is(err, netguard.ErrTooLarge) {
+		return nil, fmt.Errorf("fetch: page exceeds the %d byte cap", maxPageBytes)
+	}
 	if err != nil {
 		return nil, err
-	}
-	if len(body) > maxPageBytes {
-		return nil, fmt.Errorf("fetch: page exceeds the %d byte cap", maxPageBytes)
 	}
 
 	// Stage the raw fetch, extract text from it, then stage the text — the
@@ -247,56 +252,6 @@ func (c *Connector) fetchOne(ctx context.Context, client *http.Client, extractor
 		Hash:   result.Hash,
 		Origin: u.String(),
 	}, nil
-}
-
-// client builds the pinned-dial HTTP client.
-//
-// SECURITY: the guard lives in DialContext, not in a pre-flight check, so it
-// applies to every connection the client ever opens — including redirect
-// hops and fresh DNS answers. Resolve, filter, then dial the vetted IP
-// directly: a host that re-resolves to something private mid-session never
-// gets connected to.
-func (c *Connector) client() *http.Client {
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
-			if err != nil {
-				return nil, err
-			}
-			for _, ip := range ips {
-				if c.allowPrivate || !netguard.Forbidden(ip) {
-					return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-				}
-			}
-			return nil, fmt.Errorf("connector/web: %s resolves only to non-public addresses", host)
-		},
-		TLSHandshakeTimeout: 10 * time.Second,
-		// Backstop for CloseIdleConnections: a connection parked between two
-		// fetches of one Sync must not outlive the Sync indefinitely.
-		IdleConnTimeout: idleConnTimeout,
-	}
-	return &http.Client{
-		Transport: transport,
-		Timeout:   fetchTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= maxRedirects {
-				return fmt.Errorf("connector/web: more than %d redirects", maxRedirects)
-			}
-			if req.URL.Scheme != "https" && !c.allowPrivate {
-				return fmt.Errorf("connector/web: redirect to non-https %s", req.URL)
-			}
-			// Belt and braces: Go already strips Authorization on cross-host
-			// redirects, and this client never sets credentials at all.
-			req.Header.Del("Authorization")
-			req.Header.Del("Cookie")
-			return nil
-		},
-	}
 }
 
 // stagedName maps a URL to a stable filesystem-safe relative name.
