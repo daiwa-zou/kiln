@@ -2,6 +2,7 @@ kiln {{ .Chart.AppVersion }} is deploying as {{ include "kiln.fullname" . }}.
 
   API:      {{ .Values.api.replicaCount }} replica(s)
   Workers:  {{ .Values.worker.replicaCount }} replica(s){{ if .Values.worker.autoscaling.enabled }} (autoscaling {{ .Values.worker.autoscaling.minReplicas }}-{{ .Values.worker.autoscaling.maxReplicas }}){{ end }}
+  Scheduler: {{ if .Values.scheduler.enabled }}1 replica; workers only claim and build{{ else }}disabled; workers run the periodic duties{{ end }}
   Storage:  {{ .Values.config.storage.backend }}{{ if eq .Values.config.storage.backend "s3" }} ({{ .Values.config.storage.bucket }}){{ end }}
 {{- if .Values.pooler.enabled }}
   Pooler:   PgBouncer, {{ .Values.pooler.replicas }} replica(s), in front of {{ .Values.config.database.host }}
@@ -10,6 +11,13 @@ kiln {{ .Chart.AppVersion }} is deploying as {{ include "kiln.fullname" . }}.
 1. Wait for the rollout:
 
      kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "kiln.fullname" . }}-api
+{{- if .Values.scheduler.enabled }}
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "kiln.fullname" . }}-scheduler
+
+   The workers no longer requeue, poll, sweep or publish kiln_queue_depth; the
+   scheduler does. If it is not Ready, those duties are not running -- check
+   its logs, or set scheduler.enabled=false to hand them back to the workers.
+{{- end }}
 
 2. Mint the first token — the API requires one:
 
@@ -33,6 +41,10 @@ Then add a source on the Ingestion page and press Ingest now.
 WARNING: storage.backend is "fs", which keeps uploaded documents on a pod's
 own filesystem. Any worker scheduled elsewhere cannot read them, and the
 emptyDir vanishes with the pod. Use s3 for anything beyond a single-node trial.
+{{- if .Values.scheduler.enabled }}
+The scheduler cannot reach those files either, so queued blob deletes are
+never drained; it warns about them on every sweep.
+{{- end }}
 {{- end }}
 {{- if ne .Values.config.authMode "token" }}
 

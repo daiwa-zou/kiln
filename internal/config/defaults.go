@@ -5,10 +5,11 @@ import "time"
 // Pool sizes differ by role on purpose. The server issues many short queries;
 // the worker holds a small number of long-lived transactions during import. A
 // worker sized like a server would exhaust Postgres connections as replicas
-// scale, for no benefit.
+// scale, for no benefit. The scheduler runs one duty query at a time per duty.
 const (
-	defaultServerMaxConns int32 = 20
-	defaultWorkerMaxConns int32 = 6
+	defaultServerMaxConns    int32 = 20
+	defaultWorkerMaxConns    int32 = 6
+	defaultSchedulerMaxConns int32 = 2
 )
 
 func applyDefaults(v setter, role Role) {
@@ -92,13 +93,20 @@ func applyDefaults(v setter, role Role) {
 	// that stale_after can be tightened to minutes if an operator wants dead
 	// workers recovered quickly, and rare enough to cost nothing.
 	v.SetDefault("worker.heartbeat_interval", time.Minute)
+	// Workers run the scheduler duties unless told a scheduler does, so
+	// upgrading the image without the deployment never stops the sweeps.
+	v.SetDefault("worker.scheduler_duties", true)
 }
 
 func defaultMaxConns(role Role) int32 {
-	if role == RoleWorker {
+	switch role {
+	case RoleWorker:
 		return defaultWorkerMaxConns
+	case RoleScheduler:
+		return defaultSchedulerMaxConns
+	default:
+		return defaultServerMaxConns
 	}
-	return defaultServerMaxConns
 }
 
 // setter is the slice of viper this package depends on, kept narrow so defaults

@@ -2,7 +2,8 @@
 # Assertions over `helm template` output for deploy/helm/kiln. CI has no
 # cluster to deploy the chart to, so what each values combination renders is
 # checked here instead: the pooler wiring, the migrate Job staying direct, no
-# credential in a ConfigMap, the refusals, and a kubeconform schema pass.
+# credential in a ConfigMap, the scheduler and the workers' duty flag, the
+# refusals, and a kubeconform schema pass.
 #
 #   scripts/helm-assert.sh        (also: make helm-test)
 #
@@ -61,6 +62,15 @@ expect_env() { # label, doc-file, var, want
 
 expect_no_env() { # label, doc-file, var
 	if grep -q -- "- name: $3\$" "$2"; then fail "$1: $3 is set"; else pass "$1: no $3"; fi
+}
+
+# expect_quoted label doc-file var want: the raw value line is the quoted
+# string, as a bool env value must be or the Deployment does not apply.
+expect_quoted() {
+	if awk -v want="$3" -v val="value: \"$4\"" '
+		$0 ~ "- name: " want "$" { getline; sub(/^ */, ""); found = ($0 == val); exit }
+		END { exit !found }
+	' "$2"; then pass "$1: $3=\"$4\""; else fail "$1: $3 is not \"$4\""; fi
 }
 
 # --- 1. default render: no pooler, nothing changed for unpooled users --------
@@ -153,7 +163,67 @@ else
 	fail "pooler.tls.secretName not honoured"
 fi
 
-# --- 3. refusals ------------------------------------------------------------
+# --- 3. scheduler -----------------------------------------------------------
+# On by default: one scheduler pod, and the workers told to leave the duties
+# to it in the same release.
+doc Deployment kiln-scheduler "$tmp/default.yaml" >"$tmp/d-scheduler"
+if [ "$(grep -c '^kind: Deployment' "$tmp/d-scheduler")" = 1 ]; then pass "default: one scheduler Deployment"; else fail "default: not exactly one scheduler Deployment"; fi
+if has 'replicas: 1$' <"$tmp/d-scheduler"; then pass "scheduler: replicas 1"; else fail "scheduler: replicas not 1"; fi
+if has 'type: Recreate' <"$tmp/d-scheduler"; then pass "scheduler: Recreate"; else fail "scheduler: not Recreate"; fi
+if has 'args: \["scheduler"\]' <"$tmp/d-scheduler"; then pass "scheduler: runs kiln scheduler"; else fail "scheduler: wrong args"; fi
+for kind in PodDisruptionBudget HorizontalPodAutoscaler; do
+	if [ -n "$(doc "$kind" kiln-scheduler "$tmp/default.yaml")" ]; then fail "scheduler: renders a $kind"; fi
+done
+expect_quoted "default worker" "$tmp/d-worker" KILN_WORKER_SCHEDULER_DUTIES false
+expect_no_env "default scheduler" "$tmp/d-scheduler" KILN_WORKER_SCHEDULER_DUTIES
+# Database and object storage only: no key that opens credentials or spends.
+for v in KILN_MASTER_KEY KILN_ANTHROPIC_API_KEY KILN_GITHUB_PRIVATE_KEY KILN_GITHUB_CLIENT_SECRET KILN_GITHUB_WEBHOOK_SECRET; do
+	expect_no_env "scheduler" "$tmp/d-scheduler" "$v"
+done
+if has 'key: database-password' <"$tmp/d-scheduler" && has 'key: storage-secret-key' <"$tmp/d-scheduler"; then
+	pass "scheduler: database and storage secrets"
+else
+	fail "scheduler: missing database or storage secret"
+fi
+expect_env "default scheduler" "$tmp/d-scheduler" KILN_DATABASE_HOST pg
+expect_env "default scheduler" "$tmp/d-scheduler" KILN_DATABASE_MAX_CONNS 2
+expect_env "default scheduler" "$tmp/d-scheduler" KILN_WORKER_STALE_AFTER "$(envval KILN_WORKER_STALE_AFTER <"$tmp/d-worker")"
+if has 'path: /readyz' <"$tmp/d-scheduler" && has 'path: /healthz' <"$tmp/d-scheduler"; then
+	pass "scheduler: readiness and liveness probes"
+else
+	fail "scheduler: probes missing"
+fi
+# Through the pooler like the API and workers.
+doc Deployment kiln-scheduler "$tmp/pooled.yaml" >"$tmp/p-scheduler"
+expect_env "pooled scheduler" "$tmp/p-scheduler" KILN_DATABASE_HOST kiln-pooler
+expect_env "pooled scheduler" "$tmp/p-scheduler" KILN_DATABASE_QUERY_EXEC_MODE cache_describe
+expect_no_env "pooled scheduler" "$tmp/p-scheduler" KILN_DATABASE_URL
+if has 'name: wait-for-pooler' <"$tmp/p-scheduler"; then pass "pooled scheduler: waits for the pooler"; else fail "pooled scheduler: no wait-for-pooler"; fi
+
+# Disabled: nothing rendered, and the workers keep the duties.
+render "$tmp/nosched.yaml" --set config.database.host=pg --set scheduler.enabled=false
+if [ -z "$(doc Deployment kiln-scheduler "$tmp/nosched.yaml")" ]; then pass "scheduler.enabled=false: no scheduler"; else fail "scheduler.enabled=false: scheduler rendered"; fi
+doc Deployment kiln-worker "$tmp/nosched.yaml" >"$tmp/n-worker"
+expect_quoted "scheduler.enabled=false worker" "$tmp/n-worker" KILN_WORKER_SCHEDULER_DUTIES true
+
+# worker.schedulerDuties overrides auto, for the two-step upgrade (true while
+# the scheduler comes up), and refuses anything but auto/true/false.
+render "$tmp/staged.yaml" --set config.database.host=pg --set worker.schedulerDuties=true
+doc Deployment kiln-worker "$tmp/staged.yaml" >"$tmp/s-worker"
+expect_quoted "worker.schedulerDuties=true worker" "$tmp/s-worker" KILN_WORKER_SCHEDULER_DUTIES true
+if [ -n "$(doc Deployment kiln-scheduler "$tmp/staged.yaml")" ]; then pass "worker.schedulerDuties=true: scheduler still rendered"; else fail "worker.schedulerDuties=true: scheduler dropped"; fi
+render "$tmp/forced.yaml" --set config.database.host=pg --set scheduler.enabled=false --set worker.schedulerDuties=false
+doc Deployment kiln-worker "$tmp/forced.yaml" >"$tmp/f-worker"
+expect_quoted "worker.schedulerDuties=false worker" "$tmp/f-worker" KILN_WORKER_SCHEDULER_DUTIES false
+if out=$(helm template kiln "$chart" --set secrets.existingSecret=kiln-secrets --set worker.schedulerDuties=sometimes 2>&1); then
+	fail "worker.schedulerDuties=sometimes rendered"
+elif grep -q 'must be auto, true or false' <<<"$out"; then
+	pass "worker.schedulerDuties=sometimes refused"
+else
+	fail "worker.schedulerDuties=sometimes refused without saying why: $out"
+fi
+
+# --- 4. refusals ------------------------------------------------------------
 if out=$(helm template kiln "$chart" --set secrets.existingSecret=kiln-secrets --set pooler.enabled=true \
 	--set config.database.host=pg --set secrets.databaseURL=postgres://x 2>&1); then
 	fail "pooler + secrets.databaseURL rendered"
@@ -170,8 +240,8 @@ else
 	fail "pooler without host refused without saying why: $out"
 fi
 
-# --- 4. schemas -------------------------------------------------------------
-if $kubeconform -strict -summary "$tmp/default.yaml" "$tmp/pooled.yaml" "$tmp/certs.yaml"; then
+# --- 5. schemas -------------------------------------------------------------
+if $kubeconform -strict -summary "$tmp/default.yaml" "$tmp/pooled.yaml" "$tmp/certs.yaml" "$tmp/nosched.yaml"; then
 	pass "kubeconform"
 else
 	fail "kubeconform"

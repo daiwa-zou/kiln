@@ -1,8 +1,8 @@
 # Default values for kiln.
 #
-# The two roles -- the API and the build workers -- are configured separately
-# because they scale on different signals. The API scales with readers; the
-# workers scale with how much building you want done at once.
+# The API and the build workers are configured separately because they scale
+# on different signals. The API scales with readers; the workers scale with
+# how much building you want done at once. The scheduler is a single pod.
 
 image:
   repository: ghcr.io/daiwa-zou/kiln
@@ -179,6 +179,44 @@ worker:
   # Above worker.drainGrace, so a rolling update lets in-flight builds land
   # instead of requeueing paid-for work.
   terminationGracePeriodSeconds: 300
+  # Whether workers run the periodic duties (KILN_WORKER_SCHEDULER_DUTIES).
+  # auto follows scheduler.enabled: off when the scheduler pod runs them. The
+  # workers give the duties up as soon as their new pods start, before the
+  # scheduler is known to be Ready, so a deployment without `helm upgrade
+  # --wait` (Argo CD, Flux) should upgrade in two steps: set true, wait for
+  # the scheduler to go Ready, then return to auto. true keeps the duties in
+  # every worker beside the scheduler (duplicate work, never corruption).
+  schedulerDuties: auto
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: /metrics
+
+# --- scheduler --------------------------------------------------------------
+# One pod running the periodic duties for the whole deployment: requeueing
+# runs whose worker died, enqueueing poll-triggered sources, the hourly GC
+# sweep (with pending blob deletes), and the kiln_queue_depth gauge. Enabled,
+# it also turns those duties off in the workers (KILN_WORKER_SCHEDULER_DUTIES
+# =false), so workers only claim and build.
+#
+# Disabled, the workers run the duties themselves, as every release before
+# this one did. That is the fallback if the scheduler cannot run; nothing else
+# needs to change. Always replicas 1 with a Recreate rollout, and no PDB or
+# HPA: a second scheduler only duplicates idempotent work.
+scheduler:
+  enabled: true
+  # Its database pool. One duty query at a time per duty; single digits with
+  # or without the pooler.
+  maxConns: 2
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
   nodeSelector: {}
   tolerations: []
   affinity: {}

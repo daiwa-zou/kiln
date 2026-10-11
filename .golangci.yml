@@ -121,6 +121,12 @@ linters:
         text: "G124"
         linters:
           - gosec
+      # G404: the scheduler's first-sweep jitter only spreads restarts out in
+      # time; nothing depends on it being unpredictable.
+      - path: cmd/kiln/scheduler\.go$
+        text: "G404"
+        linters:
+          - gosec
       # filepath.WalkDir callbacks return nil to mean "skip this entry, keep
       # walking" -- an unreadable file must not abort the scan. nilerr reads
       # every one of those as a swallowed error.

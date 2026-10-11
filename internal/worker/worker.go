@@ -28,6 +28,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/github"
 	"github.com/daiwa-zou/kiln/internal/jobs"
 	"github.com/daiwa-zou/kiln/internal/observability"
+	"github.com/daiwa-zou/kiln/internal/scheduler"
 	"github.com/daiwa-zou/kiln/internal/store"
 	"github.com/daiwa-zou/kiln/internal/wiki"
 )
@@ -43,14 +44,13 @@ type Store interface {
 	FailRun(ctx context.Context, runID, workerID, message string) error
 	RefuseRunOverBudget(ctx context.Context, runID, workerID, message string) error
 	HeartbeatRun(ctx context.Context, runID, workerID string) error
-	RequeueStaleRuns(ctx context.Context, olderThan time.Duration) ([]store.StaleRun, error)
+	// The scheduler duties' half: stale requeue, polling, sweeps, queue depth.
+	scheduler.Store
 	EnabledConnectors(ctx context.Context, workspaceID string) ([]store.ConnectorRow, error)
 	ConnectorByID(ctx context.Context, id string) (*store.ConnectorRow, error)
 	MarkConnectorSync(ctx context.Context, id, syncErr string) error
 	LoadSealedCredential(ctx context.Context, id string) (*store.SealedCredential, error)
 	InstallationServesWorkspace(ctx context.Context, workspaceID string, installationID int64) (bool, error)
-	PollDueConnectors(ctx context.Context, olderThan time.Duration) ([]store.ConnectorRow, error)
-	EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error)
 	ListFiles(ctx context.Context, workspaceID string) ([]store.FileRow, error)
 	LastSuccessfulRef(ctx context.Context, workspaceID string) (string, error)
 	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
@@ -59,10 +59,6 @@ type Store interface {
 	ResearchQuestionFor(ctx context.Context, runID string) (*store.ResearchQuestion, error)
 	RecordResearch(ctx context.Context, reviewID, findings string, resolved bool) error
 	RequeueRun(ctx context.Context, runID, workerID string) error
-	Sweep(ctx context.Context, softDeleteRetention, runRetention time.Duration) (int64, error)
-	// SweepBlobs deletes the blobs queued for deletion and clears their rows.
-	SweepBlobs(ctx context.Context, blobs store.BlobDeleter) (done, failed int, err error)
-	QueueDepth(ctx context.Context) (map[string]int, error)
 
 	// Publishing reads the finished wiki back out and records where it went.
 	// The pipeline writes the wiki; the worker mirrors it, so these live here
@@ -96,7 +92,7 @@ type Worker struct {
 
 	// SourcePollInterval is how often trigger_mode='poll' connectors are due
 	// for a refresh, for origins with no useful webhook. Zero disables the
-	// scheduler.
+	// poll scheduler.
 	SourcePollInterval time.Duration
 
 	// BudgetWindow is the rolling window workspace budgets apply to. After
@@ -112,14 +108,15 @@ type Worker struct {
 	// Retention drives the hourly GC sweep; zero values disable each part.
 	SoftDeleteRetention time.Duration
 	RunRetention        time.Duration
-	lastSweep           time.Time
 
-	// lastQueueSample throttles the queue-depth gauge; see sampleQueueDepth.
-	lastQueueSample time.Time
+	// SkipSchedulerDuties leaves the stale requeue, polling, sweeps and the
+	// queue-depth gauge to a "kiln scheduler" process. Inverted so the zero
+	// value is the old behaviour: a Worker built without it keeps its duties.
+	SkipSchedulerDuties bool
 
-	// lastSourcePoll throttles the scheduler to roughly one sweep per
-	// interval regardless of how fast the claim loop spins.
-	lastSourcePoll time.Time
+	// duties runs the scheduler duties inline, built on first use from the
+	// fields above; see dutyRunner.
+	duties *scheduler.Scheduler
 
 	// PermittedSourceRoots is the local-path allowlist for database-configured
 	// connectors. Empty denies every local path: connector configs are
@@ -179,6 +176,7 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 		DrainGrace:           cfg.Worker.DrainGrace,
 		SoftDeleteRetention:  cfg.Storage.SoftDeleteRetention,
 		RunRetention:         cfg.Storage.RunArtifactRetention,
+		SkipSchedulerDuties:  !cfg.Worker.SchedulerDuties,
 		PermittedSourceRoots: cfg.Worker.PermittedSourceRoots,
 		MasterKey:            cfg.Secrets.MasterKey,
 		AuthDisabled:         cfg.Auth.Mode == config.AuthNone,
@@ -206,7 +204,7 @@ func New(cfg *config.Config, st *store.WikiStore, pipeline *jobs.Pipeline, log *
 // queued for the rest.
 func (w *Worker) Run(ctx context.Context) error {
 	log := w.logger().With("worker", w.ID)
-	log.Info("worker started", "poll", w.poll().String())
+	log.Info("worker started", "poll", w.poll().String(), "scheduler_duties", !w.SkipSchedulerDuties)
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -214,10 +212,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			return err
 		}
 
-		w.requeueStale(ctx, log)
-		w.pollSources(ctx, log)
-		w.sweep(ctx, log)
-		w.sampleQueueDepth(ctx, log)
+		if !w.SkipSchedulerDuties {
+			w.dutyRunner().Tick(ctx)
+		}
 
 		run, err := w.Store.ClaimNextRun(ctx, w.ID)
 		if err != nil {
@@ -1178,50 +1175,31 @@ func (w *Worker) warnNearBudget(ctx context.Context, workspaceID string, log *sl
 	}
 }
 
-// pollSources enqueues runs for poll-triggered connectors that are due. The
-// sweep runs at most once per minute: due-ness itself is measured against
-// each connector's last sync, so sweeping faster buys nothing.
-func (w *Worker) pollSources(ctx context.Context, log *slog.Logger) {
-	if w.SourcePollInterval <= 0 || time.Since(w.lastSourcePoll) < time.Minute {
-		return
-	}
-	w.lastSourcePoll = time.Now()
-
-	due, err := w.Store.PollDueConnectors(ctx, w.SourcePollInterval)
-	if err != nil {
-		log.Error("poll scheduler query failed", "error", err)
-		return
-	}
-	for _, c := range due {
-		// The active-run index makes this idempotent: a connector already
-		// building debounces onto its waiting run.
-		if _, created, err := w.Store.EnqueueRun(ctx, c.WorkspaceID, jobs.TriggerPoll, c.ID); err != nil {
-			log.Error("poll enqueue failed", "connector", c.Name, "error", err)
-		} else if created {
-			log.Info("poll enqueued run", "connector", c.Name, "workspace", c.WorkspaceID)
+// dutyRunner returns the scheduler that runs the periodic duties inline,
+// building it from the worker's own fields on first use. Lazily, rather than
+// in New, so a Worker assembled as a struct literal runs the same duties as
+// one from New. FirstSweepDelay stays zero: a worker has always swept at
+// start, and a scheduler deployment turns the worker's duties off anyway.
+func (w *Worker) dutyRunner() *scheduler.Scheduler {
+	if w.duties == nil {
+		c := scheduler.Config{
+			Store:               w.Store,
+			Log:                 w.logger().With("worker", w.ID),
+			Metrics:             w.metrics(),
+			StaleAfter:          w.StaleAfter,
+			SourcePollInterval:  w.SourcePollInterval,
+			SoftDeleteRetention: w.SoftDeleteRetention,
+			RunRetention:        w.RunRetention,
+			Embedded:            true,
 		}
+		// Assigned only when set: a nil blob.Store inside a non-nil
+		// interface would read as "has object storage".
+		if w.Blobs != nil {
+			c.Blobs = w.Blobs
+		}
+		w.duties = scheduler.New(c)
 	}
-}
-
-func (w *Worker) requeueStale(ctx context.Context, log *slog.Logger) {
-	stale := w.StaleAfter
-	if stale <= 0 {
-		return
-	}
-	requeued, err := w.Store.RequeueStaleRuns(ctx, stale)
-	if err != nil {
-		log.Error("requeue stale runs failed", "error", err)
-		return
-	}
-	// Named one by one: a stale requeue means a claim went unrefreshed for
-	// stale_after, which is either a dead worker or a live one cut off from the
-	// database, and the previous owner is how an operator tells which.
-	for _, r := range requeued {
-		log.Warn("requeued a stale run; its worker stopped heartbeating",
-			"run", r.ID, "workspace_id", r.WorkspaceID,
-			"previous_worker", r.PreviousClaimedBy, "stale_after", stale.String())
-	}
-	w.metrics().StaleRequeued(len(requeued))
+	return w.duties
 }
 
 func (w *Worker) poll() time.Duration {
@@ -1236,67 +1214,6 @@ func (w *Worker) drainGrace() time.Duration {
 		return w.DrainGrace
 	}
 	return 15 * time.Minute // above one agent call's timeout
-}
-
-// sweep enforces retention roughly hourly: soft-deleted pages past their
-// window, expired sessions, dead tokens, and finished runs past theirs. The
-// knobs and the purge index have existed since M0; this is the purger.
-func (w *Worker) sweep(ctx context.Context, log *slog.Logger) {
-	if time.Since(w.lastSweep) < time.Hour {
-		return
-	}
-	w.lastSweep = time.Now()
-	swept, err := w.Store.Sweep(ctx, w.SoftDeleteRetention, w.RunRetention)
-	if err != nil {
-		log.Error("gc sweep failed", "error", err)
-		return
-	}
-	if swept > 0 {
-		log.Info("gc sweep removed expired rows", "rows", swept)
-	}
-	w.sweepBlobs(ctx, log)
-}
-
-// sweepBlobs finishes the blob deletes that the request paths queued but did
-// not complete -- a refused object-store call, a process that died between the
-// commit and the delete. Without a blob store there is nothing to delete with,
-// and the queue simply waits for a worker that has one.
-func (w *Worker) sweepBlobs(ctx context.Context, log *slog.Logger) {
-	if w.Blobs == nil {
-		return
-	}
-	done, failed, err := w.Store.SweepBlobs(ctx, w.Blobs)
-	if err != nil {
-		log.Error("blob sweep failed", "error", err)
-		return
-	}
-	if done > 0 {
-		log.Info("blob sweep deleted orphaned blobs", "blobs", done)
-	}
-	if failed > 0 {
-		log.Warn("blob sweep could not delete some blobs; they will be retried", "blobs", failed)
-	}
-}
-
-// sampleQueueDepth publishes the queue gauge on a leash rather than on every
-// claim-loop iteration. The loop spins as fast as the poll interval (a second
-// in some deployments), and a count(*) per worker per second is a database
-// load nobody asked for; ten seconds is well inside a Prometheus scrape.
-//
-// A failure here is logged at debug and otherwise ignored: monitoring must
-// never be the thing that stops builds.
-func (w *Worker) sampleQueueDepth(ctx context.Context, log *slog.Logger) {
-	if time.Since(w.lastQueueSample) < 10*time.Second {
-		return
-	}
-	w.lastQueueSample = time.Now()
-
-	depth, err := w.Store.QueueDepth(ctx)
-	if err != nil {
-		log.Debug("queue depth sample failed", "error", err)
-		return
-	}
-	w.metrics().SetQueueDepth(depth)
 }
 
 func (w *Worker) logger() *slog.Logger {

@@ -7,13 +7,17 @@ import (
 	"time"
 )
 
-// Role distinguishes the two server roles, which differ in how they use
+// Role distinguishes the process roles, which differ in how they use
 // Postgres and therefore in how their connection pools are sized.
 type Role string
 
 const (
 	RoleServer Role = "server"
 	RoleWorker Role = "worker"
+	// RoleScheduler runs the periodic duties (stale requeue, source polling,
+	// GC sweeps, the queue-depth gauge) as one process instead of in every
+	// worker.
+	RoleScheduler Role = "scheduler"
 )
 
 // Config is the fully resolved configuration. Nothing downstream re-merges:
@@ -103,6 +107,11 @@ type Worker struct {
 	// local-file-inclusion primitive. The CLI, whose paths come from the
 	// operator's own command line, is not subject to this list.
 	PermittedSourceRoots []string `mapstructure:"permitted_source_roots"`
+	// SchedulerDuties keeps the periodic duties in this worker's claim loop.
+	// True by default, so a new image under an old deployment keeps
+	// requeueing and sweeping; a deployment that runs "kiln scheduler" turns
+	// it off on its workers.
+	SchedulerDuties bool `mapstructure:"scheduler_duties"`
 }
 
 // AuthMode selects how the HTTP API authenticates callers.

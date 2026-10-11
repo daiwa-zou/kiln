@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daiwa-zou/kiln/internal/blob"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/jobs"
+	"github.com/daiwa-zou/kiln/internal/scheduler"
 	"github.com/daiwa-zou/kiln/internal/store"
 	"github.com/daiwa-zou/kiln/internal/wiki"
 )
@@ -267,6 +267,8 @@ func (l *loopStore) SweepBlobs(context.Context, store.BlobDeleter) (int, int, er
 	return 0, 0, nil
 }
 
+func (l *loopStore) PendingBlobDeletes(context.Context) (int, error) { return 0, nil }
+
 func (l *loopStore) WorkspaceBudgetUSD(context.Context, string) (*float64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -318,6 +320,15 @@ func TestNewWiresConfigAndIdentity(t *testing.T) {
 	}
 	if w.ID == "" || !strings.Contains(w.ID, "-") {
 		t.Errorf("worker id %q should be host-pid shaped", w.ID)
+	}
+	// The config says whether to run the duties; the field says whether to
+	// skip them, so the zero value keeps them.
+	if !w.SkipSchedulerDuties {
+		t.Error("scheduler_duties unset (false) did not make the worker skip them")
+	}
+	cfg.Worker.SchedulerDuties = true
+	if New(cfg, nil, nil, nil).SkipSchedulerDuties {
+		t.Error("scheduler_duties = true made the worker skip them")
 	}
 	// Zero poll falls back to a sane default rather than a busy loop.
 	if (&Worker{}).poll() <= 0 {
@@ -403,46 +414,6 @@ func TestRequeueStaleRunsThroughTheLoop(t *testing.T) {
 	defer st.mu.Unlock()
 	if st.requeue == 0 {
 		t.Error("stale requeue never ran")
-	}
-}
-
-func TestPollSchedulerEnqueuesDueConnectors(t *testing.T) {
-	st := newLoopStore()
-	st.pollDue = []store.ConnectorRow{
-		{ID: "c1", WorkspaceID: "ws1", Name: "repo-a", TriggerMode: "poll"},
-		{ID: "c2", WorkspaceID: "ws2", Name: "repo-b", TriggerMode: "poll"},
-	}
-	w := &Worker{Store: st, Poll: time.Millisecond, SourcePollInterval: 10 * time.Minute}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	_ = w.Run(ctx)
-
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if len(st.enqueued) != 2 {
-		t.Fatalf("enqueued = %v, want both due connectors", st.enqueued)
-	}
-	for _, e := range st.enqueued {
-		if !strings.HasPrefix(e, "poll:") {
-			t.Errorf("enqueue %q not tagged with the poll trigger", e)
-		}
-	}
-}
-
-func TestPollSchedulerDisabledByZeroInterval(t *testing.T) {
-	st := newLoopStore()
-	st.pollDue = []store.ConnectorRow{{ID: "c1", WorkspaceID: "ws1", TriggerMode: "poll"}}
-	w := &Worker{Store: st, Poll: time.Millisecond} // SourcePollInterval zero
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_ = w.Run(ctx)
-
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if len(st.enqueued) != 0 {
-		t.Errorf("scheduler ran despite being disabled: %v", st.enqueued)
 	}
 }
 
@@ -619,48 +590,77 @@ func TestInterruptedRunIsRequeuedNotFailed(t *testing.T) {
 	}
 }
 
-func TestSweepRunsHourlyFromTheLoop(t *testing.T) {
+// TestWorkerLiteralStillRunsDuties: the zero value of SkipSchedulerDuties is
+// today's behaviour, so a Worker built as a struct literal -- every test here,
+// and any embedder -- keeps requeueing, polling, sweeping and sampling, with
+// the duties' own throttles (one sweep however fast the loop spins).
+func TestWorkerLiteralStillRunsDuties(t *testing.T) {
 	st := newLoopStore()
-	w := &Worker{Store: st, Poll: time.Millisecond,
-		SoftDeleteRetention: time.Hour, RunRetention: time.Hour}
+	st.pollDue = []store.ConnectorRow{{ID: "c1", WorkspaceID: "ws1", Name: "repo", TriggerMode: "poll"}}
+	w := &Worker{Store: st, Blobs: memBlobs{}, Poll: time.Millisecond, StaleAfter: time.Minute,
+		SourcePollInterval: 10 * time.Minute, SoftDeleteRetention: time.Hour, RunRetention: time.Hour}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	_ = w.Run(ctx)
 
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.sweeps != 1 {
-		t.Errorf("sweeps = %d, want exactly 1 (hourly throttle)", st.sweeps)
+	if st.sweeps != 1 || st.blobSweeps != 1 {
+		t.Errorf("sweeps = %d, blob sweeps = %d; want exactly 1 each", st.sweeps, st.blobSweeps)
+	}
+	if st.requeue != 1 || len(st.enqueued) != 1 {
+		t.Errorf("requeue = %d, poll enqueues = %v; want one of each", st.requeue, st.enqueued)
+	}
+	if !strings.Contains(scrapeMetrics(t, w), `kiln_queue_depth{status="queued"}`) {
+		t.Error("the queue-depth gauge was not sampled")
 	}
 }
 
-// TestSweepDrainsPendingBlobDeletesOnlyWithABlobStore: the queue is drained by
-// the same hourly sweep, but only a worker that can reach object storage has
-// anything to delete with.
-func TestSweepDrainsPendingBlobDeletesOnlyWithABlobStore(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		blobs blob.Store
-		want  int
-	}{
-		{"with a blob store", memBlobs{}, 1},
-		{"without one", nil, 0},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			st := newLoopStore()
-			w := &Worker{Store: st, Blobs: tt.blobs, Poll: time.Millisecond,
-				SoftDeleteRetention: time.Hour, RunRetention: time.Hour}
-			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-			defer cancel()
-			_ = w.Run(ctx)
+// TestExactlyOneSweepWithNWorkersAndOneScheduler is AC-3 in miniature: workers
+// that leave the duties to a scheduler never run them, so one scheduler beside
+// any number of workers sweeps, requeues and polls once per interval. The
+// control proves the counters would see the duplicates.
+func TestExactlyOneSweepWithNWorkersAndOneScheduler(t *testing.T) {
+	run := func(skip bool) *loopStore {
+		st := newLoopStore()
+		st.pollDue = []store.ConnectorRow{{ID: "c1", WorkspaceID: "ws1", Name: "repo", TriggerMode: "poll"}}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
 
-			st.mu.Lock()
-			defer st.mu.Unlock()
-			if st.blobSweeps != tt.want {
-				t.Errorf("blob sweeps = %d, want %d", st.blobSweeps, tt.want)
-			}
-		})
+		var wg sync.WaitGroup
+		for i := range 3 {
+			w := &Worker{Store: st, ID: fmt.Sprintf("w%d", i), Poll: time.Millisecond,
+				StaleAfter: time.Minute, SourcePollInterval: 10 * time.Minute,
+				SoftDeleteRetention: time.Hour, RunRetention: time.Hour,
+				SkipSchedulerDuties: skip}
+			wg.Add(1)
+			go func() { defer wg.Done(); _ = w.Run(ctx) }()
+		}
+		sched := scheduler.New(scheduler.Config{Store: st, StaleAfter: time.Minute,
+			SourcePollInterval: 10 * time.Minute, SoftDeleteRetention: time.Hour, RunRetention: time.Hour})
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = sched.Run(ctx) }()
+		wg.Wait()
+		return st
 	}
+
+	t.Run("workers skip duties", func(t *testing.T) {
+		st := run(true)
+		if st.sweeps != 1 {
+			t.Errorf("sweeps = %d, want exactly 1 with three workers and one scheduler", st.sweeps)
+		}
+		if st.requeue != 1 {
+			t.Errorf("stale requeues = %d, want 1 (the scheduler's)", st.requeue)
+		}
+		if len(st.enqueued) != 1 {
+			t.Errorf("poll enqueues = %v, want 1 (the scheduler's)", st.enqueued)
+		}
+	})
+	t.Run("control: workers keep duties", func(t *testing.T) {
+		if st := run(false); st.sweeps < 2 {
+			t.Errorf("sweeps = %d with duties on in every worker; the counter cannot see duplicates", st.sweeps)
+		}
+	})
 }
 
 func TestDrainGraceDefaultsAboveAgentTimeout(t *testing.T) {

@@ -1,5 +1,6 @@
 # A complete kiln deployment: Postgres behind PgBouncer, S3-compatible object
-# storage, the API with its embedded reading UI, and a pool of build workers.
+# storage, the API with its embedded reading UI, a pool of build workers, and
+# one scheduler for the periodic duties.
 #
 # The topology is the point. `kiln serve --with-worker` exists for a laptop,
 # but this file runs the API and the workers as separate services because that
@@ -228,6 +229,9 @@ services:
       KILN_DATABASE_URL: postgres://kiln:${POSTGRES_PASSWORD:-kiln}@pgbouncer:6432/kiln?sslmode=disable
       KILN_DATABASE_QUERY_EXEC_MODE: ${KILN_DATABASE_QUERY_EXEC_MODE:-cache_describe}
       KILN_DATABASE_MAX_CONNS: "4"
+      # The scheduler service runs the requeue, polling, sweeps and the queue
+      # gauge, so workers only claim and build however many there are.
+      KILN_WORKER_SCHEDULER_DUTIES: "false"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -240,6 +244,42 @@ services:
     # requeued. This must stay above that grace, or Docker's SIGKILL lands
     # mid-drain and the run is left 'running' until it goes stale.
     stop_grace_period: 5m
+    restart: unless-stopped
+
+  # The periodic duties, once for the stack: requeueing runs whose worker died,
+  # enqueueing poll-triggered sources, the hourly GC sweep with the pending
+  # blob deletes, and the kiln_queue_depth gauge. Run exactly one -- do not
+  # --scale it. It needs the database and object storage, never the master
+  # key or the model key, so those are blanked here.
+  scheduler:
+    image: ${KILN_IMAGE:-ghcr.io/daiwa-zou/kiln:latest}
+    build:
+      context: .
+      args:
+        VERSION: ${KILN_VERSION:-compose}
+    command: ["scheduler"]
+    environment:
+      <<: *kiln-env
+      KILN_DATABASE_URL: postgres://kiln:${POSTGRES_PASSWORD:-kiln}@pgbouncer:6432/kiln?sslmode=disable
+      KILN_DATABASE_QUERY_EXEC_MODE: ${KILN_DATABASE_QUERY_EXEC_MODE:-cache_describe}
+      KILN_DATABASE_MAX_CONNS: "2"
+      KILN_MASTER_KEY: ""
+      KILN_ANTHROPIC_API_KEY: ""
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+    healthcheck:
+      # The metrics listener's /readyz: ready once the first pass of the
+      # duties has finished. Needs KILN_METRICS_ADDR set (it is, above).
+      test: ["CMD", "/usr/local/bin/kiln", "admin", "health", "--addr", "http://127.0.0.1:9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
 
 volumes:

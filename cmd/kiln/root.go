@@ -48,6 +48,7 @@ run over unchanged sources costs nothing.`,
 		newBuildCmd(&g),
 		newServeCmd(&g),
 		newWorkerCmd(&g),
+		newSchedulerCmd(&g),
 		newMCPCmd(&g),
 	)
 

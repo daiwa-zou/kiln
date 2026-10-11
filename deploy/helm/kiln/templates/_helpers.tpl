@@ -312,3 +312,65 @@ server_tls_ca_file = /etc/pgbouncer-server-ca/ca.crt
     limits:
       memory: 64Mi
 {{- end -}}
+
+
+{{/* --- scheduler duties ----------------------------------------------------- */}}
+
+{{/* The settings the duties read, shared by the workers and the scheduler so
+     a deployment that moves the duties between them keeps the same stale
+     deadline and poll period. The worker also derives its heartbeat from
+     stale_after. */}}
+{{- define "kiln.dutyTimingEnv" -}}
+- name: KILN_WORKER_STALE_AFTER
+  value: {{ .Values.config.worker.staleAfter | quote }}
+- name: KILN_WORKER_SOURCE_POLL_INTERVAL
+  value: {{ .Values.config.worker.sourcePollInterval | quote }}
+{{- end -}}
+
+{{/* worker.schedulerDuties resolved to "true" or "false": auto follows
+     scheduler.enabled. Anything else fails the render rather than being
+     guessed at. */}}
+{{- define "kiln.workerSchedulerDuties" -}}
+{{- $v := toString .Values.worker.schedulerDuties -}}
+{{- if eq $v "auto" -}}
+{{- toString (not .Values.scheduler.enabled) -}}
+{{- else if or (eq $v "true") (eq $v "false") -}}
+{{- $v -}}
+{{- else -}}
+{{- fail (printf "worker.schedulerDuties must be auto, true or false, got %q" $v) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The scheduler's secrets: the database and object storage, nothing else.
+     It never opens a credential or calls a model, so the master key, the
+     model key and the GitHub secrets stay out of its pod. */}}
+{{- define "kiln.schedulerSecretEnv" -}}
+{{- $secret := include "kiln.secretName" . -}}
+- name: KILN_DATABASE_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: database-password
+      optional: true
+{{- /* As in kiln.secretEnv: a URL would bypass the pooler. */}}
+{{- if not .Values.pooler.enabled }}
+- name: KILN_DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: database-url
+      optional: true
+{{- end }}
+- name: KILN_STORAGE_SECRET_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: storage-secret-key
+      optional: true
+- name: KILN_STORAGE_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: storage-access-key
+      optional: true
+{{- end -}}

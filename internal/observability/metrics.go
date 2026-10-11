@@ -43,6 +43,13 @@ type Metrics struct {
 	// Prometheus replicas point at several kiln replicas.
 	queueDepth *prometheus.GaugeVec
 
+	// Scheduler duties. The last-success timestamp is what an alert watches:
+	// a duty that stops running (a crash-looping scheduler, or none deployed
+	// while workers have given the duties up) stops moving it, which neither
+	// an error counter nor a log line can show.
+	dutyLastSuccess *prometheus.GaugeVec
+	dutyErrors      *prometheus.CounterVec
+
 	// Searches by outcome. Deliberately a counter with a coarse label rather
 	// than a log of queries: how often search comes back empty is the number
 	// that decides whether lexical matching is good enough or whether the
@@ -119,6 +126,16 @@ func NewMetrics() *Metrics {
 			Help: "Runs waiting or executing, by status. The signal to scale workers on.",
 		}, []string{"status"}),
 
+		dutyLastSuccess: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kiln_scheduler_last_success_timestamp_seconds",
+			Help: "Unix time each scheduler duty last completed without error, or the process started if it has not yet. Alert when it stops advancing.",
+		}, []string{"duty"}),
+
+		dutyErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kiln_scheduler_errors_total",
+			Help: "Scheduler duty attempts that failed or timed out, by duty.",
+		}, []string{"duty"}),
+
 		searches: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kiln_searches_total",
 			Help: "Searches by outcome. A rising empty rate means retrieval is failing its callers, not that nobody is asking.",
@@ -129,6 +146,7 @@ func NewMetrics() *Metrics {
 		m.httpRequests, m.httpDuration, m.httpInFlight,
 		m.runsStarted, m.runsFinished, m.runDuration, m.runCost, m.staleRuns,
 		m.pagesWritten, m.activeRuns, m.queueDepth, m.searches,
+		m.dutyLastSuccess, m.dutyErrors,
 		// Go runtime and process collectors: the questions "is it leaking"
 		// and "is it being throttled" are asked of every service, and
 		// answering them here costs nothing.
@@ -206,6 +224,25 @@ func (m *Metrics) SetQueueDepth(byStatus map[string]int) {
 	}
 }
 
+// DutyRegistered exposes a duty's series from process start: the error
+// counter at zero, and the last-success timestamp at the start time. A duty
+// that never succeeds then reads as stale from boot -- the series an alert
+// watches exists before the first success, not only after it.
+func (m *Metrics) DutyRegistered(duty string) {
+	m.dutyErrors.WithLabelValues(duty).Add(0)
+	m.dutyLastSuccess.WithLabelValues(duty).SetToCurrentTime()
+}
+
+// DutySucceeded stamps a duty's last successful completion.
+func (m *Metrics) DutySucceeded(duty string) {
+	m.dutyLastSuccess.WithLabelValues(duty).SetToCurrentTime()
+}
+
+// DutyFailed counts a failed or timed-out duty attempt.
+func (m *Metrics) DutyFailed(duty string) {
+	m.dutyErrors.WithLabelValues(duty).Inc()
+}
+
 // SearchObserved records one search by whether it found anything.
 //
 // The empty rate is the decision input for whether lexical matching suffices:
@@ -228,14 +265,27 @@ func (m *Metrics) SearchObserved(hits int) {
 // authentication scheme Prometheus does not want to use. A separate port is
 // trivially firewalled and is what every scrape configuration expects.
 func (m *Metrics) ServeMetrics(ctx context.Context, addr string) error {
+	return m.ServeMetricsWith(ctx, addr, nil)
+}
+
+// ServeMetricsWith is ServeMetrics with extra routes on the same listener, for
+// a process whose only listener this is and whose probes need more than "the
+// process answers" (the scheduler's readiness and liveness). A "/healthz"
+// among them replaces the default one.
+func (m *Metrics) ServeMetricsWith(ctx context.Context, addr string, extra map[string]http.Handler) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", m.Handler())
+	for path, h := range extra {
+		mux.Handle(path, h)
+	}
 	// Cheap endpoints on the same listener, so a sidecar or a probe that
 	// cannot reach the API port still has something to ask.
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
+	if _, ok := extra["/healthz"]; !ok {
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		})
+	}
 
 	srv := &http.Server{
 		Addr:              addr,
