@@ -705,6 +705,18 @@
   .hint { color: var(--ink-dim); font-size: 13px; }
   .login-alt { margin-top: 20px; }
   .hint.error { color: var(--oxide); }
+  /* A labelled checkbox: the whole label is the target, at least 24px tall. */
+  .check {
+    display: flex; align-items: center; gap: 8px;
+    min-height: 24px; margin: 8px 0 2px; font-size: 13.5px; cursor: pointer;
+  }
+  .check input {
+    flex: none; width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--ember);
+  }
+  /* Promoting a proposed correction: the textarea is the text that gets
+     pinned, so it is as wide as the proposal it was filled from. */
+  .promote-form { max-width: 680px; margin: 0 0 22px; }
+  .promote-form textarea { margin: 6px 0 4px; }
   .empty { padding: 30px 0; color: var(--ink-dim); font-size: 13.5px; }
   .empty code { background: var(--surface); padding: 2px 6px; border-radius: 4px; }
 
@@ -1043,6 +1055,10 @@
     font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
     font-weight: 600; color: var(--ember); margin-bottom: 5px;
   }
+  /* A key's name inside the label reads as written, not shouted. */
+  .research-findings .rf-label .rf-name {
+    text-transform: none; letter-spacing: normal; overflow-wrap: anywhere;
+  }
   .research-findings .detail {
     margin: 0; font-size: 14.5px; line-height: 1.6; color: var(--ink-dim); white-space: pre-wrap;
   }
@@ -1067,6 +1083,11 @@
     .inbox-detail { padding: 22px 18px 60px; }
     body.inbox-detail-open .inbox-list { display: none; }
     body:not(.inbox-detail-open) .inbox-detail { display: none; }
+    /* "filed by key …" carries a name someone chose, of any length: on a phone
+       it takes its own line and wraps rather than running off-screen. */
+    .inbox-detail .meta .meta-when {
+      flex-basis: 100%; margin-left: 0; white-space: normal; overflow-wrap: anywhere;
+    }
   }
   .inbox-back { display: none; margin-bottom: 12px; }
   @media (max-width: 860px) { .inbox-back { display: inline-flex; } }

@@ -26,6 +26,7 @@ func newMCPCmd(g *globalFlags) *cobra.Command {
 		endpoint  string
 		token     string
 		workspace string
+		propose   bool
 	)
 
 	cmd := &cobra.Command{
@@ -34,10 +35,15 @@ func newMCPCmd(g *globalFlags) *cobra.Command {
 		Long: `Expose a kiln wiki to MCP-capable agents on stdio.
 
 Tools: list_benches, search_wiki, read_page, wiki_overview, list_pages,
-page_backlinks, wiki_gaps.
+page_backlinks, wiki_gaps. With --propose, also request_gap, file_question
+and propose_correction, which file into the bench's review queue for a
+person to read -- none of them changes a page.
 
 The server reads kiln over its HTTP API, so it needs a running instance and a
-token with the read scope (unless auth.mode is "none"). Point an agent at it:
+token with the read scope (unless auth.mode is "none"). --propose needs a key
+minted with "Can file questions and corrections" for the bench it files into
+(a stdio server cannot see its key's scopes, so it is told). Point an agent
+at it:
 
   {
     "mcpServers": {
@@ -81,7 +87,8 @@ See docs/mcp.md for connecting Claude to it.`,
 				Title:   "kiln wiki",
 				Version: observability.Version,
 			}, nil)
-			kilnmcp.NewServer(client, strings.TrimSpace(workspace), observability.Version).Register(srv)
+			kilnmcp.NewServer(client, strings.TrimSpace(workspace), observability.Version).
+				WithWrites(propose).Register(srv)
 
 			// stdio is the transport: stdout is the protocol channel, so
 			// anything written there that is not JSON-RPC corrupts the session.
@@ -103,6 +110,7 @@ See docs/mcp.md for connecting Claude to it.`,
 	f.StringVar(&endpoint, "url", "http://127.0.0.1:8080", "base URL of the kiln instance to read")
 	f.StringVar(&token, "token", "", "API token with the read scope (default: $KILN_TOKEN)")
 	f.StringVar(&workspace, "workspace", "", "confine the server to one bench (id or org/slug; a bare slug only if unambiguous); omit to serve every bench the token can read")
+	f.BoolVar(&propose, "propose", false, "also offer the filing tools (request_gap, file_question, propose_correction); needs a key that can file")
 
 	return cmd
 }

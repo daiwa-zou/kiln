@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -171,6 +172,95 @@ func (c *Client) Gaps(ctx context.Context, bench string, limit int) ([]Gap, erro
 		q.Set("limit", strconv.Itoa(limit))
 	}
 	return out, c.get(ctx, c.benchPath(bench, "/gaps"), q, &out)
+}
+
+// StatusError is a refusal from a filing route, carrying the status so a tool
+// can tell "this key cannot file" (403) from "no such page" (404) from "slow
+// down" (429), and the API's own message, which says what to do about it.
+type StatusError struct {
+	Code int
+	Msg  string
+}
+
+func (e *StatusError) Error() string {
+	if e.Msg == "" {
+		return fmt.Sprintf("kiln returned %d %s", e.Code, http.StatusText(e.Code))
+	}
+	return fmt.Sprintf("kiln returned %d %s: %s", e.Code, http.StatusText(e.Code), e.Msg)
+}
+
+// FileRequest is one filing into a bench's review queue: a question (kind
+// uncertain or contradiction, with a title and detail) or a proposed
+// correction (kind correction, with text and the rationale as detail).
+type FileRequest struct {
+	Kind   string `json:"kind"`
+	Page   string `json:"page"`
+	Title  string `json:"title,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	Text   string `json:"text,omitempty"`
+}
+
+// FileResult is the API's answer to a filing: the review item's id, and
+// whether it was filed now or was already open.
+type FileResult struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// FileReview files a question or a proposed correction into a bench's review
+// queue. It changes no page: a person reads it, and only they can pin one.
+func (c *Client) FileReview(ctx context.Context, bench string, req FileRequest) (FileResult, error) {
+	var out FileResult
+	return out, c.post(ctx, c.benchPath(bench, "/reviews"), req, &out)
+}
+
+// RequestGap asks for a page the wiki links to and has not written. The slug
+// is one path segment, escaped as such, so it cannot address another route.
+func (c *Client) RequestGap(ctx context.Context, bench, slug string) error {
+	return c.post(ctx, c.benchPath(bench, "/gaps/"+url.PathEscape(slug)+"/request"), struct{}{}, nil)
+}
+
+// post sends a JSON body to a filing route. Refusals come back as a
+// *StatusError rather than as get's prose, because the tools answer each
+// status differently.
+func (c *Client) post(ctx context.Context, path string, body, into any) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("cannot reach kiln at %s: %w (is it running? try `make dev-up`)", c.BaseURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		var msg struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(raw, &msg) != nil || msg.Error == "" {
+			msg.Error = strings.TrimSpace(string(raw))
+		}
+		return &StatusError{Code: resp.StatusCode, Msg: msg.Error}
+	}
+	if into == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(into); err != nil {
+		return fmt.Errorf("decoding %s: %w", path, err)
+	}
+	return nil
 }
 
 // benchPath addresses a bench by id, "org/slug" or bare slug. A path segment

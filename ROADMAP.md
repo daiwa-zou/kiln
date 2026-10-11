@@ -345,7 +345,7 @@ network policies enabled, a worker cannot open a connection to a
 destination outside its allowlist, and a pod outside the scraper namespace
 cannot read `/metrics`.
 
-## M11 — The Edges Catch Up — items 1 and 9 shipped (2026-10-10)
+## M11 — The Edges Catch Up — items 1, 3 and 9 shipped (2026-10-10)
 
 *Designed 2026-10-10 from a codebase review. The build engine is the
 strongest part of kiln; what lags is around it — nobody is told when the
@@ -393,6 +393,23 @@ landed first.*
    the proposed text; a human promotes it to a pinned correction).
    Nothing an agent sends changes a page directly — deletion and
    correction stay questions for a human (principle 3).
+   *Shipped, corrected as built:* the tools sit behind a new
+   `propose:<bench>` scope, not `write`, because a write token can already
+   pin corrections, resolve deletion reviews and delete pages over REST.
+   Agent keys get `read` + `propose:<bench>` ("Can file questions and
+   corrections"), pinned to one bench and admitted on exactly `POST
+   …/reviews` and `POST …/gaps/{slug}/request`. `review_items` gains
+   `proposed` (the correction text), `origin` (the filer's name, display
+   only), `origin_kind` (key, session or local) and `origin_token` (a plain
+   id, so a swept key's items stay capped); `page_corrections` gains
+   `proposed_by`, and prompts label a promoted correction as agent-proposed
+   and member-confirmed. Promotion is a separate human route, `POST
+   …/reviews/{id}/promote`, which needs `write` and pins the text the person
+   confirmed. Caps, gap requests included: 20 open items per key, 200
+   key-filed per bench, a per-key filing bucket on top of the user's.
+   *Follow-up:* write tokens are user-wide, so a write token handed to an
+   agent is the cross-bench confused-deputy surface that propose keys avoid —
+   pinning write tokens to benches is its own decision.
 4. **Page revisions** — `WikiStore.Import` overwrites a page in place, so
    history exists only where a publish target mirrors it to git. Write a
    `page_revisions` row inside the same `Import` transaction (previous

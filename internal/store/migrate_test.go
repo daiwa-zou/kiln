@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,30 @@ func TestLoadMigrations(t *testing.T) {
 		if i > 0 && migrations[i-1].version >= m.version {
 			t.Errorf("migrations out of order: %d follows %d", m.version, migrations[i-1].version)
 		}
+	}
+}
+
+// Migration numbers are claimed by parallel branches and assigned at merge, so
+// two PRs can each add an NNN. This reads the raw directory rather than going
+// through loadMigrations, so it names the colliding files even if the loader's
+// own duplicate check were ever relaxed; "020" and "20" collide too.
+func TestMigrationVersionsUnique(t *testing.T) {
+	entries, err := migrationsFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int]string{}
+	for _, e := range entries {
+		m := migrationName.FindStringSubmatch(e.Name())
+		if m == nil {
+			t.Errorf("%s does not match NNN_name.sql", e.Name())
+			continue
+		}
+		v, _ := strconv.Atoi(m[1])
+		if prev, dup := seen[v]; dup {
+			t.Errorf("migration version %d is used twice: %s and %s; renumber the newer one", v, prev, e.Name())
+		}
+		seen[v] = e.Name()
 	}
 }
 
