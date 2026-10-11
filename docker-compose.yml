@@ -189,6 +189,9 @@ services:
       #   docker compose exec api kiln admin token create --login you \
       #     --scopes read,write,admin
       KILN_AUTH_MODE: ${KILN_AUTH_MODE:-token}
+      # Read by that token create (it runs in this container); empty keeps
+      # kiln's default, member.
+      KILN_AUTH_DEFAULT_ROLE: ${KILN_AUTH_DEFAULT_ROLE:-}
       KILN_PUBLIC_URL: ${KILN_PUBLIC_URL:-http://localhost:8080}
     ports:
       - "${KILN_BIND_ADDR:-127.0.0.1}:8080:8080"

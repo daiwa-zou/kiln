@@ -71,7 +71,7 @@
   <div class="topbar-end">
     <button class="run-pill" id="run-pill" aria-expanded="false" aria-controls="run-pop" hidden></button>
     <details class="footer-menu" id="account">
-      <summary class="avatar" id="avatar" aria-label="Account"></summary>
+      <summary class="avatar" id="avatar" aria-label="Account"><span class="avatar-dot" aria-hidden="true"></span><span class="avatar-label">Account</span></summary>
       <div class="footer-sheet" id="account-menu">
         <div class="account-who" id="account-who"></div>
         <div class="sheet-group">
@@ -115,6 +115,8 @@
 </div>
 <div id="toasts" class="toasts" aria-live="polite" role="status"></div>
 <div id="preview" class="preview-card" role="tooltip" hidden></div>
+<!-- One card for every citation marker: the file and lines a marker cites. -->
+<div id="cite-card" class="preview-card cite-card" role="tooltip" hidden></div>
 <button id="to-top" class="to-top" hidden aria-label="Back to top">↑</button>
 
 <script src="/ui/sources.js" defer></script>

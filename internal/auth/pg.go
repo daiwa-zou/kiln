@@ -56,15 +56,35 @@ type MintRequest struct {
 	Name   string
 	Scopes []string
 	Admin  bool
+	// Role is the org role given to a membership this call creates: "viewer"
+	// or "member", empty meaning member. An existing membership keeps its
+	// role, so re-minting never demotes (or promotes) anyone.
+	Role string
 	// TTL of zero means the token does not expire.
 	TTL time.Duration
+}
+
+// Membership is the org membership a mint left in place, so the CLI can say
+// which role the token's owner actually has: the configured default only
+// applies when Created is true.
+type Membership struct {
+	Org     string
+	Role    string
+	Created bool
 }
 
 // Mint creates (or finds) the user, ensures org membership, and inserts a
 // token, returning the plaintext exactly once.
 func Mint(ctx context.Context, pool *pgxpool.Pool, req MintRequest) (string, error) {
+	plain, _, err := MintWithMembership(ctx, pool, req)
+	return plain, err
+}
+
+// MintWithMembership is Mint, also reporting the membership in req.Org (the
+// zero Membership when req.Org is empty).
+func MintWithMembership(ctx context.Context, pool *pgxpool.Pool, req MintRequest) (string, Membership, error) {
 	if req.Login == "" {
-		return "", errors.New("auth: a login is required")
+		return "", Membership{}, errors.New("auth: a login is required")
 	}
 	if req.Name == "" {
 		req.Name = "default"
@@ -72,15 +92,25 @@ func Mint(ctx context.Context, pool *pgxpool.Pool, req MintRequest) (string, err
 	if len(req.Scopes) == 0 {
 		req.Scopes = []string{"read"}
 	}
+	// Checked before anything is written. "owner" is refused here as well as
+	// in config validation: this is the one path that creates memberships
+	// without an owner granting them.
+	switch req.Role {
+	case "":
+		req.Role = "member"
+	case "viewer", "member":
+	default:
+		return "", Membership{}, fmt.Errorf("auth: membership role %q is not viewer or member", req.Role)
+	}
 
 	plain, hash, err := NewToken()
 	if err != nil {
-		return "", err
+		return "", Membership{}, err
 	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return "", fmt.Errorf("auth: begin mint: %w", err)
+		return "", Membership{}, fmt.Errorf("auth: begin mint: %w", err)
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
@@ -95,32 +125,46 @@ func Mint(ctx context.Context, pool *pgxpool.Pool, req MintRequest) (string, err
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO users (login, is_admin) VALUES ($1, $2) RETURNING id`,
 			req.Login, req.Admin).Scan(&userID); err != nil {
-			return "", fmt.Errorf("auth: create user: %w", err)
+			return "", Membership{}, fmt.Errorf("auth: create user: %w", err)
 		}
 	case err != nil:
-		return "", fmt.Errorf("auth: find user: %w", err)
+		return "", Membership{}, fmt.Errorf("auth: find user: %w", err)
 	default:
 		if req.Admin {
 			if _, err := tx.Exec(ctx,
 				`UPDATE users SET is_admin = true, updated_at = now() WHERE id = $1`,
 				userID); err != nil {
-				return "", fmt.Errorf("auth: promote user: %w", err)
+				return "", Membership{}, fmt.Errorf("auth: promote user: %w", err)
 			}
 		}
 	}
 
+	var m Membership
 	if req.Org != "" {
 		var orgID string
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO orgs (name, slug) VALUES ($1,$1)
 			ON CONFLICT (slug) DO UPDATE SET name = orgs.name
 			RETURNING id`, req.Org).Scan(&orgID); err != nil {
-			return "", fmt.Errorf("auth: ensure org: %w", err)
+			return "", Membership{}, fmt.Errorf("auth: ensure org: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO org_members (org_id, user_id) VALUES ($1,$2)
-			ON CONFLICT DO NOTHING`, orgID, userID); err != nil {
-			return "", fmt.Errorf("auth: ensure membership: %w", err)
+		m.Org = req.Org
+		err := tx.QueryRow(ctx, `
+			INSERT INTO org_members (org_id, user_id, role) VALUES ($1,$2,$3)
+			ON CONFLICT DO NOTHING
+			RETURNING role`, orgID, userID, req.Role).Scan(&m.Role)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// Already a member: that role stands, whatever was asked for.
+			if err := tx.QueryRow(ctx,
+				`SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2`,
+				orgID, userID).Scan(&m.Role); err != nil {
+				return "", Membership{}, fmt.Errorf("auth: read membership: %w", err)
+			}
+		case err != nil:
+			return "", Membership{}, fmt.Errorf("auth: ensure membership: %w", err)
+		default:
+			m.Created = true
 		}
 	}
 
@@ -132,13 +176,13 @@ func Mint(ctx context.Context, pool *pgxpool.Pool, req MintRequest) (string, err
 		INSERT INTO tokens (user_id, name, token_hash, scopes, expires_at)
 		VALUES ($1,$2,$3,$4,$5)`,
 		userID, req.Name, hash, req.Scopes, expires); err != nil {
-		return "", fmt.Errorf("auth: insert token: %w", err)
+		return "", Membership{}, fmt.Errorf("auth: insert token: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("auth: commit mint: %w", err)
+		return "", Membership{}, fmt.Errorf("auth: commit mint: %w", err)
 	}
-	return plain, nil
+	return plain, m, nil
 }
 
 // Revoke marks a user's named tokens revoked and reports how many it touched.

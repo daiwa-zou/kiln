@@ -138,6 +138,70 @@ func TestPoolerDefaults(t *testing.T) {
 	}
 }
 
+// The default is the role the column default always granted, so an upgrade
+// changes nothing; a deployment opts in to viewer through the environment.
+func TestAuthDefaultRole(t *testing.T) {
+	isolateEnv(t)
+	cfg, err := Load(Options{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.DefaultRole != "member" {
+		t.Errorf("default_role = %q, want member", cfg.Auth.DefaultRole)
+	}
+
+	t.Setenv("KILN_AUTH_DEFAULT_ROLE", "viewer")
+	cfg, err = Load(Options{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.DefaultRole != "viewer" {
+		t.Errorf("default_role = %q with KILN_AUTH_DEFAULT_ROLE=viewer, want viewer", cfg.Auth.DefaultRole)
+	}
+
+	// A typo stops startup rather than quietly minting members.
+	t.Setenv("KILN_AUTH_DEFAULT_ROLE", "viewr")
+	if _, err := Load(Options{}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("Load with default_role=viewr: err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestValidateDefaultRole(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Role: RoleServer, HTTPAddr: ":8080",
+			Database: Database{Host: "h", Port: 5432, Name: "kiln", MaxConns: 10, MinConns: 2},
+			Storage:  Storage{Backend: BackendFS, Path: "/tmp/blobs"},
+			Agent:    Agent{Runner: RunnerFake, Timeout: time.Minute, MaxPagesPerRun: 12, UnitConcurrency: 1},
+		}
+	}
+
+	for _, tc := range []struct {
+		role string
+		ok   bool
+	}{
+		{"", true}, // a hand-built Config; Load fills in member
+		{"viewer", true},
+		{"member", true},
+		// owner would hand connector and membership control to anyone minted
+		// in; matching is exact, so a capitalised or misspelt role is refused.
+		{"owner", false},
+		{"admin", false},
+		{"Viewer", false},
+		{"viewr", false},
+	} {
+		c := base()
+		c.Auth.DefaultRole = tc.role
+		err := c.Validate()
+		if tc.ok && err != nil {
+			t.Errorf("default_role %q rejected: %v", tc.role, err)
+		}
+		if !tc.ok && (err == nil || !strings.Contains(err.Error(), "default_role")) {
+			t.Errorf("default_role %q: err = %v, want a default_role problem", tc.role, err)
+		}
+	}
+}
+
 func TestLoadFileOverriddenByEnv(t *testing.T) {
 	isolateEnv(t)
 

@@ -176,6 +176,7 @@ The knobs worth knowing before anything else:
 | `agent.unit_concurrency` | `1` | Raise it to build a large bench in minutes rather than hours. |
 | `agent.runner` | `api` | Names a registered model provider; `fake` runs the whole pipeline with zero spend. Adding one is a registration, not a fork — see [docs/architecture.md](docs/architecture.md). |
 | `auth.mode` | `token` | `none` is refused on any non-loopback bind. With `none`, the API also refuses a `Host` that is not loopback or the `public_url` host, and any `POST` not sent as `application/json`. |
+| `auth.default_role` | `member` | The role `kiln admin token create --org` gives a membership it creates. `viewer` reads only; `member` also writes content and steering. Existing memberships keep their role, and `--admin` tokens write whatever their role. GitHub sign-in creates no membership, so this does not apply to it. |
 | `worker.permitted_source_roots` | *(empty)* | Allowlist for local-path sources. Empty denies every one. |
 
 Every key, with defaults, is in

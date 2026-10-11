@@ -218,15 +218,28 @@
   }
   .run-track span { display: block; height: 100%; background: var(--ember); }
 
+  /* A pill on desktop: initials (or a person glyph) and a word -- the login, or
+     "Account" -- because a bare circle read as a loading dot, not as the way
+     to the account. Phones keep the circle. */
   .avatar {
-    display: flex; align-items: center; justify-content: center; list-style: none;
-    width: 26px; height: 26px; border-radius: 50%; cursor: pointer;
+    display: flex; align-items: center; gap: 7px; list-style: none;
+    height: 28px; padding: 0 10px 0 3px; border-radius: 999px; cursor: pointer;
     background: var(--surface); border: 1px solid var(--border);
-    font-size: 11px; font-weight: 600; color: var(--ink-dim);
+    font-size: 12.5px; color: var(--ink-dim);
     transition: border-color var(--dur);
   }
   .avatar::-webkit-details-marker { display: none; }
   .avatar:hover { border-color: var(--ember); }
+  .avatar-dot {
+    display: flex; align-items: center; justify-content: center; flex: none;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--panel); border: 1px solid var(--border);
+    font-size: 10px; font-weight: 600; color: var(--ink-dim);
+  }
+  .avatar-glyph { width: 12px; height: 12px; fill: currentColor; }
+  .avatar-label {
+    max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 
   /* Anchored under the pill rather than in flow: the top bar is 52px tall and
      a 360px panel inside it would stretch the chrome. */
@@ -297,18 +310,21 @@
     .menu-btn { display: block; }
     /* Five controls do not fit a phone's width at their desktop sizes, so each
        gives up what it can spare: the wordmark (the mark still says kiln), the
-       shortcut chip (there is no ⌘ to press), most of the bench name, and the
-       idle run pill -- which is a sentence about a build that is not running,
-       and the Ingest entry already carries the dot when one is. */
+       shortcut chip (there is no ⌘ to press), the search field's placeholder
+       (it becomes an icon button, still named), the account's word, and most
+       of the bench name. The run pill and the account never give way: a phone
+       is still owed whether a build is running, and a way to its account. */
     .topbar { gap: 8px; padding: 0 10px; }
     .brand span { display: none; }
-    .cmd-trigger-text { font-size: 12.5px; }
+    .cmd-trigger { flex: none; width: 32px; padding: 0; justify-content: center; }
+    .cmd-trigger-text { display: none; }
     #cmd-key { display: none; }
     .bench { min-width: 0; flex: 0 1 auto; }
     .bench summary { max-width: none; }
-    .topbar-end { min-width: 0; gap: 8px; }
-    .run-pill { max-width: 132px; }
-    .run-pill.idle { display: none; }
+    .topbar-end { flex: none; gap: 8px; }
+    .run-pill { max-width: 120px; min-height: 28px; }
+    .avatar { width: 28px; padding: 0; justify-content: center; }
+    .avatar-label { display: none; }
     body.nav-open { overflow: hidden; }
     body.nav-open aside {
       display: flex; position: fixed; inset: var(--topbar) 64px 0 0; z-index: 20;
@@ -323,6 +339,11 @@
     .tree a { padding: 7px 9px; }
     .nav a { padding: 8px 9px; }
     .chip { padding: 5px 10px; }
+  }
+  /* At the narrowest phones the mark goes too, so the pill keeps its words. */
+  @media (max-width: 400px) {
+    .brand { display: none; }
+    .run-pill { max-width: 112px; }
   }
 
   select, input, textarea {
@@ -660,6 +681,27 @@
     color: var(--ink-faint); border-bottom: 1px dashed var(--ink-faint); cursor: help;
   }
 
+  /* Citation markers. The number is small, but the button around it is a full
+     24x24 target -- no negative margins, so it never reaches into the line
+     above or the word beside it -- and sits inside the line box it is set in.
+     Raised by relative offset only, which moves the paint and not the layout,
+     so a line with a marker is spaced like every other. --ember-text clears
+     4.5:1 on every surface the reader uses in both themes (see
+     docs/accessibility.md); hover and an open card are an underline, never a
+     tint, which the small digit would not survive. */
+  .cite { font-size: 0.72em; line-height: 0; vertical-align: baseline; position: relative; top: -0.42em; }
+  .cite + .cite { margin-left: 3px; }
+  .cite-btn {
+    display: inline-block; vertical-align: baseline; box-sizing: border-box;
+    min-width: 24px; height: 24px; padding: 0 3px; margin: 0;
+    background: none; border: 0; border-radius: 5px;
+    color: var(--ember-text); font: inherit; font-family: var(--sans); font-weight: 600;
+    line-height: 24px; text-align: center; cursor: pointer;
+    text-underline-offset: 2px;
+  }
+  .cite-btn:hover, .cite-btn[aria-describedby] { text-decoration: underline; }
+  .cite-btn:focus-visible { outline: 2px solid var(--ember); outline-offset: 0; }
+
   .hint { color: var(--ink-dim); font-size: 13px; }
   .login-alt { margin-top: 20px; }
   .hint.error { color: var(--oxide); }
@@ -842,11 +884,17 @@
   }
   .prov-row { display: flex; justify-content: space-between; gap: 8px; }
   .prov-row > :last-child { color: var(--ink); text-align: right; min-width: 0; overflow-wrap: anywhere; }
-  .prov-files {
-    border-top: 1px solid var(--border-soft); padding-top: 8px;
-    display: flex; flex-direction: column; gap: 5px;
+  /* The cited files, numbered as the markers in the prose are. */
+  .prov-cites {
+    list-style: none; margin: 0; padding: 8px 0 0; border-top: 1px solid var(--border-soft);
+    display: flex; flex-direction: column; gap: 6px;
   }
-  .prov-files span { font-family: var(--mono); font-size: 11.5px; color: var(--ink); overflow-wrap: anywhere; }
+  .prov-cites li { display: grid; grid-template-columns: 18px minmax(0, 1fr); column-gap: 4px; }
+  .prov-cites .cite-num { color: var(--ember-text); font-weight: 600; font-size: 11.5px; }
+  .prov-cites .mono { font-size: 11.5px; color: var(--ink); overflow-wrap: anywhere; }
+  .prov-cites .cite-lines { grid-column: 2; font-size: 11.5px; color: var(--ink-dim); }
+  .prov-more summary { cursor: pointer; min-height: 24px; display: flex; align-items: center; }
+  .prov-more .prov-cites { border-top: none; padding-top: 4px; }
 
   .correction {
     border-left: 2px solid var(--ember-soft); padding: 2px 0 2px 10px;
@@ -1207,6 +1255,16 @@
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .type-card a:hover { background: var(--surface); color: var(--ink); text-decoration: none; }
+  /* Freshness as a word, so the dot's colour is never the only thing saying it. */
+  .type-card a .fresh-word {
+    margin-left: auto; flex: none; overflow: visible;
+    font-size: 11.5px; color: var(--ink-dim);
+  }
+
+  /* A page that is not there: a way on, not an error. */
+  .missing-near { margin: 0; padding-left: 1.2em; font-size: 14px; line-height: 1.5; }
+  .missing-near li { margin: 4px 0; }
+  .missing-near a { display: inline-block; min-height: 24px; padding: 2px 0; }
 
   /* ---- gaps -------------------------------------------------------------- */
   .gap-row { display: flex; align-items: center; gap: 14px; padding: 13px 16px; }
@@ -1516,6 +1574,10 @@
   .preview-card .pv-title { font-weight: 600; font-size: 13.5px; margin-bottom: 2px; }
   .preview-card .pv-type { color: var(--ink-faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; }
   .preview-card .pv-body { color: var(--ink-dim); margin-top: 5px; line-height: 1.45; }
+  /* The citation card can be hovered and read; the wikilink preview cannot. */
+  .cite-card { pointer-events: auto; }
+  .cite-card .cite-path { font-family: var(--mono); font-size: 12px; color: var(--ink); overflow-wrap: anywhere; }
+  .cite-card .cite-where { color: var(--ink-dim); margin-top: 3px; font-size: 12.5px; }
 
   .to-top {
     position: fixed; left: 14px; bottom: 14px; z-index: 34;
