@@ -80,6 +80,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: KILN_CORS_ORIGINS
   value: {{ join "," . | quote }}
 {{- end }}
+{{- with .Values.config.trustedProxies }}
+- name: KILN_TRUSTED_PROXIES
+  value: {{ join "," . | quote }}
+{{- end }}
 - name: KILN_STORAGE_BACKEND
   value: {{ .Values.config.storage.backend | quote }}
 {{- if eq .Values.config.storage.backend "s3" }}

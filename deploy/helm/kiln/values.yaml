@@ -32,6 +32,13 @@ config:
   # `kubectl exec` into these pods, not a token minted from your laptop.
   authDefaultRole: ""
   corsOrigins: []
+  # CIDRs (or bare IPs) of the proxies in front of the API -- the ingress
+  # controller's pod or Service IPs and the load balancer's addresses, never
+  # the whole cluster pod CIDR (every pod is in it). Their X-Forwarded-For
+  # is believed when rate-limiting unauthenticated callers; empty keys on the
+  # TCP peer, which behind an ingress is the ingress for everyone. List only
+  # proxies that append the address they received from, and every hop.
+  trustedProxies: []
 
   # Prometheus metrics on their own listener, never behind the API's ingress:
   # queue depth and spend describe the deployment, not a tenant. Empty

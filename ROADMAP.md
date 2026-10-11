@@ -216,7 +216,6 @@ makes the cloud tier safe today, and is retired by the item:
 
 | Open item | Until it lands |
 | --- | --- |
-| M9·2 Real client addresses | Every anonymous caller behind the load balancer, GitHub included, shares one rate-limit bucket. Raise the API's limits and rate-limit at the load balancer or WAF |
 | M9·5 Scheduler role | Polling, sweeps, and requeues run in every worker. Harmless at a handful of workers; hold the worker count there |
 
 **After M10.** The API runs as three profiles of one image (reader,
@@ -224,7 +223,7 @@ control, ingress — uploads possibly a fourth), each with its own
 Deployment and HPA; the CDN absorbs most reads; workers scale on queue
 depth, down to zero.
 
-## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); item 2's webhook half shipped (PR #87); item 1 shipped (2026-10-10); 2's `RealIP` half and 5 open
+## M9 — Make Builds Parallel — items 1–4 shipped (3–4 2026-07-30, PR #27; 2's webhook half PR #87; 1 and 2's trusted-proxy half 2026-10-10); 5 open
 
 *Items 3 and 4 shipped together: `agent.unit_concurrency` drives the bounded
 pool in `internal/jobs/fanout.go`, and the run budget is a reservation taken
@@ -236,10 +235,13 @@ transaction-mode pooler (migrations take a transaction-scoped lock,
 source scan pins the absence of session state), compose runs api and workers
 through PgBouncer, the chart can deploy one (`pooler.enabled`), and CI runs the
 integration suite through it in both exec modes; sizing is in
-[docs/deployment.md](docs/deployment.md#connection-pooling). Item 5 and item
-2's `RealIP` half have no code yet, and they are now the urgent ones —
-raising concurrency invites adding worker pods, which multiplies the
-per-worker timers.*
+[docs/deployment.md](docs/deployment.md#connection-pooling). Item 2's other half
+shipped too: `trusted_proxies` lets unauthenticated callers behind a load
+balancer key on the address the proxy appended to `X-Forwarded-For`
+(`internal/api/clientip.go`), IPv6 keys are per /64, and the limiter map is
+capped. Item 5 has no code yet, and it is now the urgent one — raising
+concurrency invites adding worker pods, which multiplies the per-worker
+timers.*
 
 *Designed 2026-07-30 from a scaling review. The roles are already split and
 already scale independently; what does not scale is one bench. A run walks
@@ -258,7 +260,9 @@ topology; every item pays off at the shipped two-role deployment.*
 2. **Real client addresses** — `limiterKey` falls back to `r.RemoteAddr`
    with no `RealIP` middleware anywhere, so behind an ingress every
    unauthenticated caller shares one bucket. Add trusted-proxy `RealIP`
-   for that path. The webhook half shipped in PR #87: a delivery whose
+   for that path. *Shipped as `trusted_proxies`: headers are read only from
+   a listed peer and walked right to left; chi's `RealIP` was rejected
+   because it trusts any peer and rewrites `RemoteAddr`.* The webhook half shipped in PR #87: a delivery whose
    HMAC verifies is limited on its repository (else its installation), the
    correct tenant boundary regardless of replica count, and only
    unverified deliveries still share the peer-address bucket.

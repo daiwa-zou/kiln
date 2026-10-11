@@ -178,6 +178,7 @@ The knobs worth knowing before anything else:
 | `auth.mode` | `token` | `none` is refused on any non-loopback bind. With `none`, the API also refuses a `Host` that is not loopback or the `public_url` host, and any `POST` not sent as `application/json`. |
 | `auth.default_role` | `member` | The role `kiln admin token create --org` gives a membership it creates. `viewer` reads only; `member` also writes content and steering. Existing memberships keep their role, and `--admin` tokens write whatever their role. GitHub sign-in creates no membership, so this does not apply to it. |
 | `worker.permitted_source_roots` | *(empty)* | Allowlist for local-path sources. Empty denies every one. |
+| `trusted_proxies` | *(empty)* | Your reverse proxy's address, so anonymous callers behind it get their own rate-limit buckets instead of sharing the proxy's. See [docs/deployment.md](docs/deployment.md#behind-a-reverse-proxy). |
 
 Every key, with defaults, is in
 [docs/architecture.md](docs/architecture.md#configuration-reference).
