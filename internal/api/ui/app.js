@@ -1330,22 +1330,28 @@ function beginView(title, view, activeSlug) {
       if (my !== nav) return false;
       m.removeAttribute("aria-busy");
       m.innerHTML = html;
-      // Three views run a full-bleed layout that supplies its own padding, and
-      // the same three also render ordinary content -- an empty graph, a page
-      // that failed to load, a search result list. Which one just happened is
-      // a property of the markup, not of the view's name, so it is read back
-      // off the markup rather than assumed from the route.
-      m.classList.toggle("bleed",
-        Boolean(m.querySelector(":scope > .reader, :scope > .inbox, :scope > .graph-view")));
-      // Entrance animation on already-committed content only: an exit
-      // animation would delay the swap behind a timer, which is exactly the
-      // race the nav token exists to prevent.
-      m.classList.remove("view-in");
-      void m.offsetWidth;
-      m.classList.add("view-in");
+      settleMain(m);
       return true;
     },
   };
+}
+
+// settleMain finishes a view's swap into <main>, for legacy markup (done())
+// and ported components (showPorted) alike.
+function settleMain(m) {
+  // Three views run a full-bleed layout that supplies its own padding, and
+  // the same three also render ordinary content -- an empty graph, a page
+  // that failed to load, a search result list. Which one just happened is
+  // a property of the markup, not of the view's name, so it is read back
+  // off the markup rather than assumed from the route.
+  m.classList.toggle("bleed",
+    Boolean(m.querySelector(":scope > .reader, :scope > .inbox, :scope > .graph-view")));
+  // Entrance animation on already-committed content only: an exit
+  // animation would delay the swap behind a timer, which is exactly the
+  // race the nav token exists to prevent.
+  m.classList.remove("view-in");
+  void m.offsetWidth;
+  m.classList.add("view-in");
 }
 
 // pagerFor renders prev/next within the page's type group, in exactly the
@@ -5110,6 +5116,11 @@ async function loadWorkspace(id) {
 
 function route() {
   const hash = location.hash.replace(/^#\//, "");
+  // A view ported to web/src registers under its first hash segment and wins
+  // over the chain below; views is a Map, so "#/constructor" finds nothing.
+  const head = hash.split("/", 1)[0];
+  const ported = window.kiln?.views.get(head);
+  if (ported) return showPorted(ported, hash);
   if (hash.startsWith("page/")) return showPage(decodeURIComponent(hash.slice(5)));
   if (hash.startsWith("search/")) return showSearch(decodeURIComponent(hash.slice(7)));
   if (hash === "overview") return overviewOrGetStarted();
@@ -5133,6 +5144,22 @@ function route() {
   // The default landing, and the explicit one, both route through the same
   // check -- an empty hash is the common case on first load.
   return overviewOrGetStarted();
+}
+
+// showPorted mounts a Preact view into <main> through the window.kiln bridge.
+// beginView does the navigation chores every view shares (token, title, nav
+// state, focus, scroll, the departing view's cleanups); the unmount is itself
+// a cleanup, so the next route() tears the component down before anything
+// else renders. main is emptied and marked settled first: the delayed
+// skeleton and done() both write innerHTML, which would wipe a mounted tree.
+// Preact renders synchronously, so settleMain reads the mounted markup.
+function showPorted(ported, hash) {
+  beginView(ported.title, ported.view, ported.activeSlug(hash));
+  const m = $("main");
+  m.replaceChildren();
+  m.removeAttribute("aria-busy");
+  onViewCleanup(window.kiln.mount(m, ported.component, { hash, nav }));
+  settleMain(m);
 }
 
 // A bench with no pages has no overview to show. Rather than an empty

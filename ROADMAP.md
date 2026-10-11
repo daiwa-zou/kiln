@@ -418,6 +418,11 @@ landed first.*
    first layout fills about a third of the canvas and its labels overlap.
    Fit the layout to the viewport on load, label nodes by title, and hide
    colliding labels until zoomed in.
+   *In progress: the toolchain and the bridge (8a) are in — `web/`, the
+   committed `internal/api/ui/dist`, the `ui` CI job, `window.kiln` in
+   `route()`, characterization fixtures for the legacy renderer, and a
+   token contrast test. No view is ported yet; the type contract (8b) is
+   next.*
 9. **The reader reads like prose** ✅ shipped (2026-10-10) — fixes from a
    UI review on 2026-10-10, small enough to land in today's `app.js` ahead
    of item 8. The port carries them over unchanged.

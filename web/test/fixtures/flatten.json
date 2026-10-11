@@ -1,0 +1,111 @@
+{
+  "generatedFrom": "internal/api/ui/app.js",
+  "bench": {
+    "now": "2026-06-15T12:00:00Z",
+    "pages": [
+      {
+        "slug": "glaze-chemistry",
+        "title": "Glaze chemistry",
+        "type": "concept",
+        "builtAtRef": "r3",
+        "updated": "2026-06-14"
+      },
+      {
+        "slug": "kiln-firing-schedule",
+        "title": "Kiln firing schedule",
+        "type": "concept",
+        "builtAtRef": "r2",
+        "updated": "2026-06-01"
+      },
+      {
+        "slug": "cone-ratings",
+        "title": "Cone ratings",
+        "type": "entity",
+        "builtAtRef": "r1"
+      },
+      {
+        "slug": "reduction-firing",
+        "title": "Reduction firing",
+        "type": "concept",
+        "builtAtRef": "r0",
+        "updated": "2026-05-20T08:30:00Z"
+      },
+      {
+        "slug": "studio-safety",
+        "title": "Studio safety",
+        "type": "synthesis"
+      },
+      {
+        "slug": "clay-bodies",
+        "title": "Clay bodies",
+        "type": "source",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "acquisitions",
+        "title": "Equipment acquisitions",
+        "type": "query",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "kiln-wash",
+        "title": "",
+        "type": "entity",
+        "builtAtRef": "r3"
+      }
+    ],
+    "refs": [
+      "r3",
+      "r2",
+      "r1"
+    ]
+  },
+  "cases": [
+    {
+      "name": "citations removed",
+      "sentence": "Cone 6 is hot (notes/cones.md:4-9).",
+      "output": {
+        "text": "Cone 6 is hot.",
+        "cites": [
+          {
+            "path": "notes/cones.md",
+            "ranges": [
+              "4–9"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "wikilinks to titles",
+      "sentence": "See [[glaze-chemistry]] and [[missing-one]] and [[cone-ratings|cones]].",
+      "output": {
+        "text": "See Glaze chemistry and missing-one and cones.",
+        "cites": []
+      }
+    },
+    {
+      "name": "emphasis dropped",
+      "sentence": "A **strong** and *soft* ~~gone~~ claim.",
+      "output": {
+        "text": "A strong and soft gone claim.",
+        "cites": []
+      }
+    },
+    {
+      "name": "code-span citation",
+      "sentence": "Stated in `notes/a.md:3` already.",
+      "output": {
+        "text": "Stated in already.",
+        "cites": [
+          {
+            "path": "notes/a.md",
+            "ranges": [
+              "3"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

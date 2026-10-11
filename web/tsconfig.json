@@ -1,0 +1,6 @@
+{
+  // `tsc -b` checks both: the browser code (tsconfig.app.json) and the Node
+  // side, meaning tests and build configs (tsconfig.node.json).
+  "files": [],
+  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }]
+}

@@ -1,7 +1,7 @@
 version: 2
 
 # Dependabot alerts and version updates are free on private repos, unlike
-# CodeQL. Everything is grouped so this produces at most two PRs a week.
+# CodeQL. Everything is grouped so this produces at most three PRs a week.
 updates:
   - package-ecosystem: gomod
     directory: /
@@ -25,3 +25,28 @@ updates:
         patterns: ['*']
     commit-message:
       prefix: 'ci'
+
+  # The typed UI's toolchain (web/). Everything in it is a devDependency;
+  # only what modules.txt lists reaches the browser. The cooldown keeps a
+  # freshly published (possibly hijacked) release out until it has had two
+  # weeks in the wild. Each bump also rebuilds internal/api/ui/dist, which
+  # Dependabot cannot do: the ui check fails until someone runs `make ui` on
+  # the branch.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # typescript-eslint pins a TypeScript peer range; a TypeScript major
+      # lands with it, by hand.
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major']
+    commit-message:
+      prefix: 'deps'

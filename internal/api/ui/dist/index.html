@@ -7,6 +7,10 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5.5' fill='%23b4530a'/%3E%3Cpath fill='%23faf7f2' fill-rule='evenodd' d='M5,20V11.5Q5,4,12,4Q19,4,19,11.5V20ZM9,20V14.5Q9,11,12,11Q15,11,15,14.5V20Z'/%3E%3C/svg%3E">
 <title>kiln</title>
 <link rel="stylesheet" href="/ui/style.css">
+<!-- The typed UI (web/src). A module script is deferred, and it sits ahead of
+     the legacy defer scripts in document order, so window.kiln exists before
+     app.js boots and routes. Vite rewrites this to the hashed bundle. -->
+  <script type="module" crossorigin src="/ui/assets/index-DTKECFKR.js"></script>
 </head>
 <body>
 <!-- Symbol definitions only. Taken out of flow: an inline <svg>, even at zero

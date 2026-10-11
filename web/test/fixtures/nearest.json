@@ -1,0 +1,109 @@
+{
+  "generatedFrom": "internal/api/ui/app.js",
+  "bench": {
+    "now": "2026-06-15T12:00:00Z",
+    "pages": [
+      {
+        "slug": "glaze-chemistry",
+        "title": "Glaze chemistry",
+        "type": "concept",
+        "builtAtRef": "r3",
+        "updated": "2026-06-14"
+      },
+      {
+        "slug": "kiln-firing-schedule",
+        "title": "Kiln firing schedule",
+        "type": "concept",
+        "builtAtRef": "r2",
+        "updated": "2026-06-01"
+      },
+      {
+        "slug": "cone-ratings",
+        "title": "Cone ratings",
+        "type": "entity",
+        "builtAtRef": "r1"
+      },
+      {
+        "slug": "reduction-firing",
+        "title": "Reduction firing",
+        "type": "concept",
+        "builtAtRef": "r0",
+        "updated": "2026-05-20T08:30:00Z"
+      },
+      {
+        "slug": "studio-safety",
+        "title": "Studio safety",
+        "type": "synthesis"
+      },
+      {
+        "slug": "clay-bodies",
+        "title": "Clay bodies",
+        "type": "source",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "acquisitions",
+        "title": "Equipment acquisitions",
+        "type": "query",
+        "builtAtRef": "r3"
+      },
+      {
+        "slug": "kiln-wash",
+        "title": "",
+        "type": "entity",
+        "builtAtRef": "r3"
+      }
+    ],
+    "refs": [
+      "r3",
+      "r2",
+      "r1"
+    ]
+  },
+  "cases": [
+    {
+      "slug": "glaze",
+      "limit": 5,
+      "output": [
+        "glaze-chemistry"
+      ]
+    },
+    {
+      "slug": "kiln-firing",
+      "limit": 5,
+      "output": [
+        "kiln-firing-schedule",
+        "kiln-wash",
+        "reduction-firing"
+      ]
+    },
+    {
+      "slug": "acquisition",
+      "limit": 3,
+      "output": [
+        "acquisitions"
+      ]
+    },
+    {
+      "slug": "firing-schedule-for-cone-six",
+      "limit": 5,
+      "output": [
+        "kiln-firing-schedule",
+        "cone-ratings",
+        "reduction-firing"
+      ]
+    },
+    {
+      "slug": "zzz-nothing-matches",
+      "limit": 5,
+      "output": []
+    },
+    {
+      "slug": "clay",
+      "limit": 1,
+      "output": [
+        "clay-bodies"
+      ]
+    }
+  ]
+}

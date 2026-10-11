@@ -14,7 +14,7 @@ DEV_CONFIG := config.dev.toml
 GOLANGCI := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
 .PHONY: help all build clean fmt tidy lint vulncheck \
-        test test-verbose test-integration test-claude cover \
+        test test-verbose test-integration test-claude cover ui ui-check \
         db-up db-down migrate doctor token status \
         dev dev-cli dev-up dev-seed dev-db migrate-dev dev-build dev-clean \
         image compose-up compose-down manifests helm-lint \
@@ -104,6 +104,58 @@ fmt: ## gofmt every package
 
 tidy: ## prune and sync go.mod
 	go mod tidy
+
+# The typed UI in web/ (TypeScript + Preact + Vite). Its build output,
+# internal/api/ui/dist, is committed and embedded, so `go build`, `make test`
+# and edits to the legacy app.js / sources.js / style.css need no Node. These
+# two do, at exactly the version in .nvmrc: Vite's output is only
+# byte-identical to CI's under the same Node, and CI fails on any diff.
+NODE_WANT := $(shell cat .nvmrc 2>/dev/null)
+UI_OUT    := internal/api/ui/dist web/modules.txt
+
+define ui-node-guard
+	@have=$$(node -v 2>/dev/null || echo "no node"); \
+	if [ "$$have" != "v$(NODE_WANT)" ]; then \
+		echo "make $@: needs Node $(NODE_WANT) (from .nvmrc), found $$have." >&2; \
+		echo "  Switch with 'nvm use' or 'fnm use' in the repo root. go build and" >&2; \
+		echo "  legacy UI edits need no Node; only rebuilding web/ does." >&2; \
+		exit 1; \
+	fi
+endef
+
+# Lists every build output with its git blob hash, so a rebuild can be
+# compared byte for byte whether or not the output is committed yet.
+ui-snapshot = find $(UI_OUT) -type f 2>/dev/null | LC_ALL=C sort | while read -r f; do echo "$$f $$(git hash-object "$$f")"; done
+
+ui: ## rebuild internal/api/ui/dist from web/ (Node per .nvmrc)
+	$(ui-node-guard)
+	cd web && npm ci --ignore-scripts && npm run build
+
+# What CI's ui job runs: install, type check, lint, tests, build, the gzip
+# budget, and a check that the build reproduces the dist in your tree. That
+# is your working tree, not the commit: commit it afterwards, since CI
+# compares against the committed copy.
+UI_GZ_BUDGET := 40960 # bytes; matches BUDGET_BYTES in ci.yml
+
+ui-check: ## type check, lint, test and rebuild web/; fail if dist changes
+	$(ui-node-guard)
+	@before=$$($(ui-snapshot)); \
+	(cd web && npm ci --ignore-scripts && npm run typecheck && npm run lint && npm test && npm run build) || exit 1; \
+	total=0; \
+	for f in $$(find internal/api/ui/dist/assets -type f \( -name '*.js' -o -name '*.css' \)); do \
+		total=$$((total + $$(gzip -9 -c "$$f" | wc -c))); \
+	done; \
+	echo "ui-check: bundle $$total bytes gzipped, budget $(strip $(UI_GZ_BUDGET))"; \
+	if [ "$$total" -gt $(strip $(UI_GZ_BUDGET)) ]; then \
+		echo "make ui-check: the bundle is over its gzip budget." >&2; \
+		exit 1; \
+	fi; \
+	after=$$($(ui-snapshot)); \
+	if [ "$$before" != "$$after" ]; then \
+		echo "make ui-check: the rebuild changed $(UI_OUT); the tree now holds the rebuilt output, review and commit it." >&2; \
+		exit 1; \
+	fi; \
+	echo "ui-check: the build reproduces the dist in your tree; commit it"
 
 # == Operating a local instance
 
