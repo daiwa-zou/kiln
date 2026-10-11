@@ -41,11 +41,18 @@ config:
 
   database:
     # Either a full URL (via existingSecret, preferably) or discrete fields.
+    # With pooler.enabled the discrete fields are required: they are what the
+    # pooler forwards to, and the migrate Job's direct connection.
     host: ""
     port: 5432
     name: kiln
     user: kiln
+    # Also what the API and workers use towards the pooler when it is enabled.
+    # require encrypts but does not verify the server; for verification mount
+    # a CA and use verify-ca or verify-full with sslrootcert.
     sslmode: require
+    # Per-replica pool sizes without a pooler. With pooler.enabled the chart
+    # uses pooler.apiMaxConns / pooler.workerMaxConns instead.
     maxConns: 20
     workerMaxConns: 6
 
@@ -179,6 +186,67 @@ worker:
     prometheus.io/scrape: "true"
     prometheus.io/port: "9090"
     prometheus.io/path: /metrics
+
+# --- connection pooler ------------------------------------------------------
+# PgBouncer in transaction mode between the API/workers and Postgres, so adding
+# replicas adds pooler clients rather than Postgres backends. Off by default;
+# RDS Proxy or another transaction pooler works too (leave this off and point
+# config.database.host at it, with KILN_DATABASE_QUERY_EXEC_MODE=cache_describe).
+#
+# Enabling it routes the API and workers through the pooler with
+# query_exec_mode cache_describe and single-digit pools, while the migrate Job
+# keeps connecting to config.database.host directly: it runs as a pre-install
+# hook, before the pooler exists. Requires config.database.host and a
+# database-password key in the secret. A database-url key bypasses the pooler,
+# so secrets.databaseURL is refused here; see docs/deployment.md for sizing.
+pooler:
+  enabled: false
+  image:
+    repository: edoburu/pgbouncer
+    tag: v1.26.0-p0
+    # PgBouncer 1.26.0. Older releases carry unauthenticated-crash CVEs; do not
+    # pin below 1.26.0.
+    digest: sha256:b17551c776ef7e5769ef80b956d20f85e2fd25dd8912d31d58f782aad495b711
+    pullPolicy: IfNotPresent
+  replicas: 2
+  # Server connections per pooler pod. Every pod opens its own pool, so
+  # Postgres sees replicas x (defaultPoolSize + reservePoolSize) at most.
+  defaultPoolSize: 25
+  reservePoolSize: 5
+  maxClientConn: 400
+  # Per-replica kiln pools when pooled. A pooled connection is held only for a
+  # transaction, so these bound concurrent transactions per pod.
+  apiMaxConns: 8
+  workerMaxConns: 4
+  # PgBouncer to Postgres. require encrypts; verify-full also checks the
+  # server's certificate against serverTLS.caSecretName (key ca.crt).
+  serverTlsSslmode: require
+  serverTLS:
+    caSecretName: ""
+  # kiln to PgBouncer. A kubernetes.io/tls Secret (cert-manager, say). Unset,
+  # the chart generates a self-signed one on first install and reuses it on
+  # upgrade; `helm template` without a cluster generates a fresh one each
+  # render, so GitOps users should set this.
+  tls:
+    secretName: ""
+  # Covers the preStop (5s, then PgBouncer's safe shutdown waiting for
+  # in-flight transactions) plus the longest transaction kiln runs. Past it the
+  # pod is killed and whatever is still running fails.
+  terminationGracePeriodSeconds: 120
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  # Rendered only with more than one replica.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
 
 # --- migrations -------------------------------------------------------------
 migrations:

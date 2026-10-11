@@ -1217,6 +1217,7 @@ deliver them.
 | `database.min_conns` | `2` | |
 | `database.max_conn_lifetime` | `1h` | |
 | `database.max_conn_idle_time` | `15m` | |
+| `database.query_exec_mode` | — (pgx default) | `cache_statement`, `cache_describe` or `exec`. Behind a transaction-mode pooler set `cache_describe`; see [deployment.md](deployment.md#connection-pooling). |
 
 ### Agent
 

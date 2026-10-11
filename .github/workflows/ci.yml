@@ -135,6 +135,98 @@ jobs:
             exit 1
           fi
 
+  # The integration suite again, through PgBouncer in transaction mode: the
+  # proof that nothing kiln does relies on session state across transactions.
+  # Both exec modes a pooled deployment may pick are run. cache_describe is the
+  # pooled default; cache_statement is pgx's default, which works only because
+  # PgBouncer tracks prepared statements (max_prepared_statements).
+  #
+  # No coverage here: `integration` already measures it, and this job's point
+  # is a different path to the same assertions. KILN_TEST_DIRECT_DATABASE_URL
+  # lets TestMigrateLeavesNoSessionLocks look past the pooler at pg_locks.
+  #
+  # If the suite deadlocks on the server pool, raise default_pool_size; never
+  # patch a test to fit the pool.
+  integration-pooled:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # cache_describe runs against a PgBouncer that does not track prepared
+        # statements, like RDS Proxy: if the mode failed to reach pgx, its named
+        # statements would collide (42P05) and the leg would fail. Without
+        # this both legs pass whatever mode is in effect.
+        include:
+          - mode: cache_describe
+            prepared_statements: 0
+          - mode: cache_statement
+            prepared_statements: 200
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: kiln
+          POSTGRES_PASSWORD: kiln
+          POSTGRES_DB: kiln
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U kiln"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Bump with the Makefile's POOLER_IMAGE, docker-compose.yml and the chart.
+      PGBOUNCER_IMAGE: edoburu/pgbouncer:v1.26.0-p0@sha256:b17551c776ef7e5769ef80b956d20f85e2fd25dd8912d31d58f782aad495b711
+      KILN_TEST_DIRECT_DATABASE_URL: postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
+      KILN_TEST_DATABASE_URL: postgres://kiln:kiln@localhost:56432/kiln?sslmode=disable&default_query_exec_mode=${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # The repository's own pgbouncer.ini and start.sh, the same ones the
+      # compose stack runs, with only the listen port and the wait budget
+      # overridden for CI.
+      - name: Start PgBouncer
+        run: |
+          docker run -d --name pgbouncer --network host \
+            -v "$PWD/deploy/pgbouncer:/etc/pgbouncer:ro" \
+            -e PGBOUNCER_DB_HOST=127.0.0.1 -e PGBOUNCER_DB_PORT=55432 \
+            -e PGBOUNCER_DB_NAME=kiln -e PGBOUNCER_DB_PASSWORD=kiln \
+            -e PGBOUNCER_SET="listen_port=56432 default_pool_size=20 query_wait_timeout=10 max_prepared_statements=${{ matrix.prepared_statements }}" \
+            --entrypoint /bin/sh "$PGBOUNCER_IMAGE" /etc/pgbouncer/start.sh
+          # Ready means a query made it through to Postgres, not just that
+          # PgBouncer is listening.
+          for i in $(seq 1 30); do
+            if docker exec pgbouncer psql 'postgres://kiln:kiln@127.0.0.1:56432/kiln?sslmode=disable' -qtAc 'select 1' >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs pgbouncer
+          echo "::error::pgbouncer never passed a query through"
+          exit 1
+      - run: go test -race ./... -count=1 -p 1
+      - name: PgBouncer log
+        if: failure()
+        run: docker logs pgbouncer 2>&1 | tail -200
+
+  # The chart has no cluster to deploy to in CI, so it is checked by rendering:
+  # helm lint, then assertions over `helm template` output (the pooler wiring,
+  # the migrate Job going direct, no credential in a ConfigMap) and a
+  # kubeconform schema check of every render.
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # helm and yq are preinstalled on ubuntu-latest; kubeconform is run with
+      # `go run` at the version pinned in scripts/helm-assert.sh.
+      - run: make helm-test
+
   # Proves the ldflags version injection still wires up, which no test covers.
   build:
     runs-on: ubuntu-latest
