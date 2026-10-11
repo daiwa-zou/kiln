@@ -45,6 +45,16 @@ type ReviewRow struct {
 	Researching bool
 	CreatedAt   string
 	ResolvedAt  string
+	// Origin is who filed the item -- an API key's name, "session" or
+	// "local" -- empty for items the pipeline raised. Display only: it is free
+	// text. AgentFiled is true when a key filed it (origin_kind 'key'), which
+	// is what the badge and the flood caps read.
+	Origin     string
+	OriginKind string
+	AgentFiled bool
+	// Proposed is the text of a proposed correction, which a human may
+	// promote to a pinned correction. Empty for every other kind.
+	Proposed string
 }
 
 // ResearchableKinds are the review kinds a research run can answer.
@@ -198,7 +208,8 @@ func (s *WikiStore) ListReviews(ctx context.Context, workspaceID, status string,
 		       coalesce(p.slug, ''), r.unit, r.research, r.research_at,
 		       EXISTS (SELECT 1 FROM runs rn
 		               WHERE rn.review_id = r.id AND rn.status IN ('queued','running')),
-		       r.created_at, r.resolved_at
+		       r.created_at, r.resolved_at,
+		       r.origin, r.origin_kind, r.proposed
 		FROM review_items r
 		LEFT JOIN pages p ON p.id = r.page_id
 		WHERE r.workspace_id = $1
@@ -225,9 +236,10 @@ func (s *WikiStore) ListReviews(ctx context.Context, workspaceID, status string,
 		)
 		if err := rows.Scan(&rv.ID, &rv.Kind, &rv.Title, &rv.Detail, &actions,
 			&rv.Status, &rv.PageSlug, &rv.Unit, &rv.Research, &researchAt, &rv.Researching,
-			&createdAt, &resolvedAt); err != nil {
+			&createdAt, &resolvedAt, &rv.Origin, &rv.OriginKind, &rv.Proposed); err != nil {
 			return nil, fmt.Errorf("store: scan review: %w", err)
 		}
+		rv.AgentFiled = rv.OriginKind == OriginKey
 		rv.CreatedAt = instant(&createdAt)
 		rv.ResearchAt = instant(researchAt)
 		rv.ResolvedAt = instant(resolvedAt)
@@ -309,6 +321,9 @@ type ResearchQuestion struct {
 	// PageSlug is the page the flag was raised against, empty when the item is
 	// about the bench rather than one page.
 	PageSlug string
+	// FiledBy is the item's origin_kind: empty when the pipeline raised it,
+	// otherwise who filed it ('key', 'session', 'local').
+	FiledBy string
 }
 
 // RequestResearch queues a research run for one review item: the worker
@@ -366,11 +381,11 @@ func (s *WikiStore) RequestResearch(ctx context.Context, workspaceID, reviewID s
 func (s *WikiStore) ResearchQuestionFor(ctx context.Context, runID string) (*ResearchQuestion, error) {
 	var q ResearchQuestion
 	err := s.pool.QueryRow(ctx, `
-		SELECT ri.id, ri.kind, ri.title, ri.detail, coalesce(p.slug, '')
+		SELECT ri.id, ri.kind, ri.title, ri.detail, coalesce(p.slug, ''), ri.origin_kind
 		FROM runs r
 		JOIN review_items ri ON ri.id = r.review_id
 		LEFT JOIN pages p ON p.id = ri.page_id
-		WHERE r.id = $1`, runID).Scan(&q.ReviewID, &q.Kind, &q.Title, &q.Detail, &q.PageSlug)
+		WHERE r.id = $1`, runID).Scan(&q.ReviewID, &q.Kind, &q.Title, &q.Detail, &q.PageSlug, &q.FiledBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

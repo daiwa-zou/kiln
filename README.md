@@ -116,7 +116,8 @@ embedded in the binary, so the deployment shape does not change; see
 
 kiln serves a bench to any MCP-capable agent, so an agent answers from the
 compiled wiki instead of re-reading your sources every time. Two ways in, same
-seven tools.
+ten tools: seven that read, and three that file questions and proposed
+corrections for a person to review.
 
 `kiln serve` publishes them over Streamable HTTP at `/mcp`. Nothing to install
 and nothing to run:
@@ -151,6 +152,12 @@ The seven: `search_wiki` and `read_page` carry most traffic, with
 enumeration, `page_backlinks` for context, and `wiki_gaps` — which is what
 lets an agent tell *"the wiki says nothing about X"* from *"the wiki has not
 covered X yet"*.
+
+A key minted with *Can file questions and corrections* (scope
+`read` + `propose:<bench>`) also gets `request_gap`, `file_question` and
+`propose_correction`. They file into that bench's review queue and change no
+page; a person pins a proposed correction or dismisses it. See
+[docs/mcp.md](docs/mcp.md#filing-questions-and-corrections).
 
 Either way an agent reads over the HTTP API rather than the database, so it
 needs no Postgres credentials and the token decides which benches it can see.

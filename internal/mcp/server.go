@@ -14,6 +14,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -34,11 +36,30 @@ type Server struct {
 	bench string
 	// Version is reported to the client during initialize.
 	Version string
+	// writes adds the three filing tools. writeBenches, when non-empty, are
+	// the only bench ids they may file into: a propose key is pinned to one
+	// bench, and saying so up front beats a refusal after the agent has
+	// written its question.
+	writes       bool
+	writeBenches []string
 }
 
 // NewServer builds the MCP server. bench may be empty.
 func NewServer(client *Client, bench, version string) *Server {
 	return &Server{client: client, bench: bench, Version: version}
+}
+
+// WithWrites offers the filing tools -- request_gap, file_question and
+// propose_correction -- alongside the reads, optionally pinned to benches.
+//
+// Off by default, and turned on only for a caller whose key can file: a tool
+// that is listed and then always refused spends the agent's attention on a
+// door that is locked. The API enforces the scope either way; this decides
+// only what the agent is shown.
+func (s *Server) WithWrites(on bool, benches ...string) *Server {
+	s.writes = on
+	s.writeBenches = benches
+	return s
 }
 
 // benchFor resolves the bench a call should read, preferring an explicit
@@ -79,6 +100,30 @@ type listArgs struct {
 	Limit  int    `json:"limit,omitempty" jsonschema:"maximum pages to return (default 100)"`
 	Offset int    `json:"offset,omitempty" jsonschema:"how many pages to skip, for paging through a large bench"`
 }
+
+type gapArgs struct {
+	Slug  string `json:"slug" jsonschema:"the missing page's slug, exactly as wiki_gaps listed it"`
+	Bench string `json:"bench,omitempty" jsonschema:"the bench's id from list_benches; omit when this key files into a single bench"`
+}
+
+type questionArgs struct {
+	Page   string `json:"page" jsonschema:"the slug or path of the page the question is about, as search_wiki returned it"`
+	Kind   string `json:"kind" jsonschema:"uncertain (a claim on the page you could not confirm) or contradiction (the page disagrees with itself or with another page)"`
+	Title  string `json:"title" jsonschema:"the question in one line, at most 200 characters"`
+	Detail string `json:"detail,omitempty" jsonschema:"what you read and why it matters, with page slugs; at most 16 KiB"`
+	Bench  string `json:"bench,omitempty" jsonschema:"the bench's id from list_benches; omit when this key files into a single bench"`
+}
+
+type correctionArgs struct {
+	Page      string `json:"page" jsonschema:"the slug or path of the page to correct, as search_wiki returned it"`
+	Text      string `json:"text" jsonschema:"the correction as a person would pin it: what the page gets wrong and what is right; at most 16 KiB"`
+	Rationale string `json:"rationale,omitempty" jsonschema:"why you believe it: what you read that shows the page is wrong; at most 2000 characters"`
+	Bench     string `json:"bench,omitempty" jsonschema:"the bench's id from list_benches; omit when this key files into a single bench"`
+}
+
+// questionKinds are the kinds file_question takes. A proposed correction has
+// its own tool; every other kind belongs to the pipeline or to people.
+var questionKinds = []string{"uncertain", "contradiction"}
 
 // Register adds every tool to an MCP server.
 func (s *Server) Register(srv *mcp.Server) {
@@ -130,6 +175,145 @@ func (s *Server) Register(srv *mcp.Server) {
 			"missing, and which pages wanted them. Use this to tell the difference between " +
 			"'the wiki says nothing about X' and 'the wiki has not covered X yet'.",
 	}, s.wikiGaps)
+
+	if !s.writes {
+		return
+	}
+
+	// The filing tools. Each description says the same thing first, because
+	// it is the thing an agent most needs to believe: nothing it sends here
+	// changes a page. Everything lands in the bench's review queue, where a
+	// person reads it.
+	// Without a pin the server cannot know where the key may file (a write
+	// token anywhere it can write, a propose key into one bench, which stdio
+	// cannot see), so the description says how it is decided.
+	where := " Files into the bench you pass, if this key may file there: a key made with " +
+		"\"Can file questions and corrections\" files into one bench only, and kiln refuses the rest."
+	if len(s.writeBenches) > 0 {
+		where = " This key files only into bench " + strings.Join(s.writeBenches, ", ") +
+			" (list_benches names it); any other bench is refused."
+	}
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "request_gap",
+		Description: "Ask for a missing page to be written. Changes nothing in the wiki: it files a " +
+			"request in the bench's review queue for a person to act on. Only slugs wiki_gaps " +
+			"lists can be requested; asking twice files once." + where,
+	}, s.requestGap)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "file_question",
+		Description: "Raise a question about a page for a person to answer: a claim you could not " +
+			"confirm (kind uncertain) or a contradiction (kind contradiction). Changes nothing in the " +
+			"wiki: the question goes to the bench's review queue. Filing the same question about the " +
+			"same page twice files it once." + where,
+	}, s.fileQuestion)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "propose_correction",
+		Description: "Propose a correction to a page. Changes nothing in the wiki: the proposal goes " +
+			"to the bench's review queue, and only a person who reads it can pin it as a correction, " +
+			"which the next rebuild of the page then follows. Say what is wrong and what is right, " +
+			"and give your evidence as the rationale." + where,
+	}, s.proposeCorrection)
+}
+
+// writeBenchFor resolves the bench a filing goes to. A key pinned to one bench
+// files there by default, and is refused up front for any other: the API
+// would refuse it anyway, but only after the agent had composed the filing.
+func (s *Server) writeBenchFor(arg string) (string, error) {
+	if strings.TrimSpace(arg) == "" && len(s.writeBenches) == 1 {
+		return s.writeBenches[0], nil
+	}
+	bench, err := s.benchFor(arg)
+	if err != nil {
+		return "", err
+	}
+	if len(s.writeBenches) > 0 && !slices.Contains(s.writeBenches, bench) {
+		return "", fmt.Errorf("this key files only into bench %s; pass that id as `bench`. "+
+			"Filing into another bench needs a key minted on that bench", strings.Join(s.writeBenches, ", "))
+	}
+	return bench, nil
+}
+
+// filingErr turns a refused filing into something an agent can act on. A 403
+// is the one worth spelling out: the agent cannot fix it, but it can tell its
+// user exactly what to ask for.
+func filingErr(err error, bench string) error {
+	var se *StatusError
+	if !errors.As(err, &se) {
+		return benchErr(err, bench)
+	}
+	switch se.Code {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("kiln refused the filing (%s). This key cannot file into bench %q: ask a member "+
+			"of that bench for a key with \"Can file questions and corrections\" (Agent access, then "+
+			"Keys, in the kiln UI). Nothing was filed", se.Msg, bench)
+	case http.StatusNotFound:
+		return fmt.Errorf("%s: nothing was filed. search_wiki finds the right page slug, and "+
+			"list_benches the bench", se.Msg)
+	case http.StatusTooManyRequests:
+		return fmt.Errorf("%s. Nothing was filed; stop filing for now", se.Msg)
+	}
+	return se
+}
+
+func (s *Server) requestGap(ctx context.Context, _ *mcp.CallToolRequest, args gapArgs) (*mcp.CallToolResult, any, error) {
+	bench, err := s.writeBenchFor(args.Bench)
+	if err != nil {
+		return toolError(err), nil, nil
+	}
+	slug := strings.TrimSpace(args.Slug)
+	if slug == "" {
+		return toolError(errors.New("slug is empty: pass a slug from wiki_gaps")), nil, nil
+	}
+	if err := s.client.RequestGap(ctx, bench, slug); err != nil {
+		return toolError(filingErr(err, bench)), nil, nil
+	}
+	return text(fmt.Sprintf("Asked for %q in bench %s. It is in the review queue for a person; "+
+		"nothing in the wiki changed.", slug, bench)), nil, nil
+}
+
+func (s *Server) fileQuestion(ctx context.Context, _ *mcp.CallToolRequest, args questionArgs) (*mcp.CallToolResult, any, error) {
+	bench, err := s.writeBenchFor(args.Bench)
+	if err != nil {
+		return toolError(err), nil, nil
+	}
+	if !slices.Contains(questionKinds, args.Kind) {
+		return toolError(fmt.Errorf("kind must be %s; to propose a fix, use propose_correction",
+			strings.Join(questionKinds, " or "))), nil, nil
+	}
+	res, err := s.client.FileReview(ctx, bench, FileRequest{
+		Kind: args.Kind, Page: strings.TrimSpace(args.Page),
+		Title: args.Title, Detail: args.Detail,
+	})
+	if err != nil {
+		return toolError(filingErr(err, bench)), nil, nil
+	}
+	return text(filedText(res, "question", bench)), nil, nil
+}
+
+func (s *Server) proposeCorrection(ctx context.Context, _ *mcp.CallToolRequest, args correctionArgs) (*mcp.CallToolResult, any, error) {
+	bench, err := s.writeBenchFor(args.Bench)
+	if err != nil {
+		return toolError(err), nil, nil
+	}
+	res, err := s.client.FileReview(ctx, bench, FileRequest{
+		Kind: "correction", Page: strings.TrimSpace(args.Page),
+		Text: args.Text, Detail: args.Rationale,
+	})
+	if err != nil {
+		return toolError(filingErr(err, bench)), nil, nil
+	}
+	return text(filedText(res, "proposed correction", bench)), nil, nil
+}
+
+func filedText(res FileResult, what, bench string) string {
+	if res.Status == "already_open" {
+		return fmt.Sprintf("An identical %s is already open in bench %s (review %s); nothing new was filed.",
+			what, bench, res.ID)
+	}
+	return fmt.Sprintf("Filed the %s in bench %s as review %s. A person will read it; nothing in the "+
+		"wiki changed.", what, bench, res.ID)
 }
 
 // --- tool implementations ---------------------------------------------------

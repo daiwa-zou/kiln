@@ -1,7 +1,9 @@
 # Serving the wiki to agents
 
 kiln exposes a bench over the Model Context Protocol two ways. They run the same
-seven tools against the same HTTP API; what differs is who can reach them.
+tools against the same HTTP API: seven that read, plus three that file into the
+review queue for a key allowed to (see [Filing](#filing-questions-and-corrections)).
+What differs is who can reach them.
 
 | | `kiln mcp` | `kiln serve` |
 | --- | --- | --- |
@@ -136,8 +138,73 @@ Anything that speaks Streamable HTTP takes the endpoint plus a bearer header.
 Clients that want a command rather than a URL — or that run somewhere the
 address does not resolve — take the `kiln mcp` subprocess form above.
 
-Mint a key with `kiln admin token create`. It carries the read scope and sees
-exactly the benches its owner does.
+Mint a key under **Agent access → Keys**, or with `kiln admin token create`.
+It carries the read scope and sees exactly the benches its owner does.
+
+## Filing questions and corrections
+
+Ten tools in all. The seven reads are always there. Three more file into a
+bench's review queue, and nothing any of them sends changes a page:
+
+| Tool | Files |
+| --- | --- |
+| `request_gap{bench, slug}` | a request for a page `wiki_gaps` lists (the Gaps view's "Ask for it") |
+| `file_question{bench, page, kind, title, detail}` | a question about a page: `uncertain` or `contradiction` |
+| `propose_correction{bench, page, text, rationale}` | a proposed correction, which only a person can pin |
+
+**Scopes.** A key minted with *Can file questions and corrections* carries
+`read` and `propose:<bench id>`, and files into that one bench. `propose` is
+accepted on exactly two routes, `POST …/workspaces/{ws}/reviews` and
+`POST …/workspaces/{ws}/gaps/{slug}/request`, and refused on every other
+mutation. It cannot pin a correction, resolve a review, delete a page or mint
+a key. A `read` key sees only the seven reads, and a filing tool called by name
+is refused. A `write` token sees the filing tools too, but nothing new opens up
+for it: a write token can already pin corrections directly over REST, so treat
+write tokens as human credentials and give agents propose keys.
+
+**Promotion is human.** A proposed correction waits under Reviews, showing its
+text verbatim and the key that filed it. A member with write access pins it
+with `POST …/reviews/{id}/promote {text}` (the inbox's *Pin as a correction*,
+after ticking *I have read this text*). The text they confirm, which they may
+edit, is what gets pinned, in the same transaction that approves the review.
+Prompts label a promoted correction "proposed by an agent, confirmed by a
+workspace member", fenced like every other correction.
+
+**Flood control.** Each key has its own filing bucket (ten at once, then one
+every six seconds), and every filing also spends from its owner's write bucket.
+A bench holds at most 20 open items per key and 200 key-filed items in total,
+gap requests included;
+past that the filing answers `429` until people work through the queue. A
+person holds at most 20 live keys.
+
+**Getting a key that can file.** Mint it under **Agent access → Keys** with the
+bench you want it to file into open, ticking *Can file questions and
+corrections*. That needs token authentication (the default `auth.mode`) and a
+role on the bench that can write; `kiln admin token create` does not mint
+propose keys.
+
+**stdio.** `kiln mcp` cannot see its key's scopes, so it offers the filing tools
+only with `--propose`:
+
+```json
+{
+  "mcpServers": {
+    "kiln": {
+      "command": "kiln",
+      "args": ["mcp", "--propose", "--url", "https://your-kiln", "--workspace", "<bench id>"],
+      "env": {"KILN_TOKEN": "kiln_..."}
+    }
+  }
+}
+```
+
+Its tool descriptions cannot name the bench, so pass the key's bench as
+`--workspace` (or as `bench` on each call); kiln refuses any other.
+
+**Authentication disabled.** With `auth.mode = "none"` every caller is trusted,
+so the endpoint shows the filing tools to everyone and they file into any
+bench. That mode is refused on a non-loopback bind, and the API's loopback
+guard is what stands between a web page and these routes.
 
 ## What is not built yet
 

@@ -216,8 +216,9 @@ func scanPage(row pgx.Row) (wiki.Page, error) {
 // into every prompt that rebuilds it.
 func (s *WikiStore) LoadSteering(ctx context.Context, workspaceID string) (jobs.Steering, error) {
 	out := jobs.Steering{
-		Corrections: map[string][]string{},
-		Suppressed:  map[string]string{},
+		Corrections:         map[string][]string{},
+		PromotedCorrections: map[string][]string{},
+		Suppressed:          map[string]string{},
 	}
 
 	rows, err := s.pool.Query(ctx,
@@ -244,7 +245,7 @@ func (s *WikiStore) LoadSteering(ctx context.Context, workspaceID string) (jobs.
 	}
 
 	corr, err := s.pool.Query(ctx, `
-		SELECT p.slug, c.body
+		SELECT p.slug, c.body, c.proposed_by <> ''
 		FROM page_corrections c
 		JOIN pages p ON p.id = c.page_id
 		JOIN wikis w ON w.id = p.wiki_id
@@ -256,9 +257,16 @@ func (s *WikiStore) LoadSteering(ctx context.Context, workspaceID string) (jobs.
 	defer corr.Close()
 
 	for corr.Next() {
-		var slug, body string
-		if err := corr.Scan(&slug, &body); err != nil {
+		var (
+			slug, body string
+			promoted   bool
+		)
+		if err := corr.Scan(&slug, &body, &promoted); err != nil {
 			return out, fmt.Errorf("store: scan correction: %w", err)
+		}
+		if promoted {
+			out.PromotedCorrections[slug] = append(out.PromotedCorrections[slug], body)
+			continue
 		}
 		out.Corrections[slug] = append(out.Corrections[slug], body)
 	}

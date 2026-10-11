@@ -154,6 +154,11 @@ type Steering struct {
 	// never hand-edited -- an edit would be clobbered on regeneration -- so
 	// corrections live outside the page and are re-injected every time.
 	Corrections map[string][]string
+	// PromotedCorrections are corrections that began as an agent's proposal
+	// and were pinned by a member who read and confirmed the text. Kept apart
+	// from Corrections so the prompt can say so: the text was not written by
+	// the member whose confirmation put it there.
+	PromotedCorrections map[string][]string
 	// Suppressed maps the slug of a page a human deleted to their reason for
 	// deleting it, empty when they gave none.
 	//

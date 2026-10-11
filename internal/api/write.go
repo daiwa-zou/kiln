@@ -266,6 +266,14 @@ func (s *Server) handleReviews(w http.ResponseWriter, r *http.Request) {
 			"researching": rv.Researching,
 			"research":    rv.Research,
 			"researched":  rv.ResearchAt,
+			// Who filed it, and for a proposed correction the text a person
+			// would pin. promotable says the promote route will take it, for
+			// the same reason researchable is decided here.
+			"origin":     rv.Origin,
+			"originKind": rv.OriginKind,
+			"agentFiled": rv.AgentFiled,
+			"proposed":   rv.Proposed,
+			"promotable": rv.Status == "open" && rv.Kind == "correction" && rv.PageSlug != "",
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -387,8 +395,11 @@ func (s *Server) handleBacklinks(w http.ResponseWriter, r *http.Request) {
 //
 // The store deduplicates open items on (kind, title), so asking twice asks
 // once, while asking again after someone dismissed it files it afresh.
+//
+// This is also the MCP request_gap tool, and so one of the two filing routes a
+// propose-scoped agent key may reach (proposeRoutes).
 func (s *Server) handleGapRequest(w http.ResponseWriter, r *http.Request) {
-	ws, _, ok := s.guardWrite(w, r, maxResolveBytes)
+	ws, ok := s.guardFiling(w, r, maxResolveBytes)
 	if !ok {
 		return
 	}
@@ -421,9 +432,24 @@ func (s *Server) handleGapRequest(w http.ResponseWriter, r *http.Request) {
 	// written -- it records the request where a human will see it, and `gap`
 	// is researchable, so a worker can be sent to read the sources first.
 	title := fmt.Sprintf("Write the missing page %q", slug)
-	detail := fmt.Sprintf("%d %s link to %q and it has never been written. "+
-		"Asked for from the Gaps view.", wanted, pages, slug)
-	if err := s.Runs.FileReview(r.Context(), ws.ID, "gap", title, detail); err != nil {
+	origin, kind, tokenID := filingOrigin(r)
+	asker := "Asked for from the Gaps view."
+	if kind == store.OriginKey {
+		asker = fmt.Sprintf("Asked for by an agent, with the key %q.", origin)
+	}
+	detail := fmt.Sprintf("%d %s link to %q and it has never been written. %s",
+		wanted, pages, slug, asker)
+	// Filed through the same path as every other filing, so a key asking for
+	// gaps in a loop meets the same caps, and the item records who asked.
+	_, _, err = s.Writes.FileAgentReview(r.Context(), store.FileReviewParams{
+		WorkspaceID: ws.ID, Kind: "gap", Title: title, Detail: detail,
+		Origin: origin, OriginKind: kind, OriginToken: tokenID,
+	})
+	switch {
+	case errors.Is(err, store.ErrAgentCap):
+		writeAgentCap(w)
+		return
+	case err != nil:
 		s.fail(w, err)
 		return
 	}

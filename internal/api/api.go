@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,6 +55,8 @@ type WriteStore interface {
 	SetCorrectionActive(ctx context.Context, workspaceID, correctionID string, active bool) error
 	ListReviews(ctx context.Context, workspaceID, status string, limit, offset int) ([]store.ReviewRow, error)
 	ResolveReview(ctx context.Context, workspaceID, reviewID, action, resolvedBy string) error
+	FileAgentReview(ctx context.Context, p store.FileReviewParams) (id, outcome string, err error)
+	PromoteReview(ctx context.Context, workspaceID, reviewID, text, promotedBy string) (string, error)
 	RequestResearch(ctx context.Context, workspaceID, reviewID string) (runID string, err error)
 	Backlinks(ctx context.Context, workspaceID, slug string) ([]store.PageInfo, error)
 	WorkspaceRole(ctx context.Context, workspaceID, userID string) (string, error)
@@ -151,6 +152,12 @@ type Server struct {
 	// writeLimit buckets mutating requests per caller; created by Router().
 	writeLimit *limiter
 
+	// filingLimit buckets the filing routes per API key, on top of the
+	// caller's writeLimit bucket: an agent filing in a loop runs out of its
+	// own allowance without draining the person who minted it, and cannot
+	// outrun theirs by holding several keys. Created by Router().
+	filingLimit *limiter
+
 	// uploadLimit buckets file uploads separately from other writes: dropping
 	// a folder of documents is one user action that arrives as many requests,
 	// so it gets a roomier bucket than the human-paced write surface.
@@ -188,7 +195,11 @@ func (s *Server) Router() http.Handler {
 	if s.writeLimit == nil {
 		s.writeLimit = newLimiter()
 	}
+	if s.filingLimit == nil {
+		s.filingLimit = newLimiterSized(filingBurst, filingRefillEach)
+	}
 	r := chi.NewRouter()
+	mux := r
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	if s.Metrics != nil {
@@ -234,7 +245,7 @@ func (s *Server) Router() http.Handler {
 
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Timeout(30 * time.Second))
-		s.mountRoutes(r)
+		s.mountRoutes(r, mux)
 	})
 
 	mountUI(r)
@@ -253,8 +264,9 @@ func (s *Server) handler() http.Handler {
 }
 
 // mountRoutes registers everything except the upload route, under the
-// standard request timeout.
-func (s *Server) mountRoutes(r chi.Router) {
+// standard request timeout. mux is the finished top-level router, which the
+// propose gate asks which route a request will reach.
+func (s *Server) mountRoutes(r chi.Router, mux chi.Routes) {
 	// Liveness answers even when the database is down: a failing readiness
 	// check should not make an orchestrator kill a process that is merely
 	// waiting on Postgres.
@@ -292,7 +304,9 @@ func (s *Server) mountRoutes(r chi.Router) {
 
 		r.Group(func(r chi.Router) {
 			if s.Auth != nil {
-				r.Use(s.Auth.Wrap)
+				// The one place a propose-scoped key is admitted to a
+				// mutation; see proposeGate and proposeRoutes.
+				r.Use(s.Auth.WithPropose(s.proposeGate(mux)).Wrap)
 			}
 			if s.Users != nil {
 				r.Get("/me", s.handleMe)
@@ -403,6 +417,21 @@ func (s *Server) mountRoutes(r chi.Router) {
 				r.Get("/reviews", s.handleReviews)
 				r.Get("/corrections/*", s.handleCorrectionsList)
 
+				// Filing: the only routes a propose-scoped agent key reaches
+				// (proposeRoutes names them; a drift test keeps the two in
+				// step). Each request spends from the caller's write bucket
+				// and from the key's own, so neither limit can be dodged.
+				r.Group(func(r chi.Router) {
+					r.Use(writeLimiter(s.writeLimit), filingLimiter(s.filingLimit))
+					r.Post("/reviews", s.handleReviewFile)
+					// Asking for a missing page files a review on the same
+					// queue an agent-raised flag lands on, and mounts only
+					// where there is a queue to file it on.
+					if s.Runs != nil {
+						r.Post("/gaps/{slug}/request", s.handleGapRequest)
+					}
+				})
+
 				r.Group(func(r chi.Router) {
 					r.Use(writeLimiter(s.writeLimit))
 					r.Put("/steering/{kind}", s.handleSteeringPut)
@@ -419,17 +448,16 @@ func (s *Server) mountRoutes(r chi.Router) {
 					r.Delete("/pages/*", s.handlePageDelete)
 					r.Post("/pages-deleted/{slug}/restore", s.handlePageRestore)
 					r.Post("/reviews/{id}/resolve", s.handleReviewResolve)
+					// Promotion pins a proposed correction: a page-changing
+					// act, so it sits with corrections under write, and is
+					// deliberately not a filing route.
+					r.Post("/reviews/{id}/promote", s.handleReviewPromote)
 					// Queueing research spends real money, so it sits behind
 					// the same write limiter and role gate as a rebuild. The
 					// route mounts only when there is a queue to put it on:
 					// without one the button would file a run nothing claims.
 					if s.Runs != nil {
 						r.Post("/reviews/{id}/research", s.handleReviewResearch)
-						// Asking for a missing page files a review on the same
-						// queue an agent-raised flag lands on, so it shares the
-						// write limiter and role gate, and mounts only where
-						// there is a queue to file it on.
-						r.Post("/gaps/{slug}/request", s.handleGapRequest)
 					}
 				})
 			})
@@ -735,11 +763,7 @@ func (s *Server) handleGaps(w http.ResponseWriter, r *http.Request) {
 // appear inside one and the mapping is lossless. A percent-encoded
 // "org%2Fslug" is accepted too, for clients that encode the slash themselves.
 func workspaceRef(r *http.Request) string {
-	ref := chi.URLParam(r, "workspace")
-	if dec, err := url.PathUnescape(ref); err == nil {
-		ref = dec
-	}
-	return strings.Replace(ref, "~", "/", 1)
+	return refFromParam(chi.URLParam(r, "workspace"))
 }
 
 // resolve turns the {workspace} path segment into a workspace, bounded to
