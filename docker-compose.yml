@@ -1,5 +1,5 @@
-# A complete kiln deployment: Postgres, S3-compatible object storage, the API
-# with its embedded reading UI, and a pool of build workers.
+# A complete kiln deployment: Postgres behind PgBouncer, S3-compatible object
+# storage, the API with its embedded reading UI, and a pool of build workers.
 #
 # The topology is the point. `kiln serve --with-worker` exists for a laptop,
 # but this file runs the API and the workers as separate services because that
@@ -23,6 +23,8 @@
 name: kiln
 
 x-kiln-env: &kiln-env
+  # Direct to Postgres. Only migrate uses this as-is; the API and workers
+  # override it below to go through the pooler.
   KILN_DATABASE_URL: postgres://kiln:${POSTGRES_PASSWORD:-kiln}@postgres:5432/kiln?sslmode=disable
   KILN_STORAGE_BACKEND: s3
   KILN_STORAGE_ENDPOINT: minio:9000
@@ -76,6 +78,44 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # Transaction pooling in front of Postgres, so `--scale worker=N` and more API
+  # replicas multiply cheap pooler clients rather than Postgres backends. The
+  # settings are deploy/pgbouncer/pgbouncer.ini; start.sh writes the userlist
+  # from POSTGRES_PASSWORD at start, so no credential is baked into a file.
+  # Migrations skip it and go direct (see migrate).
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.0-p0@sha256:b17551c776ef7e5769ef80b956d20f85e2fd25dd8912d31d58f782aad495b711
+    # The image's own entrypoint rewrites files under /etc/pgbouncer, which is
+    # mounted read-only here.
+    entrypoint: ["/bin/sh", "/etc/pgbouncer/start.sh"]
+    environment:
+      PGBOUNCER_DB_HOST: postgres
+      PGBOUNCER_DB_NAME: kiln
+      PGBOUNCER_DB_PASSWORD: ${POSTGRES_PASSWORD:-kiln}
+      # The bundled Postgres has no TLS, so the pooler uses prefer. Pointed at
+      # a Postgres across a network, require (or verify-full) instead:
+      # PGBOUNCER_SERVER_TLS_SSLMODE: require
+    volumes:
+      - ./deploy/pgbouncer:/etc/pgbouncer:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The listener only: PgBouncer answers pg_isready whether or not Postgres
+    # is up, so this gates on the pooler having started, nothing more.
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "6432", "-U", "kiln", "-d", "kiln"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # SIGINT is PgBouncer's safe shutdown: it lets in-flight transactions
+    # finish before closing server connections. SIGTERM would wait for every
+    # client to disconnect, which pooled kiln processes never do on their own.
+    stop_signal: SIGINT
+    # Room for that wait. Docker sends SIGKILL when it runs out, and whatever
+    # transaction is still open then fails.
+    stop_grace_period: 120s
+    restart: unless-stopped
+
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
@@ -114,7 +154,8 @@ services:
   # Migrations run as their own service rather than on server boot: schema
   # changes are an operator decision, the advisory lock makes concurrent runs
   # safe, and both API and workers refuse to start against an unexpected
-  # version -- so this must succeed before they come up.
+  # version -- so this must succeed before they come up. It connects to
+  # Postgres directly: DDL gains nothing from a pooler.
   migrate:
     image: ${KILN_IMAGE:-ghcr.io/daiwa-zou/kiln:latest}
     build:
@@ -137,6 +178,12 @@ services:
     command: ["serve"]
     environment:
       <<: *kiln-env
+      # Through the pooler. cache_describe leaves no named prepared statement
+      # on a server connection, and a single-digit pool per process is plenty
+      # when each connection is held only for a transaction.
+      KILN_DATABASE_URL: postgres://kiln:${POSTGRES_PASSWORD:-kiln}@pgbouncer:6432/kiln?sslmode=disable
+      KILN_DATABASE_QUERY_EXEC_MODE: ${KILN_DATABASE_QUERY_EXEC_MODE:-cache_describe}
+      KILN_DATABASE_MAX_CONNS: "8"
       KILN_HTTP_ADDR: ":8080"
       # Tokens by default. Mint the first one after the stack is up:
       #   docker compose exec api kiln admin token create --login you \
@@ -150,6 +197,8 @@ services:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
     healthcheck:
       # /readyz reports database reachability; /healthz answers even when the
       # database is down, which is deliberately not what "ready" means.
@@ -171,12 +220,18 @@ services:
       args:
         VERSION: ${KILN_VERSION:-compose}
     command: ["worker"]
-    environment: *kiln-env
+    environment:
+      <<: *kiln-env
+      KILN_DATABASE_URL: postgres://kiln:${POSTGRES_PASSWORD:-kiln}@pgbouncer:6432/kiln?sslmode=disable
+      KILN_DATABASE_QUERY_EXEC_MODE: ${KILN_DATABASE_QUERY_EXEC_MODE:-cache_describe}
+      KILN_DATABASE_MAX_CONNS: "4"
     depends_on:
       migrate:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
     # SIGTERM starts the drain: the worker stops claiming immediately and the
     # in-flight build gets KILN_WORKER_DRAIN_GRACE (4m, above) before being
     # requeued. This must stay above that grace, or Docker's SIGKILL lands

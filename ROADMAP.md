@@ -213,7 +213,6 @@ makes the cloud tier safe today, and is retired by the item:
 
 | Open item | Until it lands |
 | --- | --- |
-| M9·1 Connection pooler | The chart's ceilings (10 API × 20 conns, 20 workers × 6) reach 320 connections. Put RDS Proxy or PgBouncer in front, or keep `maxReplicas` low enough to fit `max_connections` |
 | M9·2 Real client addresses | Every anonymous caller behind the load balancer, GitHub included, shares one rate-limit bucket. Raise the API's limits and rate-limit at the load balancer or WAF |
 | M9·5 Scheduler role | Polling, sweeps, and requeues run in every worker. Harmless at a handful of workers; hold the worker count there |
 
@@ -222,15 +221,22 @@ control, ingress — uploads possibly a fourth), each with its own
 Deployment and HPA; the CDN absorbs most reads; workers scale on queue
 depth, down to zero.
 
-## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); item 2's webhook half shipped (PR #87); 1, 2's `RealIP` half, and 5 open
+## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); item 2's webhook half shipped (PR #87); item 1 shipped (2026-10-10); 2's `RealIP` half and 5 open
 
 *Items 3 and 4 shipped together: `agent.unit_concurrency` drives the bounded
 pool in `internal/jobs/fanout.go`, and the run budget is a reservation taken
 before each call. PR #87 keyed verified webhook deliveries on their
 repository or installation (`hookSubject` in `internal/api/webhook.go`), so
-the cross-tenant 429 is gone. Items 1 and 5, and item 2's `RealIP` half,
-have no code yet, and they are now the urgent ones — raising concurrency invites adding worker pods, which is
-exactly what the pooler gates and what multiplies the per-worker timers.*
+the cross-tenant 429 is gone. Item 1 shipped: kiln is correct behind a
+transaction-mode pooler (migrations take a transaction-scoped lock,
+`database.query_exec_mode = cache_describe` leaves no named statements, and a
+source scan pins the absence of session state), compose runs api and workers
+through PgBouncer, the chart can deploy one (`pooler.enabled`), and CI runs the
+integration suite through it in both exec modes; sizing is in
+[docs/deployment.md](docs/deployment.md#connection-pooling). Item 5 and item
+2's `RealIP` half have no code yet, and they are now the urgent ones —
+raising concurrency invites adding worker pods, which multiplies the
+per-worker timers.*
 
 *Designed 2026-07-30 from a scaling review. The roles are already split and
 already scale independently; what does not scale is one bench. A run walks
@@ -280,7 +286,9 @@ wikilink to a page written by another unit of the same run resolves rather
 than validating as dead; a run canceled mid-flight still imports completed
 units in one transaction and is still ledgered; a run with `run_budget_usd`
 set never exceeds it at any concurrency, checked against the ledger rather
-than the summary; with the scheduler running and workers at zero, the
+than the summary; the integration suite passes through PgBouncer in
+transaction mode, in both `cache_describe` and `cache_statement`; with the
+scheduler running and workers at zero, the
 queue-depth gauge is still published; with N workers, exactly one GC sweep
 occurs per hour.
 

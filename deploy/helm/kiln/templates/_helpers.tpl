@@ -76,18 +76,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: KILN_CORS_ORIGINS
   value: {{ join "," . | quote }}
 {{- end }}
-{{- with .Values.config.database.host }}
-- name: KILN_DATABASE_HOST
-  value: {{ . | quote }}
-- name: KILN_DATABASE_PORT
-  value: {{ $.Values.config.database.port | quote }}
-- name: KILN_DATABASE_NAME
-  value: {{ $.Values.config.database.name | quote }}
-- name: KILN_DATABASE_USER
-  value: {{ $.Values.config.database.user | quote }}
-- name: KILN_DATABASE_SSLMODE
-  value: {{ $.Values.config.database.sslmode | quote }}
-{{- end }}
 - name: KILN_STORAGE_BACKEND
   value: {{ .Values.config.storage.backend | quote }}
 {{- if eq .Values.config.storage.backend "s3" }}
@@ -129,6 +117,40 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end -}}
 
+{{/* Where a role connects to Postgres. Called with (dict "root" $ "direct" bool).
+     With the pooler enabled the API and workers go through it, with an exec
+     mode that leaves no named prepared statement on a server connection; the
+     migrate Job passes direct=true and keeps connecting to Postgres itself,
+     because it runs as a pre-install hook before the pooler exists. */}}
+{{- define "kiln.databaseEnv" -}}
+{{- $db := .root.Values.config.database -}}
+{{- if and .root.Values.pooler.enabled (not .direct) }}
+- name: KILN_DATABASE_HOST
+  value: {{ include "kiln.poolerName" .root | quote }}
+- name: KILN_DATABASE_PORT
+  value: "6432"
+- name: KILN_DATABASE_NAME
+  value: {{ $db.name | quote }}
+- name: KILN_DATABASE_USER
+  value: {{ $db.user | quote }}
+- name: KILN_DATABASE_SSLMODE
+  value: {{ $db.sslmode | quote }}
+- name: KILN_DATABASE_QUERY_EXEC_MODE
+  value: "cache_describe"
+{{- else if $db.host }}
+- name: KILN_DATABASE_HOST
+  value: {{ $db.host | quote }}
+- name: KILN_DATABASE_PORT
+  value: {{ $db.port | quote }}
+- name: KILN_DATABASE_NAME
+  value: {{ $db.name | quote }}
+- name: KILN_DATABASE_USER
+  value: {{ $db.user | quote }}
+- name: KILN_DATABASE_SSLMODE
+  value: {{ $db.sslmode | quote }}
+{{- end }}
+{{- end -}}
+
 {{/* Secrets are referenced, never inlined into the pod spec: optional: true
      everywhere so a deployment that does not use GitHub sign-in needs no
      placeholder keys. */}}
@@ -145,12 +167,17 @@ app.kubernetes.io/instance: {{ .Release.Name }}
       name: {{ $secret }}
       key: anthropic-api-key
       optional: true
+{{- /* A URL wins over the discrete fields, so with the pooler enabled it is
+       not referenced at all: a database-url key would otherwise send every
+       pod straight past the pooler without a word. */}}
+{{- if not .Values.pooler.enabled }}
 - name: KILN_DATABASE_URL
   valueFrom:
     secretKeyRef:
       name: {{ $secret }}
       key: database-url
       optional: true
+{{- end }}
 - name: KILN_DATABASE_PASSWORD
   valueFrom:
     secretKeyRef:
@@ -199,4 +226,85 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "kiln.volumeMounts" -}}
 - name: tmp
   mountPath: /tmp
+{{- end -}}
+
+
+{{/* --- connection pooler --------------------------------------------------- */}}
+
+{{- define "kiln.poolerName" -}}
+{{- printf "%s-pooler" (include "kiln.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "kiln.poolerImage" -}}
+{{- $img := .Values.pooler.image -}}
+{{- if $img.digest -}}
+{{- printf "%s:%s@%s" $img.repository $img.tag $img.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $img.repository $img.tag -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "kiln.poolerTLSSecretName" -}}
+{{- default (printf "%s-tls" (include "kiln.poolerName" .)) .Values.pooler.tls.secretName -}}
+{{- end -}}
+
+{{/* pgbouncer.ini. The same settings as deploy/pgbouncer/pgbouncer.ini, which
+     compose and CI run; scripts/helm-assert.sh checks the security-relevant
+     keys agree. No credential: the userlist is built at pod start from the
+     database-password secret key. */}}
+{{- define "kiln.poolerIni" -}}
+{{- $db := .Values.config.database -}}
+{{- $p := .Values.pooler -}}
+[databases]
+{{ $db.name }} = host={{ $db.host }} port={{ $db.port }} dbname={{ $db.name }}
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+auth_type = scram-sha-256
+auth_file = /tmp/pgbouncer/userlist.txt
+pool_mode = transaction
+max_prepared_statements = 200
+ignore_startup_parameters = extra_float_digits
+default_pool_size = {{ int $p.defaultPoolSize }}
+reserve_pool_size = {{ int $p.reservePoolSize }}
+max_client_conn = {{ int $p.maxClientConn }}
+query_wait_timeout = 30
+max_packet_size = 67108864
+client_login_timeout = 10
+; kiln to PgBouncer: TLS whenever kiln is configured to send it.
+client_tls_sslmode = {{ ternary "prefer" "require" (eq $db.sslmode "disable") }}
+client_tls_cert_file = /etc/pgbouncer-tls/tls.crt
+client_tls_key_file = /etc/pgbouncer-tls/tls.key
+server_tls_sslmode = {{ $p.serverTlsSslmode }}
+{{- if $p.serverTLS.caSecretName }}
+server_tls_ca_file = /etc/pgbouncer-server-ca/ca.crt
+{{- end }}
+{{- end -}}
+
+{{/* Holds the API and workers until the pooler answers, rather than letting
+     them crash-loop through their own connect retries on a fresh install.
+     Bounded, so a pooler that never comes up fails the pod visibly. */}}
+{{- define "kiln.poolerWaitInit" -}}
+- name: wait-for-pooler
+  image: {{ include "kiln.poolerImage" . }}
+  imagePullPolicy: {{ .Values.pooler.image.pullPolicy }}
+  command:
+    - /bin/sh
+    - -c
+    - >-
+      for i in $(seq 1 60); do
+      pg_isready -q -h {{ include "kiln.poolerName" . }} -p 6432 && exit 0;
+      sleep 2;
+      done;
+      echo "pooler {{ include "kiln.poolerName" . }}:6432 not ready after 120s" >&2;
+      exit 1
+  securityContext:
+    {{- toYaml .Values.securityContext | nindent 4 }}
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 64Mi
 {{- end -}}
