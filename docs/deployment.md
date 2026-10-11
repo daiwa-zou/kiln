@@ -8,12 +8,13 @@ is AWS, GCP, Azure, a bare-metal Kubernetes cluster, or a single VM.
 
 ## The topology
 
-Three roles, one image:
+Four roles, one image:
 
 | Role | Command | Scales with | State |
 | --- | --- | --- | --- |
 | API + reading UI | `kiln serve` | readers and API traffic | stateless |
 | Build worker | `kiln worker` | build throughput | stateless |
+| Scheduler | `kiln scheduler` | nothing: exactly one | stateless |
 | Migrations | `kiln admin migrate` | run once per deploy | — |
 
 The queue is the `runs` table itself, claimed with `FOR UPDATE SKIP LOCKED`.
@@ -22,7 +23,13 @@ no coordination service is involved. Each worker claims **one run at a time** on
 purpose: builds are LLM-bound, so per-process concurrency multiplies spend
 rather than throughput.
 
-`kiln serve --with-worker` runs both roles in one process. That is right for a
+The scheduler runs the periodic duties once for the deployment: requeueing
+runs whose worker died, enqueueing poll-triggered sources, the hourly GC
+sweep, and the queue-depth gauge. Workers run those duties themselves unless
+told a scheduler does (see [The scheduler](#the-scheduler)).
+
+`kiln serve --with-worker` runs the API, a worker and the scheduler duties in
+one process. That is right for a
 laptop or a single-node install and wrong for anything you intend to scale,
 because it couples the two lifecycles: restarting the API to deploy a UI change
 would interrupt an in-flight build.
@@ -67,6 +74,7 @@ most `kubectl describe` output.
 | `KILN_TRUSTED_PROXIES` | behind a proxy | Comma-separated CIDRs or bare IPs of your reverse proxies. See [Behind a reverse proxy](#behind-a-reverse-proxy). |
 | `KILN_AGENT_RUN_BUDGET_USD` | recommended | Per-run spend ceiling. |
 | `KILN_WORKER_PERMITTED_SOURCE_ROOTS` | if using path sources | Allowlist for local-path connectors. Empty denies every local path. |
+| `KILN_WORKER_SCHEDULER_DUTIES` | with a scheduler | `true` (default): the worker runs the requeue, polling, sweeps and queue gauge itself. Set `false` on workers once a `kiln scheduler` runs; see [The scheduler](#the-scheduler). |
 | `KILN_DATABASE_QUERY_EXEC_MODE` | behind a pooler | `cache_describe` behind PgBouncer or RDS Proxy in transaction mode. Empty keeps pgx's default. See [Connection pooling](#connection-pooling). |
 
 Run `kiln admin doctor` to validate configuration, database reachability, and
@@ -122,7 +130,7 @@ Authenticated callers are keyed on their user, so none of this affects them.
 ## Docker Compose
 
 The fastest complete deployment. It runs Postgres behind PgBouncer, MinIO, the
-API, and a scalable worker pool:
+API, a scalable worker pool, and one scheduler:
 
 ```bash
 cp .env.example .env          # set KILN_MASTER_KEY and KILN_ANTHROPIC_API_KEY
@@ -136,6 +144,8 @@ Add build capacity:
 ```bash
 docker compose up -d --scale worker=4
 ```
+
+Never scale `scheduler`: one runs the duties for every worker.
 
 The stack authenticates by default. Inside a container the server must bind
 every interface to be reachable at all, and kiln refuses a wide-open bind with
@@ -155,6 +165,10 @@ See [`deploy/kubernetes/`](../deploy/kubernetes) for manifests and
 - A separate `Deployment` for workers, with an `HPA`. Workers have no probes
   worth failing on — they hold no listener — so scale them on queue depth or
   CPU rather than health.
+- A single-replica `Deployment` for the scheduler (`scheduler.enabled`, on by
+  default) with a `Recreate` rollout, readiness and liveness on its metrics
+  port, and only the database and storage secrets. Enabling it sets
+  `KILN_WORKER_SCHEDULER_DUTIES=false` on the workers in the same release.
 - A `Job` running `kiln admin migrate` as a Helm pre-upgrade hook. Each
   migration runs in its own transaction under a transaction-scoped advisory
   lock, so concurrent runs serialize, and a run behind a hung one gives up
@@ -176,6 +190,57 @@ Kubernetes there is `make k8s-up`, described in
 on PersistentVolumeClaims, pins everything to one node, and generates through
 the Claude Code CLI rather than the Messages API. It is a development stack, not
 a small production one.
+
+## The scheduler
+
+`kiln scheduler` runs four duties, each on its own period and timeout so a
+slow one (a blob sweep stuck on object storage) delays only itself:
+
+| Duty | Period | What it does |
+| --- | --- | --- |
+| `requeue_stale` | 30s | Returns runs whose worker stopped heartbeating for `worker.stale_after` to the queue. |
+| `poll_sources` | 1m | Enqueues poll-triggered connectors that are due (`worker.source_poll_interval`). |
+| `sweep` | 1h | Enforces the retention windows, then drains the pending blob deletes. The first sweep waits one to five minutes after start, so a crash-looping pod does not sweep on every restart. |
+| `queue_depth` | 10s | Publishes `kiln_queue_depth`. |
+
+It reads `worker.stale_after`, `worker.source_poll_interval` and the
+`storage.*` retentions, and needs the database and object storage. It never
+reads the master key or a model key, and the chart and compose give it
+neither. Without object storage it leaves the blob deletes queued and warns
+with their count on every sweep. That includes the chart's `fs` backend, which
+is single-pod only: the bytes sit on the API pod's disk, which neither the
+scheduler nor a worker can reach.
+`kiln scheduler --once` runs every duty once and exits.
+
+Run one. Every duty tolerates running concurrently in another process (the
+requeue skips locked rows, a poll enqueue merges onto the active run, sweeps
+are deletes), so two schedulers, or workers still running duties beside one,
+cost duplicate work and never corruption. There is no lease to hand over.
+
+Workers run the duties themselves while `worker.scheduler_duties` is `true`,
+the default. That is what makes upgrading safe in any order:
+
+| Scenario | Result |
+| --- | --- |
+| New image, old chart or compose file | Unchanged: workers keep the duties, as before. |
+| New chart (`scheduler.enabled`, the default) | The scheduler Deployment appears and workers get `KILN_WORKER_SCHEDULER_DUTIES=false` (`worker.schedulerDuties: auto`) in the same release. Workers give the duties up as soon as their new pods start, whether or not the scheduler ever comes up. With `helm upgrade --wait` a scheduler that never goes Ready fails the release; without it (Argo CD, Flux) the duties stop until someone notices, so upgrade in two steps below. |
+| Scheduler cannot run (crash loop, no scheduling room) | The alerts in [observability.md](observability.md#scheduler-alerts) fire. Set `scheduler.enabled=false`, which hands the duties back to the workers. |
+| Rolling back | No schema change is involved; an older image ignores the variable and runs the duties in every worker. |
+| `deploy/local-k8s`, hand-written manifests | Unchanged until you add a scheduler: workers keep the duties. Add one, then set `KILN_WORKER_SCHEDULER_DUTIES=false` on the workers. |
+
+**Two-step upgrade**, for any deployment that does not wait on readiness:
+
+1. Upgrade with `worker.schedulerDuties: true`. The scheduler starts and the
+   workers keep their duties beside it (duplicate work, never corruption).
+2. Once `kubectl rollout status deploy/<release>-scheduler` reports it Ready,
+   upgrade again with `worker.schedulerDuties: auto` (the default).
+
+The one unsafe combination is workers with the variable `false` and no
+scheduler: nothing requeues, polls or sweeps. `KilnSchedulerAbsent` exists for
+exactly that, and each worker logs `scheduler_duties=false` at start.
+
+`kiln serve --with-worker` always runs the duties, whatever the variable says:
+it is the whole deployment.
 
 ## Connection pooling
 
@@ -255,8 +320,8 @@ survive landing on a different server connection than the last one:
 Size the server side for concurrent **transactions**, not connected clients.
 Proposed starting points, not measurements:
 
-- **Clients.** 10 API pods × 8 + 20 workers × 4 = 160 client connections, well
-  under `max_client_conn` (400) on each PgBouncer pod — either pod must be able
+- **Clients.** 10 API pods × 8 + 20 workers × 4 + the scheduler's 2 = 162
+  client connections, well under `max_client_conn` (400) on each PgBouncer pod — either pod must be able
   to take every client while the other restarts. `min_conns` stays at 2 per
   process; idle pooler clients are cheap.
 - **Server connections.** Each PgBouncer pod keeps its own pool of up to
@@ -318,15 +383,16 @@ Clients that have not finished logging in within 10 seconds are dropped
 
 ## Observability
 
-Prometheus metrics are served on a separate port (`127.0.0.1:9090` by default; set `metrics_addr` to `:9090` so Prometheus can reach it from another pod or host, as the Helm chart does) by both
-the API and every worker: request traffic, queue depth, build outcomes, and
-model spend. See [observability.md](observability.md) for the metric reference,
+Prometheus metrics are served on a separate port (`127.0.0.1:9090` by default; set `metrics_addr` to `:9090` so Prometheus can reach it from another pod or host, as the Helm chart does) by every
+role: request traffic, queue depth, build outcomes, model spend, and whether
+each scheduler duty is still succeeding. See [observability.md](observability.md) for the metric reference,
 alert rules, and scraping queue depth to autoscale workers.
 
 ## Operating
 
-**Upgrades.** Roll the migration Job, then the API, then the workers. Workers
-drain rather than abort, so a rolling update costs nothing in flight.
+**Upgrades.** Roll the migration Job, then the API, the workers and the
+scheduler. Workers drain rather than abort, so a rolling update costs nothing
+in flight; the scheduler holds nothing that needs draining.
 
 **Backups.** Postgres holds every page, run, and credential; object storage
 holds uploaded documents. Back up both. A wiki can be rebuilt from its sources,

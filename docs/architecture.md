@@ -251,6 +251,7 @@ sequenceDiagram
     participant T as Trigger
     participant API as kiln serve
     participant DB as Postgres · runs table
+    participant S as kiln scheduler
     participant W as kiln worker
 
     rect rgb(30,40,55)
@@ -262,10 +263,13 @@ sequenceDiagram
     DB-->>API: waiting build: merged, ref_to advanced<br/>research or running build: recorded, queued after
     end
 
+    loop each duty on its own period
+        S->>DB: requeue stale runs (30s)
+        S->>DB: poll due connectors → enqueue (1m)
+        S->>DB: GC sweep (hourly)
+    end
+
     loop poll interval
-        W->>DB: requeue stale runs
-        W->>DB: poll due connectors → enqueue
-        W->>DB: hourly GC sweep
         W->>DB: ClaimNextRun (SKIP LOCKED)
     end
 
@@ -709,7 +713,7 @@ key to `pending_blob_deletes` — on a file delete or replacement, a connector o
 workspace delete, a figure no document references any more, and a source
 dropped by an approved deletion. The request path still deletes straight away;
 the queue is what remains if that fails or the process dies first, and the
-worker's hourly sweep drains it (below).
+hourly sweep drains it (below).
 
 **Import runs on an uncancelable context.** The money is already spent, so a
 canceled run must still persist what it produced and what it cost. If import
@@ -1206,11 +1210,19 @@ survives.
 | Worker dies mid-build | Its run sits `running` and would block the bench via the active-run index. `worker.stale_after` (default 45m) returns it to the queue once its claim has gone that long without a heartbeat; a live worker refreshes the claim every `worker.heartbeat_interval` (default 1m), so a long healthy build is never swept. Terminal and progress writes are fenced to the claiming worker, so a worker that lost its claim can neither finish nor requeue the run that replaced it, and it cancels its own build as soon as a heartbeat finds the claim gone. The pipeline is idempotent from the start. |
 | Import fails | The run is marked failed **and still ledgered**, because the agent calls are already billed. |
 | Blob missing at sync | That document is skipped and reported to the review queue; the rest of the bench builds. |
-| Blob delete fails | Logged. The key was queued in `pending_blob_deletes` in the same transaction that orphaned it, so the worker's next sweep retries it. Never a dangling reference. |
+| Blob delete fails | Logged. The key was queued in `pending_blob_deletes` in the same transaction that orphaned it, so the next sweep retries it. Never a dangling reference. |
 | Process dies between uploading a blob and recording its row | Not recoverable from the queue — nothing was committed to name it — so that blob is a true orphan. Rare, and bounded to one document's pictures or one upload. |
 | Postgres briefly unavailable | Connection is retried with backoff at startup. |
 
-The GC sweep runs roughly hourly inside the worker: soft-deleted pages past
+The periodic duties -- the stale requeue, source polling, this sweep and the
+queue-depth gauge -- run in `kiln scheduler`, one process for the deployment,
+each on its own period and timeout so a slow one stalls only itself. Workers
+run them inline ahead of each claim while `worker.scheduler_duties` is true
+(the default, so an image upgrade alone changes nothing), and
+`serve --with-worker` always does. Every duty tolerates running in two
+processes at once, which is why no lease guards them.
+
+The GC sweep runs roughly hourly: soft-deleted pages past
 their window, finished runs past theirs, expired sessions, and dead tokens
 (which linger a week past death so an operator can still see what a failing
 client was presenting). It also drains `pending_blob_deletes`: for each queued
@@ -1218,8 +1230,9 @@ key it first re-checks that no uploaded file or figure references the blob
 again — figure keys are content digests, so a picture one document dropped can
 be claimed by another before the sweep arrives — then deletes the object, then
 the row. A refused delete leaves the row, with the attempt count and error, to
-be retried on the next sweep; a key already absent from the store counts as
-done. A worker with no blob store configured leaves the queue alone.
+be retried on the next sweep, and each delete is cut off after 30 seconds so
+one unanswered key cannot hold the batch; a key already absent from the store
+counts as done. A process with no blob store configured leaves the queue alone.
 
 ---
 
@@ -1290,9 +1303,10 @@ deliver them.
 | `worker.poll_interval` | `5s` | Idle queue re-check. |
 | `worker.stale_after` | `45m` | Above `agent.timeout`, and at least three heartbeat intervals, so only a genuinely dead worker's run is requeued. |
 | `worker.heartbeat_interval` | `1m` | How often a worker refreshes the claim on its run. |
-| `worker.source_poll_interval` | `10m` | Poll-triggered connectors. Zero disables the scheduler. |
+| `worker.source_poll_interval` | `10m` | Poll-triggered connectors. Zero disables the poll scheduler. |
 | `worker.drain_grace` | `15m` | Above one agent call, so a deploy does not throw away paid work. |
 | `worker.permitted_source_roots` | — | **Empty denies every local path.** Security boundary, not a convenience. |
+| `worker.scheduler_duties` | `true` | The worker runs the requeue, polling, sweeps and queue gauge itself. Set `false` where `kiln scheduler` runs them; `serve --with-worker` ignores it. |
 
 ### Storage
 

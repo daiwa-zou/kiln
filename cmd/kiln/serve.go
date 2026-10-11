@@ -38,7 +38,8 @@ The API requires a bearer token by default (mint one with
 single-user localhost deployment.
 
 --with-worker also runs a build worker in this process, for single-node
-deployments and local development; production deployments run "kiln worker"
+deployments and local development, including the periodic duties a separate
+deployment gives to "kiln scheduler"; production deployments run "kiln worker"
 processes separately so builds scale independently of the API.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -198,6 +199,10 @@ processes separately so builds scale independently of the API.`,
 					return err
 				}
 				w.Metrics = metrics
+				// One process is the whole deployment here, so there is no
+				// scheduler to leave the duties to, whatever the worker
+				// section says: without them nothing requeues or sweeps.
+				w.SkipSchedulerDuties = false
 				fmt.Fprintln(out, "  build worker running in-process (--with-worker)")
 				workerDone = make(chan struct{})
 				go func() {

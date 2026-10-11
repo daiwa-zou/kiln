@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/jobs"
@@ -261,6 +262,64 @@ func TestSweepRetriesAFailedDelete(t *testing.T) {
 	}
 	if left := pendingKeys(t, js); len(left) != 0 {
 		t.Errorf("queue not drained after recovery: %v", left)
+	}
+}
+
+// hangingBlobs is an object store that never answers a delete; only the
+// caller's context ends the call.
+type hangingBlobs struct{ calls int }
+
+func (h *hangingBlobs) Delete(ctx context.Context, _ string) error {
+	h.calls++
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestSweepBoundsEachBlobDelete: an object store that hangs costs each key its
+// own timeout, recorded as a failed attempt, rather than the whole sweep.
+func TestSweepBoundsEachBlobDelete(t *testing.T) {
+	js, _ := jobStore(t)
+	saved := blobDeleteTimeout
+	blobDeleteTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { blobDeleteTimeout = saved })
+
+	// The sweep's own budget is far longer than the per-key cap: without the
+	// cap the first key would hang until this ran out.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := js.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueueBlobDeletes(ctx, tx, []string{"blob-a", "blob-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	blobs := &hangingBlobs{}
+	started := time.Now()
+	done, failed, err := js.SweepBlobs(ctx, blobs)
+	if err != nil {
+		t.Fatalf("a hung delete must not fail the sweep: %v", err)
+	}
+	if done != 0 || failed != 2 || blobs.calls != 2 {
+		t.Errorf("done=%d failed=%d calls=%d, want 0/2/2: every key tried, each cut off", done, failed, blobs.calls)
+	}
+	if took := time.Since(started); took > 2*time.Second {
+		t.Errorf("sweep took %s; the per-key timeout did not bound it", took)
+	}
+	var attempts int
+	if err := js.Pool().QueryRow(ctx,
+		`SELECT min(attempts) FROM pending_blob_deletes`).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want each timed-out key recorded once", attempts)
+	}
+	if n, err := js.PendingBlobDeletes(ctx); err != nil || n != 2 {
+		t.Errorf("PendingBlobDeletes = %d, %v; want both keys still queued", n, err)
 	}
 }
 

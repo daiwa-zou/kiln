@@ -83,6 +83,9 @@ func TestDefaultMaxConnsByRole(t *testing.T) {
 	if got := defaultMaxConns(RoleServer); got != defaultServerMaxConns {
 		t.Errorf("server max_conns = %d, want %d", got, defaultServerMaxConns)
 	}
+	if got := defaultMaxConns(RoleScheduler); got != defaultSchedulerMaxConns {
+		t.Errorf("scheduler max_conns = %d, want %d", got, defaultSchedulerMaxConns)
+	}
 	if defaultWorkerMaxConns >= defaultServerMaxConns {
 		t.Errorf("worker pool (%d) should be smaller than server pool (%d)",
 			defaultWorkerMaxConns, defaultServerMaxConns)

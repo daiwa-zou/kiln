@@ -405,6 +405,7 @@ helm-lint: ## lint the Helm chart
 	helm lint deploy/helm/kiln --set secrets.existingSecret=kiln-secrets
 	helm lint deploy/helm/kiln --set secrets.existingSecret=kiln-secrets \
 		--set pooler.enabled=true --set config.database.host=postgres
+	helm lint deploy/helm/kiln --set secrets.existingSecret=kiln-secrets --set scheduler.enabled=false
 
 # What CI runs for the chart: lint, then assertions over rendered output and a
 # kubeconform schema check (scripts/helm-assert.sh).

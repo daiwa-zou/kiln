@@ -105,7 +105,7 @@ func TestCommandTreeShape(t *testing.T) {
 	// The CLI contract: these commands exist and the dangerous flags are
 	// required. Losing one in a refactor should fail a test, not a user.
 	for _, path := range [][]string{
-		{"version"}, {"build"}, {"serve"}, {"worker"},
+		{"version"}, {"build"}, {"serve"}, {"worker"}, {"scheduler"},
 		{"admin", "migrate"}, {"admin", "doctor"}, {"admin", "rotate-key"},
 		{"admin", "token", "create"}, {"admin", "token", "revoke"},
 	} {

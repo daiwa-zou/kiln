@@ -178,28 +178,6 @@ func TestFencedTerminalWritesFromANonOwnerAreRefusedAndLogged(t *testing.T) {
 	})
 }
 
-func TestRequeueStaleLogsAndCountsEachRun(t *testing.T) {
-	st := newLoopStore()
-	st.stale = []store.StaleRun{
-		{ID: "run-a", WorkspaceID: "ws1", PreviousClaimedBy: "pod-x-17"},
-		{ID: "run-b", WorkspaceID: "ws2", PreviousClaimedBy: "pod-y-3"},
-	}
-	log, buf := bufferLogger()
-	w := &Worker{Store: st, StaleAfter: time.Minute, Log: log}
-
-	w.requeueStale(context.Background(), log)
-
-	out := buf.String()
-	for _, want := range []string{"run-a", "pod-x-17", "run-b", "pod-y-3"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("stale requeue log is missing %q:\n%s", want, out)
-		}
-	}
-	if !strings.Contains(scrapeMetrics(t, w), "kiln_runs_stale_requeued_total 2") {
-		t.Error("stale requeues were not counted")
-	}
-}
-
 func TestHeartbeatIntervalDerivation(t *testing.T) {
 	cases := []struct {
 		name string

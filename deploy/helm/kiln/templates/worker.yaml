@@ -57,12 +57,14 @@ spec:
             {{- include "kiln.secretEnv" . | nindent 12 }}
             - name: KILN_WORKER_POLL_INTERVAL
               value: {{ .Values.config.worker.pollInterval | quote }}
-            - name: KILN_WORKER_STALE_AFTER
-              value: {{ .Values.config.worker.staleAfter | quote }}
             - name: KILN_WORKER_DRAIN_GRACE
               value: {{ .Values.config.worker.drainGrace | quote }}
-            - name: KILN_WORKER_SOURCE_POLL_INTERVAL
-              value: {{ .Values.config.worker.sourcePollInterval | quote }}
+            {{- include "kiln.dutyTimingEnv" . | nindent 12 }}
+            # The scheduler pod runs the periodic duties when it is deployed;
+            # without it the workers keep them, as before it existed.
+            # worker.schedulerDuties overrides that for a staged upgrade.
+            - name: KILN_WORKER_SCHEDULER_DUTIES
+              value: {{ include "kiln.workerSchedulerDuties" . | quote }}
             {{- with .Values.config.worker.permittedSourceRoots }}
             - name: KILN_WORKER_PERMITTED_SOURCE_ROOTS
               value: {{ join "," . | quote }}
@@ -73,8 +75,9 @@ spec:
               value: {{ ternary .Values.pooler.workerMaxConns .Values.config.database.workerMaxConns .Values.pooler.enabled | quote }}
           {{- if .Values.config.metricsAddr }}
           ports:
-            # A worker's only listener. Scrape it for queue depth, build
-            # outcomes, and spend -- there is no API port here to ask.
+            # A worker's only listener. Scrape it for build outcomes and
+            # spend -- there is no API port here to ask. Queue depth comes
+            # from the scheduler pod while one is deployed.
             - name: metrics
               containerPort: 9090
               protocol: TCP

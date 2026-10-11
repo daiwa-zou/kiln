@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -17,6 +18,12 @@ type BlobDeleter interface {
 // blobSweepBatch bounds one sweep's work. The sweep runs hourly, so a backlog
 // larger than this drains over several sweeps rather than holding one open.
 const blobSweepBatch = 500
+
+// blobDeleteTimeout caps one object-store delete. An S3 client retries with
+// backoff on its own, and one unanswered key must not spend the whole sweep's
+// budget: it is recorded as a failed attempt and retried next sweep, and the
+// rest of the batch proceeds. A variable so tests can shorten it.
+var blobDeleteTimeout = 30 * time.Second
 
 // enqueueBlobDeletes records blobs to delete, inside the transaction that
 // removes the rows referencing them.
@@ -81,6 +88,16 @@ func (s *WikiStore) blobStillReferenced(ctx context.Context, key string) (bool, 
 	return referenced, nil
 }
 
+// PendingBlobDeletes counts the queued blob deletes, so a sweep that has no
+// object store to drain them with can say how many are waiting.
+func (s *WikiStore) PendingBlobDeletes(ctx context.Context) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM pending_blob_deletes`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count pending blob deletes: %w", err)
+	}
+	return n, nil
+}
+
 // SweepBlobs drains the pending blob deletes: for each, delete the object and
 // then the row. It returns how many blobs were deleted or found re-referenced
 // (done) and how many the object store refused (failed).
@@ -129,7 +146,10 @@ func (s *WikiStore) SweepBlobs(ctx context.Context, blobs BlobDeleter) (done, fa
 			return done, failed, err
 		}
 		if !referenced {
-			if derr := blobs.Delete(ctx, key); derr != nil {
+			dctx, cancel := context.WithTimeout(ctx, blobDeleteTimeout)
+			derr := blobs.Delete(dctx, key)
+			cancel()
+			if derr != nil {
 				failed++
 				if _, err := s.pool.Exec(ctx, `
 					UPDATE pending_blob_deletes

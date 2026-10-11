@@ -171,7 +171,7 @@ throughout — scaling never means a new service. How to run each component
 today: [docs/deployment.md](docs/deployment.md).*
 
 **Small team or single tenant: one VM.** Docker Compose with `api`, one or
-two `worker` replicas, and Postgres 16. Blobs go to real S3 or R2 rather
+two `worker` replicas, one `scheduler`, and Postgres 16. Blobs go to real S3 or R2 rather
 than the bundled MinIO, so documents outlive the VM. TLS terminates at
 Caddy or nginx with `client_max_body_size 34m`. Backups are a nightly
 `pg_dump` plus bucket versioning, and `KILN_MASTER_KEY` is stored off the
@@ -207,23 +207,21 @@ Prometheus ──► metrics listener (cluster-internal)
 - **Workers** — `kiln worker`, outbound-only. Egress is limited to the
   model API, git hosts, and web sources; the SSRF guard still applies
   inside that. A fixed count until queue-depth autoscaling (M10 item 4).
+- **Scheduler** — `kiln scheduler`, one replica, for the requeue, polling,
+  sweeps and the queue-depth gauge; workers only claim and build.
 - **Secrets** — a secret manager mounted as files and read through the
   `_FILE` variables, never inline environment values.
 - **Metrics** — the separate listener stays cluster-internal.
 
-**Interim settings while M9 is open.** Each open item has a setting that
-makes the cloud tier safe today, and is retired by the item:
-
-| Open item | Until it lands |
-| --- | --- |
-| M9·5 Scheduler role | Polling, sweeps, and requeues run in every worker. Harmless at a handful of workers; hold the worker count there |
+**Interim settings while M9 was open** are retired: the pooler, trusted-proxy
+client addresses, and the scheduler role all shipped (2026-10-10/11).
 
 **After M10.** The API runs as three profiles of one image (reader,
 control, ingress — uploads possibly a fourth), each with its own
 Deployment and HPA; the CDN absorbs most reads; workers scale on queue
 depth, down to zero.
 
-## M9 — Make Builds Parallel — items 1–4 shipped (3–4 2026-07-30, PR #27; 2's webhook half PR #87; 1 and 2's trusted-proxy half 2026-10-10); 5 open
+## M9 — Make Builds Parallel ✅ shipped (items 3–4 2026-07-30, PR #27; 2's webhook half PR #87; 1, 2's trusted-proxy half, and 5 2026-10-10/11)
 
 *Items 3 and 4 shipped together: `agent.unit_concurrency` drives the bounded
 pool in `internal/jobs/fanout.go`, and the run budget is a reservation taken
@@ -239,9 +237,14 @@ integration suite through it in both exec modes; sizing is in
 shipped too: `trusted_proxies` lets unauthenticated callers behind a load
 balancer key on the address the proxy appended to `X-Forwarded-For`
 (`internal/api/clientip.go`), IPv6 keys are per /64, and the limiter map is
-capped. Item 5 has no code yet, and it is now the urgent one — raising
-concurrency invites adding worker pods, which multiplies the per-worker
-timers.*
+capped. Item 5 shipped: `kiln scheduler` (`internal/scheduler`) runs the stale
+requeue, polling, the GC sweep and the queue gauge once for the deployment,
+each duty on its own period and timeout; the chart (`scheduler.enabled`, on by
+default) and compose deploy one and set `worker.scheduler_duties = false` on
+the workers, while its default of true keeps an image-only upgrade unchanged
+and `serve --with-worker` always runs the duties. Overlap is harmless by
+contract, so there is no lease; the upgrade matrix is in
+[docs/deployment.md](docs/deployment.md#the-scheduler).*
 
 *Designed 2026-07-30 from a scaling review. The roles are already split and
 already scale independently; what does not scale is one bench. A run walks
@@ -296,8 +299,10 @@ set never exceeds it at any concurrency, checked against the ledger rather
 than the summary; the integration suite passes through PgBouncer in
 transaction mode, in both `cache_describe` and `cache_statement`; with the
 scheduler running and workers at zero, the
-queue-depth gauge is still published; with N workers, exactly one GC sweep
-occurs per hour.
+queue-depth gauge is still published; with N workers and one scheduler,
+exactly one GC sweep occurs per hour and the workers run none of the duties
+(`TestSchedulerPublishesQueueDepthWithZeroWorkers`,
+`TestExactlyOneSweepWithNWorkersAndOneScheduler`).
 
 ## M10 — Split the Serving Tier
 

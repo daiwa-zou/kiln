@@ -1,0 +1,112 @@
+{{- if .Values.scheduler.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kiln.fullname" . }}-scheduler
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+    app.kubernetes.io/component: scheduler
+spec:
+  # Exactly one, never autoscaled: the duties are deployment-wide, and a
+  # second copy would only repeat them.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kiln.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: scheduler
+  strategy:
+    # The old pod stops before the new one starts, so a rollout never runs two
+    # schedulers. The duties pause until the new pod runs -- seconds when it
+    # starts cleanly, unbounded when it does not, which is what the readiness
+    # probe, the alerts and worker.schedulerDuties are for. (Overlap would be
+    # harmless -- every duty is idempotent -- just wasted.)
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "kiln.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: scheduler
+      {{- with .Values.scheduler.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The ServiceAccount carries the object-storage identity (IRSA, Workload
+      # Identity) the blob sweep deletes with.
+      serviceAccountName: {{ include "kiln.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.pooler.enabled }}
+      initContainers:
+        {{- include "kiln.poolerWaitInit" . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: scheduler
+          image: {{ include "kiln.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["scheduler"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            {{- include "kiln.env" . | nindent 12 }}
+            {{- include "kiln.databaseEnv" (dict "root" . "direct" false) | nindent 12 }}
+            {{- include "kiln.schedulerSecretEnv" . | nindent 12 }}
+            {{- include "kiln.dutyTimingEnv" . | nindent 12 }}
+            - name: KILN_DATABASE_MAX_CONNS
+              value: {{ .Values.scheduler.maxConns | quote }}
+          {{- if .Values.config.metricsAddr }}
+          ports:
+            # The scheduler's only listener: the queue-depth gauge and the
+            # duty metrics, and the probes below.
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          # Both probes read in-process state; neither queries the database,
+          # so an outage does not restart the pod. Ready means the first pass
+          # of the duties has finished with a success (or two minutes passed
+          # without one), which is what `helm upgrade --wait` needs to know. Live means every duty loop finished an attempt
+          # within three periods plus its timeout -- a loop stuck past that is
+          # what a restart fixes.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- end }}
+          resources:
+            {{- toYaml .Values.scheduler.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "kiln.volumeMounts" . | nindent 12 }}
+      # No blob volume for storage.backend fs: the bytes live on the API's
+      # disk, which this pod cannot reach, so the pending deletes stay queued
+      # and the scheduler warns about them on every sweep. fs is single-pod
+      # only.
+      volumes:
+        {{- include "kiln.volumes" . | nindent 8 }}
+      {{- with .Values.scheduler.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.scheduler.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.scheduler.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

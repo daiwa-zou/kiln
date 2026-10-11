@@ -57,9 +57,10 @@ are only readable under worker.permitted_source_roots.`,
 			}
 
 			// A standalone worker holds no API listener, so this port is the
-			// only way to see queue depth, build outcomes, and spend from
-			// outside. Skipped for --once, which is a one-shot drain that
-			// would exit before a scrape ever arrived.
+			// only way to see build outcomes and spend (and queue depth, while
+			// it runs the scheduler duties) from outside. Skipped for --once,
+			// which is a one-shot drain that would exit before a scrape ever
+			// arrived.
 			if cfg.MetricsAddr != "" && !once {
 				w.Metrics = observability.NewMetrics()
 				fmt.Fprintf(cmd.OutOrStdout(), "metrics at %s/metrics\n", cfg.MetricsAddr)

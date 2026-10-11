@@ -138,6 +138,37 @@ func TestPoolerDefaults(t *testing.T) {
 	}
 }
 
+// Workers keep the scheduler duties unless told otherwise, so a new image under
+// an old deployment still sweeps; the scheduler role gets the smallest pool.
+func TestConfigSchedulerDuties(t *testing.T) {
+	isolateEnv(t)
+	cfg, err := Load(Options{Role: RoleWorker})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Worker.SchedulerDuties {
+		t.Error("worker.scheduler_duties defaults to false; an image-only upgrade would stop the sweeps")
+	}
+
+	t.Setenv("KILN_WORKER_SCHEDULER_DUTIES", "false")
+	if cfg, err = Load(Options{Role: RoleWorker}); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Worker.SchedulerDuties {
+		t.Error("KILN_WORKER_SCHEDULER_DUTIES=false did not bind")
+	}
+
+	if cfg, err = Load(Options{Role: RoleScheduler}); err != nil {
+		t.Fatalf("Load(scheduler): %v", err)
+	}
+	if cfg.Database.MaxConns != defaultSchedulerMaxConns || defaultSchedulerMaxConns != 2 {
+		t.Errorf("scheduler max_conns = %d, want 2", cfg.Database.MaxConns)
+	}
+	if cfg.Role != RoleScheduler {
+		t.Errorf("role = %q", cfg.Role)
+	}
+}
+
 // The default is the role the column default always granted, so an upgrade
 // changes nothing; a deployment opts in to viewer through the environment.
 func TestAuthDefaultRole(t *testing.T) {

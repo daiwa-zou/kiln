@@ -130,6 +130,7 @@ func (f *fakeStore) Sweep(context.Context, time.Duration, time.Duration) (int64,
 func (f *fakeStore) SweepBlobs(context.Context, store.BlobDeleter) (int, int, error) {
 	return 0, 0, nil
 }
+func (f *fakeStore) PendingBlobDeletes(context.Context) (int, error) { return 0, nil }
 func (f *fakeStore) SpendInWindow(context.Context, string, time.Duration) (float64, error) {
 	return 0, nil
 }
