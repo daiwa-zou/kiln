@@ -22,8 +22,8 @@ nothing. Commit-range change routing narrows the work further on webhook-trigger
 
 Milestones M1–M8 have shipped — the human loop and reader, server-side builds, the multi-tenant
 SaaS shell, the web connector and graph view, incremental builds, lifecycle hygiene, self-serve
-sources, and the deployable artifact. M9's concurrent page generation has shipped; its pooler,
-client-address, and scheduler items are open, and M10–M11 are planned. See
+sources, and the deployable artifact. M9's concurrent page generation and connection pooler have
+shipped; its client-address and scheduler items are open, and M10–M11 are planned. See
 [ROADMAP.md](ROADMAP.md) for what each contains and what comes next.
 
 ## What it reads, and what you get

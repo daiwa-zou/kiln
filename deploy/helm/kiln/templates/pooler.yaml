@@ -1,0 +1,265 @@
+{{- if .Values.pooler.enabled }}
+{{- if .Values.secrets.databaseURL }}
+{{- fail "pooler.enabled cannot be combined with secrets.databaseURL: a database URL would bypass the pooler. Set config.database.host and secrets.databasePassword instead." }}
+{{- end }}
+{{- if not .Values.config.database.host }}
+{{- fail "pooler.enabled requires config.database.host: it is the Postgres the pooler forwards to, and what the migrate Job connects to directly." }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kiln.poolerName" . }}
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pooler
+data:
+  pgbouncer.ini: |
+    {{- include "kiln.poolerIni" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kiln.poolerName" . }}
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pooler
+spec:
+  replicas: {{ .Values.pooler.replicas }}
+  # Never below the configured count during a rollout: every pooled kiln
+  # connection on a stopping pod has to land somewhere.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "kiln.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: pooler
+  template:
+    metadata:
+      labels:
+        {{- include "kiln.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: pooler
+      annotations:
+        # PgBouncer reads its ini once at start, so a changed config has to
+        # roll the pods to take effect.
+        checksum/config: {{ include "kiln.poolerIni" . | sha256sum }}
+        {{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+        # The userlist is built from this password at pod start, so a changed
+        # chart-owned password rolls the pods. An existingSecret rotation, or
+        # a renewed pooler.tls.secretName certificate, needs a manual
+        # `kubectl rollout restart` (see docs/deployment.md).
+        checksum/password: {{ .Values.secrets.databasePassword | sha256sum }}
+        {{- end }}
+        {{- with .Values.pooler.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The pooler needs no cloud identity and no Kubernetes API access.
+      automountServiceAccountToken: false
+      # The image runs as postgres (uid 70); fsGroup makes the mounted TLS key
+      # readable to it at defaultMode 0440.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: {{ .Values.pooler.terminationGracePeriodSeconds }}
+      initContainers:
+        # userlist.txt from the same secret key kiln reads, written to an
+        # emptyDir: the password never sits in a ConfigMap or in values.
+        - name: userlist
+          image: {{ include "kiln.poolerImage" . }}
+          imagePullPolicy: {{ .Values.pooler.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              umask 077 && mkdir -p /tmp/pgbouncer &&
+              printf '"%s" "%s"\n'
+              "$(printf '%s' "$DB_USER" | sed 's/"/""/g')"
+              "$(printf '%s' "$DB_PASSWORD" | sed 's/"/""/g')"
+              > /tmp/pgbouncer/userlist.txt
+          env:
+            - name: DB_USER
+              value: {{ .Values.config.database.user | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kiln.secretName" . }}
+                  key: database-password
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.pooler.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: pgbouncer
+          image: {{ include "kiln.poolerImage" . }}
+          imagePullPolicy: {{ .Values.pooler.image.pullPolicy }}
+          # Not the image's entrypoint, which rewrites files under
+          # /etc/pgbouncer and cannot run against a read-only mount.
+          #
+          # kubelet stops a container with SIGTERM, which PgBouncer reads as
+          # "wait for every client to disconnect" -- pooled kiln processes
+          # never do -- and a second SIGTERM as "quit now". The shell turns
+          # the SIGTERM into SIGINT, PgBouncer's safe shutdown: in-flight
+          # transactions finish, then it exits. The second wait outlasts the
+          # trap, so the container lives until PgBouncer is gone.
+          command:
+            - /bin/sh
+            - -c
+            - trap 'kill -INT $p' TERM; /usr/bin/pgbouncer /etc/pgbouncer/pgbouncer.ini & p=$!; wait $p; wait $p
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: pgbouncer
+              containerPort: 6432
+              protocol: TCP
+          # Liveness never depends on Postgres: a database outage must not
+          # turn into restarting every pooler and reconnecting every client.
+          livenessProbe:
+            tcpSocket:
+              port: pgbouncer
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -q
+                - -h
+                - 127.0.0.1
+                - -p
+                - "6432"
+                - -U
+                - {{ .Values.config.database.user | quote }}
+                - -d
+                - {{ .Values.config.database.name | quote }}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                # A moment for the endpoint removal to reach every client
+                # before the SIGTERM (handled above) starts the shutdown.
+                command: ["sleep", "5"]
+          resources:
+            {{- toYaml .Values.pooler.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pgbouncer
+              readOnly: true
+            - name: tls
+              mountPath: /etc/pgbouncer-tls
+              readOnly: true
+            {{- if .Values.pooler.serverTLS.caSecretName }}
+            - name: server-ca
+              mountPath: /etc/pgbouncer-server-ca
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kiln.poolerName" . }}
+        - name: tls
+          secret:
+            secretName: {{ include "kiln.poolerTLSSecretName" . }}
+            defaultMode: 0440
+        {{- with .Values.pooler.serverTLS.caSecretName }}
+        - name: server-ca
+          secret:
+            secretName: {{ . }}
+            defaultMode: 0440
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.pooler.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pooler.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pooler.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kiln.poolerName" . }}
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pooler
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6432
+      targetPort: pgbouncer
+      protocol: TCP
+      name: pgbouncer
+  selector:
+    {{- include "kiln.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: pooler
+{{- /* A PDB demanding one available pod of one would block every node drain. */}}
+{{- if and .Values.pooler.podDisruptionBudget.enabled (gt (int .Values.pooler.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kiln.poolerName" . }}
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pooler
+spec:
+  minAvailable: {{ .Values.pooler.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kiln.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: pooler
+{{- end }}
+{{- if not .Values.pooler.tls.secretName }}
+{{- /* Generated once and then reused: a fresh certificate on every upgrade
+       would churn the Secret for nothing. kiln's sslmode=require encrypts but
+       does not verify, so a self-signed certificate is enough for it; set
+       pooler.tls.secretName to a managed one for verify-ca. */}}
+{{- $name := include "kiln.poolerTLSSecretName" . }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "kiln.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pooler
+type: kubernetes.io/tls
+data:
+  {{- if and $existing $existing.data }}
+  tls.crt: {{ index $existing.data "tls.crt" }}
+  tls.key: {{ index $existing.data "tls.key" }}
+  {{- else }}
+  {{- $svc := include "kiln.poolerName" . }}
+  {{- $ns := .Release.Namespace }}
+  {{- $cert := genSelfSignedCert $svc nil (list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) 3650 }}
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+  {{- end }}
+{{- end }}
+{{- end }}

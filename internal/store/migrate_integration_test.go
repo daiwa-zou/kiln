@@ -5,9 +5,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -126,6 +129,201 @@ func TestMigrateBackfillFailureIsNotRecorded(t *testing.T) {
 	}
 	if want := []int{2}; !slices.Equal(applied, want) {
 		t.Errorf("retry applied %v, want %v", applied, want)
+	}
+}
+
+// holdMigrateLock takes the migration lock the way a migration in progress
+// does -- inside an open transaction on its own connection -- and returns the
+// function that ends that transaction and so releases it.
+func holdMigrateLock(t *testing.T, pool *pgxpool.Pool) (release func()) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrateLockKey); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("holder lock: %v", err)
+	}
+	var once sync.Once
+	release = func() { once.Do(func() { _ = tx.Rollback(ctx) }) }
+	t.Cleanup(release)
+	return release
+}
+
+func resetSchema(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
+		t.Fatalf("reset schema: %v", err)
+	}
+}
+
+type migrateResult struct {
+	applied []int
+	err     error
+}
+
+// TestMigrateWaitsForLockHolder: a migration owed while another run holds the
+// lock waits for it rather than racing it, then applies.
+func TestMigrateWaitsForLockHolder(t *testing.T) {
+	pool := testPool(t)
+	resetSchema(t, pool)
+	release := holdMigrateLock(t, pool)
+
+	done := make(chan migrateResult, 1)
+	go func() {
+		applied, err := migrateWith(context.Background(), pool, lateMigrationSet(1))
+		done <- migrateResult{applied, err}
+	}()
+
+	select {
+	case r := <-done:
+		t.Fatalf("migrate returned (%v, %v) while another run held the lock", r.applied, r.err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if tableExists(context.Background(), t, pool, "late_1") {
+		t.Fatal("late_1 was created while another run held the migration lock")
+	}
+
+	release()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("migrate after release: %v", r.err)
+		}
+		if want := []int{1}; !slices.Equal(r.applied, want) {
+			t.Errorf("applied %v, want %v", r.applied, want)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("migrate did not proceed after the lock holder released")
+	}
+}
+
+// TestMigrateLockTimeoutMessage: a run stuck behind a hung migration gets a
+// diagnosis rather than an indefinite silent block.
+func TestMigrateLockTimeoutMessage(t *testing.T) {
+	pool := testPool(t)
+	resetSchema(t, pool)
+	prev := migrateLockTimeout
+	migrateLockTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { migrateLockTimeout = prev })
+	holdMigrateLock(t, pool)
+
+	// The caller's own deadline is far above the lock timeout, so only the
+	// lock timeout can produce the diagnosis.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, err := migrateWith(ctx, pool, lateMigrationSet(1))
+	if err == nil {
+		t.Fatal("migrate succeeded while another run held the lock")
+	}
+	if !strings.Contains(err.Error(), "another migration may be hung") {
+		t.Errorf("error = %v, want the hung-migration diagnosis", err)
+	}
+	if ctx.Err() != nil {
+		t.Errorf("migrate ran into the caller's deadline instead of the lock timeout: %v", err)
+	}
+}
+
+// TestMigrateFastPathTakesNoLock: an up-to-date database is reported as such
+// without queueing behind a migration that is still running elsewhere. Every
+// `kiln admin migrate` in a rollout would otherwise wait on the slowest one.
+func TestMigrateFastPathTakesNoLock(t *testing.T) {
+	pool := testPool(t)
+	freshSchema(t, pool)
+	holdMigrateLock(t, pool)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	applied, err := Migrate(ctx, pool)
+	if err != nil {
+		t.Fatalf("Migrate with nothing owed: %v", err)
+	}
+	if len(applied) != 0 {
+		t.Errorf("applied %v, want nothing", applied)
+	}
+}
+
+// TestMigrateRestoresDDLLockTimeout: the lock timeout bounds only the wait for
+// the migration lock. A migration's DDL keeps Postgres's unbounded default, as
+// before, so a long table lock queue is waited out rather than failed.
+func TestMigrateRestoresDDLLockTimeout(t *testing.T) {
+	pool := testPool(t)
+	resetSchema(t, pool)
+	set := []migration{{
+		version: 1, name: "probe",
+		body: `CREATE TABLE lock_timeout_probe AS SELECT current_setting('lock_timeout') AS v`,
+	}}
+	if _, err := migrateWith(context.Background(), pool, set); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var got string
+	if err := pool.QueryRow(context.Background(), `SELECT v FROM lock_timeout_probe`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "0" {
+		t.Errorf("migration body ran with lock_timeout = %q, want 0", got)
+	}
+}
+
+// TestMigrateLeavesNoSessionLocks is the pooler proof. Through a transaction-mode
+// pooler a session advisory lock and its unlock can land on different server
+// connections, leaving the lock held by a connection nobody owns. Only a direct
+// connection can see that, so this runs only in the pooled CI leg, where
+// KILN_TEST_DATABASE_URL is the pooler and KILN_TEST_DIRECT_DATABASE_URL is not.
+func TestMigrateLeavesNoSessionLocks(t *testing.T) {
+	direct := os.Getenv("KILN_TEST_DIRECT_DATABASE_URL")
+	if direct == "" {
+		t.Skip("KILN_TEST_DIRECT_DATABASE_URL not set; this test runs in the pooled leg only")
+	}
+	pooled := testPool(t)
+	migrator := testPool(t)
+	ctx := context.Background()
+	directPool, err := pgxpool.New(ctx, direct)
+	if err != nil {
+		t.Fatalf("direct pool: %v", err)
+	}
+	t.Cleanup(directPool.Close)
+
+	// Background traffic through the pooler, so consecutive statements from the
+	// migrator are actually spread over different server connections.
+	hammerCtx, stop := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for hammerCtx.Err() == nil {
+				_, _ = pooled.Exec(hammerCtx, `SELECT 1`)
+			}
+		}()
+	}
+	t.Cleanup(func() { stop(); wg.Wait() })
+
+	for i := range 30 {
+		resetSchema(t, migrator)
+		loopCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		_, err := Migrate(loopCtx, migrator)
+		cancel()
+		if err != nil {
+			t.Fatalf("loop %d: Migrate: %v", i, err)
+		}
+		var held int
+		if err := directPool.QueryRow(ctx, `
+			SELECT count(*) FROM pg_locks
+			 WHERE locktype = 'advisory' AND granted
+			   -- Advisory locks are per database, and other databases on
+			   -- the same server run their own migrations.
+			   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+			   AND classid = ($1::bigint >> 32)::oid
+			   AND objid = ($1::bigint & 4294967295)::oid
+			   AND objsubid = 1`, migrateLockKey).Scan(&held); err != nil {
+			t.Fatalf("loop %d: read pg_locks: %v", i, err)
+		}
+		if held != 0 {
+			t.Fatalf("loop %d: the migration lock is still held by %d server connection(s) after Migrate returned", i, held)
+		}
 	}
 }
 

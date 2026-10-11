@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,6 +25,19 @@ var migrationsFS embed.FS
 // invocations block on it rather than racing, which is why migrations are never
 // run implicitly on server boot.
 const migrateLockKey int64 = 0x6b696c6e0001 // "kiln" + 1
+
+// migrateLockTimeout bounds the wait for the migration lock, so an operator
+// queued behind a hung migration gets a diagnosis instead of an indefinite
+// silent block. A variable only so tests can shorten it.
+var migrateLockTimeout = 5 * time.Minute
+
+// isLockTimeout reports whether Postgres gave up waiting for a lock because
+// lock_timeout expired (55P03, lock_not_available). A cancelled context is
+// reported differently and keeps its own error.
+func isLockTimeout(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
+}
 
 // SchemaVersion is the highest migration version this binary embeds, derived
 // from the files in migrations/ so that adding a migration is one new file and
@@ -67,8 +82,10 @@ type migration struct {
 }
 
 // Migrate applies every embedded migration that is not recorded in
-// schema_migrations, in ascending version order, inside an advisory lock. It is
-// idempotent and safe to run concurrently from multiple processes.
+// schema_migrations, in ascending version order, each in its own transaction
+// under a transaction-scoped advisory lock. It is idempotent, safe to run
+// concurrently from multiple processes, and safe through a transaction-mode
+// connection pooler.
 //
 // "Not recorded" is decided per version, not against the highest applied
 // version. Two branches can add migrations and land in either order, or a dev
@@ -84,94 +101,107 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (applied []int, err error)
 
 // migrateWith is Migrate over an explicit, version-sorted migration set, so
 // tests can exercise ordering without editing the embedded files.
+//
+// Nothing here outlives a transaction, so it is correct behind a
+// transaction-mode pooler (PgBouncer, RDS Proxy), where consecutive statements
+// outside a transaction may run on different server connections. A session
+// advisory lock taken that way could be released on a connection that never
+// held it, leaking the lock and losing mutual exclusion. Instead each owed
+// migration runs in its own transaction holding a transaction-scoped lock,
+// which is also the per-migration partial-progress behaviour this always had:
+// a failure leaves the earlier migrations applied and the failed one owed.
 func migrateWith(ctx context.Context, pool *pgxpool.Pool, migrations []migration) (applied []int, err error) {
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("store: acquire connection: %w", err)
-	}
-	defer conn.Release()
-
-	// Hold the lock for the whole run; released explicitly below, or with the
-	// session. Bounded acquisition so an operator waiting behind a hung
-	// migration gets a diagnosis instead of an indefinite silent block.
-	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	if _, err := conn.Exec(lockCtx, `SELECT pg_advisory_lock($1)`, migrateLockKey); err != nil {
-		if lockCtx.Err() != nil && ctx.Err() == nil {
-			return nil, fmt.Errorf("store: migration lock not acquired within 5m; another migration may be hung: %w", err)
-		}
-		return nil, fmt.Errorf("store: acquire migration lock: %w", err)
-	}
-	defer func() {
-		if _, unlockErr := conn.Exec(context.WithoutCancel(ctx),
-			`SELECT pg_advisory_unlock($1)`, migrateLockKey); unlockErr != nil {
-			// The session still holds the lock. Close the underlying
-			// connection so Release destroys it instead of returning it to
-			// the pool, where the lock would silently outlive this call and
-			// wedge every later migration.
-			_ = conn.Conn().Close(context.WithoutCancel(ctx))
-			if err == nil {
-				err = fmt.Errorf("store: release migration lock: %w", unlockErr)
-			}
-		}
-	}()
-
-	if _, err := conn.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    INTEGER PRIMARY KEY,
-			name       TEXT NOT NULL,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)`); err != nil {
-		return nil, fmt.Errorf("store: create schema_migrations: %w", err)
-	}
-
-	have, err := appliedVersions(ctx, conn.Conn())
+	// Lock-free first look. An up-to-date database -- every rollout's common
+	// case -- is reported as such without queueing behind a migration that is
+	// still running somewhere else.
+	have, err := appliedVersions(ctx, pool)
 	if err != nil {
 		return nil, err
 	}
-	current := 0
-	for v := range have {
-		current = max(current, v)
-	}
-
 	for _, m := range migrations {
 		if have[m.version] {
 			continue
 		}
-		if err := applyOne(ctx, conn.Conn(), m); err != nil {
+		ran, highest, err := applyLocked(ctx, pool, m)
+		if err != nil {
 			return applied, err
 		}
-		if m.version < current {
+		if !ran {
+			// Another run applied it while this one waited for the lock; that
+			// run reports it, so this one does not claim it too.
+			continue
+		}
+		if m.version < highest {
 			// Visible in the log as well as the returned list: a back-filled
 			// migration means two branches landed out of order, and the operator
 			// should know the schema gained something below its old maximum.
 			slog.Default().Warn("applied migration below the database's highest applied version",
-				"version", m.version, "name", m.name, "highest_applied", current)
+				"version", m.version, "name", m.name, "highest_applied", highest)
 		}
 		applied = append(applied, m.version)
 	}
 	return applied, nil
 }
 
-func applyOne(ctx context.Context, conn *pgx.Conn, m migration) error {
-	tx, err := conn.Begin(ctx)
+// applyLocked applies m in one transaction under the migration lock, unless
+// the applied set re-read under that lock shows another run got there first.
+// highest is the highest version applied before m, read under the lock.
+func applyLocked(ctx context.Context, pool *pgxpool.Pool, m migration) (ran bool, highest int, err error) {
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("store: begin migration %d: %w", m.version, err)
+		return false, 0, fmt.Errorf("store: begin migration %d: %w", m.version, err)
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
+	// The timeout bounds only the wait for the lock. It is reset to Postgres's
+	// default (no limit) before the migration runs, so DDL queued behind a
+	// long-running query waits it out rather than failing a release.
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL lock_timeout = %d`,
+		max(migrateLockTimeout.Milliseconds(), 1))); err != nil {
+		return false, 0, fmt.Errorf("store: set migration lock timeout: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrateLockKey); err != nil {
+		if isLockTimeout(err) {
+			return false, 0, fmt.Errorf("store: migration lock not acquired within %s; another migration may be hung: %w",
+				migrateLockTimeout, err)
+		}
+		return false, 0, fmt.Errorf("store: acquire migration lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = 0`); err != nil {
+		return false, 0, fmt.Errorf("store: reset lock timeout: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    INTEGER PRIMARY KEY,
+			name       TEXT NOT NULL,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`); err != nil {
+		return false, 0, fmt.Errorf("store: create schema_migrations: %w", err)
+	}
+	have, err := appliedVersions(ctx, tx)
+	if err != nil {
+		return false, 0, err
+	}
+	if have[m.version] {
+		return false, 0, nil
+	}
+	for v := range have {
+		highest = max(highest, v)
+	}
+
 	if _, err := tx.Exec(ctx, m.body); err != nil {
-		return fmt.Errorf("store: apply migration %03d_%s: %w", m.version, m.name, err)
+		return false, 0, fmt.Errorf("store: apply migration %03d_%s: %w", m.version, m.name, err)
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`,
 		m.version, m.name); err != nil {
-		return fmt.Errorf("store: record migration %d: %w", m.version, err)
+		return false, 0, fmt.Errorf("store: record migration %d: %w", m.version, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("store: commit migration %d: %w", m.version, err)
+		return false, 0, fmt.Errorf("store: commit migration %d: %w", m.version, err)
 	}
-	return nil
+	return true, highest, nil
 }
 
 // CurrentVersion reports the highest applied migration version, or 0 when the
@@ -212,9 +242,17 @@ func sortedVersions(set map[int]bool) []int {
 	return out
 }
 
+// versionReader is what appliedVersions needs: a pool for the lock-free first
+// look, a connection, or the migration transaction for the re-read under the
+// lock.
+type versionReader interface {
+	queryer
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // appliedVersions reads the set of recorded versions. A database that has no
 // schema_migrations table yet has applied nothing.
-func appliedVersions(ctx context.Context, conn *pgx.Conn) (map[int]bool, error) {
+func appliedVersions(ctx context.Context, conn versionReader) (map[int]bool, error) {
 	var exists bool
 	if err := conn.QueryRow(ctx,
 		`SELECT to_regclass('public.schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {

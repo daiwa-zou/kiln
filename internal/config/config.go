@@ -153,7 +153,21 @@ type Database struct {
 	MinConns        int32         `mapstructure:"min_conns"`
 	MaxConnLifetime time.Duration `mapstructure:"max_conn_lifetime"`
 	MaxConnIdleTime time.Duration `mapstructure:"max_conn_idle_time"`
+
+	// QueryExecMode selects how pgx sends queries: empty keeps pgx's default
+	// (named server-side prepared statements, cached per connection), which a
+	// transaction-mode pooler without prepared-statement tracking breaks.
+	// Behind PgBouncer or RDS Proxy set cache_describe: it keeps parameter
+	// types server-inferred but leaves no named statement on the server
+	// connection. See ValidQueryExecModes for the accepted values.
+	QueryExecMode string `mapstructure:"query_exec_mode"`
 }
+
+// ValidQueryExecModes are the accepted database.query_exec_mode values, in
+// pgx's own spelling. describe_exec (pgx documents it as unsafe behind
+// poolers) and simple_protocol (client-side argument interpolation) are
+// deliberately absent.
+var ValidQueryExecModes = []string{"cache_statement", "cache_describe", "exec"}
 
 // StorageBackend selects where blobs live.
 type StorageBackend string
