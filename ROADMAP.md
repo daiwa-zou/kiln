@@ -214,7 +214,6 @@ makes the cloud tier safe today, and is retired by the item:
 | Open item | Until it lands |
 | --- | --- |
 | M9·1 Connection pooler | The chart's ceilings (10 API × 20 conns, 20 workers × 6) reach 320 connections. Put RDS Proxy or PgBouncer in front, or keep `maxReplicas` low enough to fit `max_connections` |
-| M9·2 Real client addresses | Every anonymous caller behind the load balancer, GitHub included, shares one rate-limit bucket. Raise the API's limits and rate-limit at the load balancer or WAF |
 | M9·5 Scheduler role | Polling, sweeps, and requeues run in every worker. Harmless at a handful of workers; hold the worker count there |
 
 **After M10.** The API runs as three profiles of one image (reader,
@@ -222,13 +221,16 @@ control, ingress — uploads possibly a fourth), each with its own
 Deployment and HPA; the CDN absorbs most reads; workers scale on queue
 depth, down to zero.
 
-## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); item 2's webhook half shipped (PR #87); 1, 2's `RealIP` half, and 5 open
+## M9 — Make Builds Parallel — items 3–4 shipped (2026-07-30, PR #27); item 2 shipped (webhook half PR #87, trusted-proxy half 2026-10-10); 1 and 5 open
 
 *Items 3 and 4 shipped together: `agent.unit_concurrency` drives the bounded
 pool in `internal/jobs/fanout.go`, and the run budget is a reservation taken
 before each call. PR #87 keyed verified webhook deliveries on their
 repository or installation (`hookSubject` in `internal/api/webhook.go`), so
-the cross-tenant 429 is gone. Items 1 and 5, and item 2's `RealIP` half,
+the cross-tenant 429 is gone. Item 2's other half shipped 2026-10-10:
+`trusted_proxies` lets unauthenticated callers behind a load balancer key on
+the address the proxy appended to `X-Forwarded-For` (`internal/api/clientip.go`),
+IPv6 keys are per /64, and the limiter map is capped. Items 1 and 5
 have no code yet, and they are now the urgent ones — raising concurrency invites adding worker pods, which is
 exactly what the pooler gates and what multiplies the per-worker timers.*
 
@@ -249,7 +251,9 @@ topology; every item pays off at the shipped two-role deployment.*
 2. **Real client addresses** — `limiterKey` falls back to `r.RemoteAddr`
    with no `RealIP` middleware anywhere, so behind an ingress every
    unauthenticated caller shares one bucket. Add trusted-proxy `RealIP`
-   for that path. The webhook half shipped in PR #87: a delivery whose
+   for that path. *Shipped as `trusted_proxies`: headers are read only from
+   a listed peer and walked right to left; chi's `RealIP` was rejected
+   because it trusts any peer and rewrites `RemoteAddr`.* The webhook half shipped in PR #87: a delivery whose
    HMAC verifies is limited on its repository (else its installation), the
    correct tenant boundary regardless of replica count, and only
    unverified deliveries still share the peer-address bucket.

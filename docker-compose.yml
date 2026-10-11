@@ -143,6 +143,9 @@ services:
       #     --scopes read,write,admin
       KILN_AUTH_MODE: ${KILN_AUTH_MODE:-token}
       KILN_PUBLIC_URL: ${KILN_PUBLIC_URL:-http://localhost:8080}
+      # Empty: rate limits key on the TCP peer. Set it to your proxy's
+      # address when one sits in front (see docs/deployment.md).
+      KILN_TRUSTED_PROXIES: ${KILN_TRUSTED_PROXIES:-}
     ports:
       - "${KILN_BIND_ADDR:-127.0.0.1}:8080:8080"
     depends_on:

@@ -63,11 +63,59 @@ most `kubectl describe` output.
 | `KILN_STORAGE_BACKEND` | yes | `s3` or `fs`. |
 | `KILN_STORAGE_BUCKET` / `_ENDPOINT` / `_ACCESS_KEY` / `_SECRET_KEY` | for s3 | Omit the keys to use the instance role / IRSA / workload identity chain. |
 | `KILN_PUBLIC_URL` | recommended | External URL, for OAuth callbacks and links. |
+| `KILN_TRUSTED_PROXIES` | behind a proxy | Comma-separated CIDRs or bare IPs of your reverse proxies. See [Behind a reverse proxy](#behind-a-reverse-proxy). |
 | `KILN_AGENT_RUN_BUDGET_USD` | recommended | Per-run spend ceiling. |
 | `KILN_WORKER_PERMITTED_SOURCE_ROOTS` | if using path sources | Allowlist for local-path connectors. Empty denies every local path. |
 
 Run `kiln admin doctor` to validate configuration, database reachability, and
 schema version in one pass.
+
+### Behind a reverse proxy
+
+Behind an ingress or load balancer every request arrives from the proxy's
+address. Unauthenticated callers (write routes with `auth.mode = none`, and
+webhook deliveries that fail verification) are rate-limited by address, so by
+default they all share the proxy's bucket. Set `trusted_proxies`
+(`KILN_TRUSTED_PROXIES`, Helm `config.trustedProxies`) to fix that:
+
+```sh
+KILN_TRUSTED_PROXIES=10.0.0.0/16,192.0.2.10
+```
+
+When the TCP peer is in the list, kiln reads `X-Forwarded-For` and walks it
+from the right, skipping trusted hops. The first untrusted address is the
+client. A request from any other peer is keyed on that peer, and its headers are
+ignored. That is what stops a caller from choosing its own bucket by writing the
+header itself. At most 32 entries are examined. An entry that is not an address
+stops the walk at the last trusted hop.
+
+- **List only proxies that append the address they received from.** That is
+  nginx's `$proxy_add_x_forwarded_for`, AWS ALB, GCP and Azure load balancers,
+  Traefik in its default mode, and Envoy with `use_remote_address: true`
+  (Envoy's default leaves the header untouched). A proxy that passes the client's
+  header through unchanged, or replaces it with a value the client supplied,
+  makes the header the client's to write.
+- **List every hop.** With a CDN in front of an ingress, both belong in the
+  list. Missing one makes that hop the "client", so every caller shares its
+  bucket again. That fails safe, but it is no better than the default.
+- **Keep the ranges tight.** A trusted range that also holds clients lets those
+  clients set their own address. On Kubernetes, list the ingress controller's
+  pod or Service IPs, not the cluster pod CIDR: every pod in the cluster sits
+  in that CIDR. kiln warns at startup about IPv4 /8, IPv6 /32 or anything
+  broader, and logs the effective list. The warning is a smell test, not a
+  guarantee. A /16 that holds clients is just as unsafe and draws no warning.
+- **The limiter has a degraded mode.** It tracks at most 10,000 addresses per
+  hour. Past that, new addresses share 64 overflow buckets chosen by hash. A
+  flood of fresh addresses then throttles other newcomers, never a caller who
+  already holds a bucket.
+- **IPv6 callers are bucketed per /64**, with or without proxies, because one
+  host is routinely given a whole /64. IPv4-mapped addresses count as IPv4.
+- `X-Real-IP` and `Forwarded` are not read. This setting does not change how
+  `X-Forwarded-Proto` is handled. That header is consulted only when
+  `public_url` is unset, and then from any peer. Behind a proxy, set
+  `public_url`.
+
+Authenticated callers are keyed on their user, so none of this affects them.
 
 ## Docker Compose
 

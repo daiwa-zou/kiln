@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -349,6 +350,47 @@ func TestWebhookUnsignedFloodIsLimitedByPeerAndCannotBlockSignedPushes(t *testin
 	// address still goes through.
 	if code := post(true, "198.51.100.1"); code != http.StatusAccepted {
 		t.Errorf("signed delivery after an unsigned flood = %d, want 202", code)
+	}
+}
+
+// Behind a trusted proxy every delivery arrives from the proxy's address, so
+// unverified deliveries are charged to the client the proxy names: one
+// sender's flood cannot drain the bucket of another sender behind the same
+// ingress.
+func TestHookRejectLimitUsesResolvedAddress(t *testing.T) {
+	srv := httptest.NewServer((&Server{
+		Store: &fakeReadStore{}, Writes: (*fakeWrites)(nil),
+		Hooks: newFakeHooks(), WebhookSecret: []byte(hookSecret),
+		// httptest listens on loopback, so loopback is the proxy here.
+		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
+	}).Router())
+	t.Cleanup(srv.Close)
+
+	post := func(forwardedFor string) int {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/hooks/github", bytes.NewReader(repoPush("acme/repo")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("X-Forwarded-For", forwardedFor)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		return res.StatusCode
+	}
+
+	for i := 0; i < writeBurst; i++ {
+		if code := post("203.0.113.1"); code != http.StatusUnauthorized {
+			t.Fatalf("unsigned delivery %d = %d, want 401", i+1, code)
+		}
+	}
+	if code := post("203.0.113.1"); code != http.StatusTooManyRequests {
+		t.Fatalf("flooding sender past its burst = %d, want 429", code)
+	}
+	if code := post("203.0.113.2"); code != http.StatusUnauthorized {
+		t.Errorf("another sender behind the same proxy = %d, want 401 (its own bucket)", code)
 	}
 }
 

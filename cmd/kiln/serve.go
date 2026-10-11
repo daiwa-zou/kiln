@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
+	"net/netip"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -82,6 +84,11 @@ processes separately so builds scale independently of the API.`,
 			// port.
 			metrics := observability.NewMetrics()
 
+			trusted, err := trustedProxies(cfg, log)
+			if err != nil {
+				return err
+			}
+
 			ws := store.NewWikiStore(db.Pool)
 			srv := &api.Server{
 				Store:                  ws,
@@ -99,6 +106,7 @@ processes separately so builds scale independently of the API.`,
 				DB:                     db,
 				Log:                    log,
 				CORSOrigins:            cfg.CORSOrigins,
+				TrustedProxies:         trusted,
 				PublicURL:              cfg.PublicURL,
 				MCPAuthorizationServer: cfg.MCPAuthorizationServer,
 				Metrics:                metrics,
@@ -234,6 +242,28 @@ func serveAndDrain(serve func() error, cancel context.CancelFunc, metricsDone, w
 		<-workerDone
 	}
 	return err
+}
+
+// trustedProxies parses trusted_proxies for the API server (Load has already
+// validated it), warns about prefixes broad enough to hold clients, and logs
+// the effective list so an operator can see which peers' X-Forwarded-For is
+// believed. An empty list logs nothing: the headers are simply never read.
+func trustedProxies(cfg *config.Config, log *slog.Logger) ([]netip.Prefix, error) {
+	trusted, err := config.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range config.TrustedProxyWarnings(trusted) {
+		log.Warn(w)
+	}
+	if len(trusted) > 0 {
+		names := make([]string, len(trusted))
+		for i, p := range trusted {
+			names[i] = p.String()
+		}
+		log.Info("rate-limit client addresses read X-Forwarded-For from trusted proxies", "trusted_proxies", names)
+	}
+	return trusted, nil
 }
 
 // loopbackAddr reports whether a listen address can only be reached from

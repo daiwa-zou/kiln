@@ -177,6 +177,7 @@ The knobs worth knowing before anything else:
 | `agent.runner` | `api` | Names a registered model provider; `fake` runs the whole pipeline with zero spend. Adding one is a registration, not a fork — see [docs/architecture.md](docs/architecture.md). |
 | `auth.mode` | `token` | `none` is refused on any non-loopback bind. With `none`, the API also refuses a `Host` that is not loopback or the `public_url` host, and any `POST` not sent as `application/json`. |
 | `worker.permitted_source_roots` | *(empty)* | Allowlist for local-path sources. Empty denies every one. |
+| `trusted_proxies` | *(empty)* | Your reverse proxy's address, so anonymous callers behind it get their own rate-limit buckets instead of sharing the proxy's. See [docs/deployment.md](docs/deployment.md#behind-a-reverse-proxy). |
 
 Every key, with defaults, is in
 [docs/architecture.md](docs/architecture.md#configuration-reference).

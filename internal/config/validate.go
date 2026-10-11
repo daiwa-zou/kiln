@@ -157,6 +157,10 @@ func (c *Config) Validate() error {
 			c.Worker.StaleAfter, c.Worker.HeartbeatInterval))
 	}
 
+	if _, err := ParseTrustedProxies(c.TrustedProxies); err != nil {
+		problems = append(problems, err.Error())
+	}
+
 	switch c.Auth.Mode {
 	case AuthToken, AuthNone:
 	case "":
