@@ -19,8 +19,55 @@ func TestOverviewDescribesItsSources(t *testing.T) {
 	if !strings.Contains(got, "compiled from 5 code modules and 1 uploaded document") {
 		t.Errorf("lede does not describe the sources:\n%s", got)
 	}
+	// A bench with uploads says what its document count covers, so the lede
+	// does not contradict an Ingest list that has grown since the build.
+	if !strings.Contains(got, "last built 2026-07-25; documents uploaded after this build are not counted.") {
+		t.Errorf("lede does not say what the document count covers:\n%s", got)
+	}
 	if !strings.Contains(got, "## What this bench reads") {
 		t.Errorf("no sources section:\n%s", got)
+	}
+}
+
+func TestOverviewLedeQualifiesTheDocumentCountOnlyWithUploads(t *testing.T) {
+	// Overview said "25 uploaded documents" while Ingest listed 26, because the
+	// tally is what the build read and a document uploaded since is not in it.
+	// The clause reconciles the two, and only where there is something to
+	// reconcile: a git-only bench keeps its plain full stop.
+	const clause = "documents uploaded after this build are not counted."
+
+	gitOnly := BuildOverview(samplePages(), OverviewInput{
+		Workspace: "w",
+		Date:      "2026-07-25",
+		BuiltAt:   "2026-07-25 09:42 UTC",
+		Sources:   []SourceTally{{Kind: "module", Count: 2}},
+	})
+	if strings.Contains(gitOnly, clause) {
+		t.Errorf("git-only bench has no document count to qualify:\n%s", gitOnly)
+	}
+	if !strings.Contains(gitOnly, "last built 2026-07-25 09:42 UTC.") {
+		t.Errorf("git-only bench lost its plain stop:\n%s", gitOnly)
+	}
+
+	withUploads := BuildOverview(samplePages(), OverviewInput{
+		Workspace: "w",
+		Date:      "2026-07-25",
+		BuiltAt:   "2026-07-25 09:42 UTC",
+		Sources:   []SourceTally{{Kind: "module", Count: 2}, {Kind: "doc:upload", Count: 3}},
+	})
+	if !strings.Contains(withUploads, "last built 2026-07-25 09:42 UTC; "+clause) {
+		t.Errorf("clause missing or detached from the build stamp:\n%s", withUploads)
+	}
+
+	// The clause rides on whichever build sentence the lede has: a bench whose
+	// uploads produced no pages yet still gets it after "Last built".
+	noPages := BuildOverview(nil, OverviewInput{
+		Workspace: "w",
+		Date:      "2026-07-25",
+		Sources:   []SourceTally{{Kind: "doc:upload", Count: 1}},
+	})
+	if !strings.Contains(noPages, "Last built 2026-07-25; "+clause) {
+		t.Errorf("clause missing on a bench with no pages:\n%s", noPages)
 	}
 }
 

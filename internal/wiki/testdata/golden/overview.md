@@ -7,7 +7,7 @@ built_at_ref: 7dfadb6
 
 # Overview
 
-Knowledge base for **watchtower**, compiled from 5 code modules, 1 uploaded document, and 3 fetched web pages, at `7dfadb6`. 9 pages, last built 2026-07-25.
+Knowledge base for **watchtower**, compiled from 5 code modules, 1 uploaded document, and 3 fetched web pages, at `7dfadb6`. 9 pages, last built 2026-07-25; documents uploaded after this build are not counted.
 
 Five Go services behind a gateway, each owning a slice of the request path.
 

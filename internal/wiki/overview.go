@@ -168,12 +168,31 @@ func writeOverviewLede(b *strings.Builder, pages []Page, in OverviewInput) {
 	if stamp == "" {
 		stamp = in.Date
 	}
+	// The document tally is what this build read, so it falls behind the Ingest
+	// list as soon as someone uploads again, and a reader who compares the two
+	// sees a contradiction. Saying what the count covers is true at all times;
+	// a bench with no uploads has nothing to reconcile and keeps the plain stop.
+	end := "."
+	if uploadCount(in) > 0 {
+		end = "; documents uploaded after this build are not counted."
+	}
 	if n := countedPages(pages); n > 0 && stamp != "" {
-		fmt.Fprintf(b, " %s, last built %s.", plural(n, "page"), stamp)
+		fmt.Fprintf(b, " %s, last built %s%s", plural(n, "page"), stamp, end)
 	} else if stamp != "" {
-		fmt.Fprintf(b, " Last built %s.", stamp)
+		fmt.Fprintf(b, " Last built %s%s", stamp, end)
 	}
 	b.WriteString("\n\n")
+}
+
+// uploadCount is how many uploaded documents the build was compiled from.
+func uploadCount(in OverviewInput) int {
+	n := 0
+	for _, t := range in.Sources {
+		if t.Kind == diff.NamespaceUpload {
+			n += t.Count
+		}
+	}
+	return n
 }
 
 // writeOverviewSources lists the material behind the wiki. It is deliberately

@@ -450,6 +450,41 @@ from storage is skipped, reported to the review queue, and the build continues.
 Failing the whole run would stop the repository, the web pages, and every
 healthy document from ingesting — turning a storage incident into an outage.
 
+**Per-document ingest status.** A document that extraction could not read — an
+image-only PDF, a type no extractor on this server handles — is also skipped
+and the build continues, but it files no review item: there is nothing for a
+human to decide, only something for the uploader to know. The Ingest view
+therefore shows one status per uploaded document, derived at read time from the
+file row, its source record and the bench's runs:
+
+| Status | Means |
+| --- | --- |
+| read, with its page count | A source record exists and was read since the bytes last changed. The count unions the document's own pages with those of its section units. |
+| waiting for the next ingest | Uploaded or replaced after the last build that could have read it, or a build is queued or running. |
+| not read, with a plain-language reason | The worker recorded a skip for exactly these bytes. |
+| paused | `enabled = false` and no source record; a paused document that has one stays read. |
+
+A server build records a skip through the worker; `kiln build` prints it, as
+it always has. What the worker stores on `workspace_files` is a short
+**class token** (`no_text`, `extractor_missing`, `unsupported_type`,
+`timed_out`, `extractor_error`), never the extractor's own text about the file;
+the API maps the token to a fixed sentence, and the raw text — sanitized and
+capped — goes to the operator log only, with the run and the workspace. The skip
+is tied to the **sha256 of the skipped bytes**: it is live only while the row's
+hash still matches, so a replacement voids it with no clearing logic, and
+re-uploading the identical bytes keeps it, because they are still unreadable.
+Web-source skips (a 404, a refused host) take the same path through the sink but
+are **logged only**; nothing on the connector row records them. Skips are
+counted on `kiln_documents_skipped_total{kind,class}`.
+
+"Not read" with no recorded reason is the fallback for a document the last
+build did not read and did not explain: an upload from before this version,
+whose skip was discarded at the time, or a unit that failed. A rebuild records
+the reason or reads the document. One caveat is deliberate: a **replaced**
+document keeps its old pages until the next ingest reads the new bytes, and
+reads as waiting meanwhile. The old pages are not removed or marked, because
+the source record that owns them is rewritten by the build, not by the upload.
+
 ---
 
 ## Mapping and routing
@@ -1009,6 +1044,13 @@ Points worth knowing:
   what makes the gaps view possible.
 - **`spend_ledger` is never swept.** Budget windows read it; run deletion nulls
   its `run_id` rather than cascading into it.
+- **`workspace_files` carries its ingest facts** (migration 021, all nullable,
+  no backfill): `skip_reason` is a class token of at most 40 characters, never
+  extractor text; `skip_sha256` is the hash of the bytes that were skipped, and
+  the skip counts only while it equals `sha256`; `skipped_at`; and
+  `content_changed_at`, which moves only when the hash changes — `updated_at`
+  moves on rename and pause and `created_at` never moves on a re-upload, so
+  neither can say "changed since read". Readers fall back to `created_at`.
 
 **Run statuses:** `pending`, `running`, `succeeded`, `partial`, `failed`,
 `no_changes`, `over_budget`, `canceled`.
@@ -1210,6 +1252,7 @@ survives.
 | Worker dies mid-build | Its run sits `running` and would block the bench via the active-run index. `worker.stale_after` (default 45m) returns it to the queue once its claim has gone that long without a heartbeat; a live worker refreshes the claim every `worker.heartbeat_interval` (default 1m), so a long healthy build is never swept. Terminal and progress writes are fenced to the claiming worker, so a worker that lost its claim can neither finish nor requeue the run that replaced it, and it cancels its own build as soon as a heartbeat finds the claim gone. The pipeline is idempotent from the start. |
 | Import fails | The run is marked failed **and still ledgered**, because the agent calls are already billed. |
 | Blob missing at sync | That document is skipped and reported to the review queue; the rest of the bench builds. |
+| Document yields no text at sync | Skipped with a class token on its `workspace_files` row and a log line; no review item, and the run is not failed. Ingest shows it as not read with the reason. A failure in the recording itself is logged and never fails the run. |
 | Blob delete fails | Logged. The key was queued in `pending_blob_deletes` in the same transaction that orphaned it, so the next sweep retries it. Never a dangling reference. |
 | Process dies between uploading a blob and recording its row | Not recoverable from the queue — nothing was committed to name it — so that blob is a true orphan. Rare, and bounded to one document's pictures or one upload. |
 | Postgres briefly unavailable | Connection is retried with backoff at startup. |
