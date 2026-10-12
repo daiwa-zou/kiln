@@ -208,10 +208,9 @@ func skipClass(err error) string {
 		return SkipExtractorMissing
 	case errors.Is(err, extract.ErrNoExtractor):
 		return SkipUnsupportedType
-	// runTool reports its own deadline as prose ("pdftotext timed out after
-	// 2m0s") without wrapping the context error, so the sentinel check alone
-	// would never match a converter that hung; the text is the contract there.
-	case errors.Is(err, context.DeadlineExceeded), strings.Contains(err.Error(), " timed out after "):
+	// A converter that hung is runTool's sentinel; the caller's own deadline
+	// arriving mid-extraction is the context's.
+	case errors.Is(err, extract.ErrTimedOut), errors.Is(err, context.DeadlineExceeded):
 		return SkipTimedOut
 	default:
 		return SkipExtractorError

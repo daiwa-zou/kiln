@@ -174,26 +174,148 @@ func TestRepeatedSkipLogsAtDebugAndIsNotCountedAgain(t *testing.T) {
 	}
 }
 
-func TestSkipLogIsCappedPerRun(t *testing.T) {
+// scansWithOK is a bench of n blank scans (bad01.pdf ...) and one readable
+// document.
+func scansWithOK(n int) map[string]string {
 	files := map[string]string{"ok.md": "# Fine\n\nReadable.\n"}
-	for i := 1; i <= 25; i++ {
+	for i := 1; i <= n; i++ {
 		files[fmt.Sprintf("bad%02d.pdf", i)] = blankPDF
 	}
+	return files
+}
+
+// addFile uploads one more document to a filesWorker's bench between runs.
+func addFile(t *testing.T, w *Worker, st *loopStore, path, body string) {
+	t.Helper()
+	blobs, ok := w.Blobs.(memBlobs)
+	if !ok {
+		t.Fatalf("worker blobs are %T, want memBlobs", w.Blobs)
+	}
+	key := "ws/ws/uploads/" + path
+	blobs[key] = []byte(body)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.files = append(st.files, store.FileRow{ID: path, Path: path, BlobKey: key, SHA256: "sha-" + path, Enabled: true})
+}
+
+func TestSkipLogIsCappedPerRun(t *testing.T) {
 	st := newLoopStore()
-	w, buf := filesWorker(t, st, files)
+	w, buf := filesWorker(t, st, scansWithOK(25))
 
 	w.process(context.Background(), filesRun("r1"))
 
 	if n := len(logLines(buf, "document skipped")); n != skipLogLines {
 		t.Errorf("skip lines = %d, want the cap of %d", n, skipLogLines)
 	}
+	// The summary says what it folded, by class, so an operator reading at
+	// the default level still learns what kind of skips they were.
 	more := logLines(buf, "more documents skipped")
-	if len(more) != 1 || !strings.Contains(more[0], "count=5") {
-		t.Errorf("summary line = %v, want one with count=5", more)
+	if len(more) != 1 || !strings.Contains(more[0], "count=5") || !strings.Contains(more[0], `classes="no_text=5"`) {
+		t.Errorf("summary line = %v, want one with count=5 and classes no_text=5", more)
 	}
 	// Every skip was recorded, cap or not: the cap is on the log.
 	if len(st.skipCalls) != 1 || len(st.skipCalls[0].skips) != 25 {
 		t.Errorf("recorded skips = %d, want 25", len(st.skipCalls[0].skips))
+	}
+}
+
+// A new scan is news and goes first, however many known scans sort before it:
+// the cap must never fold the one line that says something happened.
+func TestNewSkipIsLoggedBeforeRepeats(t *testing.T) {
+	st := newLoopStore()
+	w, buf := filesWorker(t, st, scansWithOK(22))
+	w.process(context.Background(), filesRun("r1"))
+	buf.Reset()
+
+	// Sorts after every recorded scan, so without the ordering it is the 23rd
+	// line and falls into the summary.
+	addFile(t, w, st, "bad99-new.pdf", blankPDF)
+	w.process(context.Background(), filesRun("r2"))
+
+	lines := logLines(buf, "document skipped")
+	if len(lines) != skipLogLines {
+		t.Fatalf("skip lines = %d, want the cap of %d:\n%s", len(lines), skipLogLines, buf.String())
+	}
+	if !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[0], "path=bad99-new.pdf") {
+		t.Errorf("first line = %s, want the new scan at Warn", lines[0])
+	}
+	warns := 0
+	for _, l := range lines {
+		if strings.Contains(l, "level=WARN") {
+			warns++
+		}
+	}
+	if warns != 1 {
+		t.Errorf("Warn lines = %d, want 1: only the new scan is news", warns)
+	}
+	more := logLines(buf, "more documents skipped")
+	if len(more) != 1 || !strings.Contains(more[0], "count=3") || !strings.Contains(more[0], `classes="no_text=3"`) {
+		t.Errorf("summary line = %v, want count=3 of no_text", more)
+	}
+}
+
+// At the default level a repeat produces no line, so it must not spend the
+// cap either: a bench of twenty-five stable scans used to raise "more
+// documents skipped" on every rebuild while naming nothing, and a new scan
+// behind them was never named at all.
+func TestRepeatsSpendNoLogCapAtTheDefaultLevel(t *testing.T) {
+	st := newLoopStore()
+	w, _ := filesWorker(t, st, scansWithOK(25))
+	w.process(context.Background(), filesRun("r1"))
+
+	var buf bytes.Buffer
+	w.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	w.process(context.Background(), filesRun("r2"))
+	if lines := logLines(&buf, "document skipped"); len(lines) != 0 {
+		t.Errorf("a rebuild of stable scans logged %d skip lines at Info", len(lines))
+	}
+	if more := logLines(&buf, "more documents skipped"); len(more) != 0 {
+		t.Errorf("a rebuild of stable scans raised a summary: %v", more)
+	}
+
+	// The red's reproduction: one new scan behind the repeats.
+	addFile(t, w, st, "bad99-new.pdf", blankPDF)
+	buf.Reset()
+	w.process(context.Background(), filesRun("r3"))
+	lines := logLines(&buf, "document skipped")
+	if len(lines) != 1 || !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[0], "path=bad99-new.pdf") {
+		t.Errorf("skip lines = %v, want exactly one Warn naming bad99-new.pdf", lines)
+	}
+	if more := logLines(&buf, "more documents skipped"); len(more) != 0 {
+		t.Errorf("one new scan raised a summary: %v", more)
+	}
+}
+
+// An upload connector reading a worker-local folder has no file rows, so the
+// store cannot say what is news; the worker remembers instead, or every
+// rebuild of a folder with one scan would Warn and count it again.
+func TestPathModeSkipIsLoggedAndCountedOnce(t *testing.T) {
+	popplerShims(t)
+	dir := t.TempDir()
+	for name, body := range map[string]string{"bad.pdf": blankPDF, "ok.md": "# Fine\n\nReadable.\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := newLoopStore()
+	w, _ := loopWorker(t, st, &pipelineStore{}, agent.FakeOptions{})
+	st.pinned = &store.ConnectorRow{ID: "c2", Kind: "upload", Name: "folder", Config: map[string]any{"path": dir}}
+	w.PermittedSourceRoots = []string{dir}
+	var buf *bytes.Buffer
+	w.Log, buf = debugLogger()
+
+	w.process(context.Background(), filesRun("r1"))
+	w.process(context.Background(), filesRun("r2"))
+
+	lines := logLines(buf, "document skipped")
+	if len(lines) != 2 || !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[1], "level=DEBUG") {
+		t.Errorf("skip lines = %v, want one Warn then one Debug", lines)
+	}
+	if len(st.skipCalls) != 0 {
+		t.Errorf("a path-mode connector has no rows to record on, yet RecordFileSkips was called: %+v", st.skipCalls)
+	}
+	if body := scrapeMetrics(t, w); !strings.Contains(body, `kiln_documents_skipped_total{class="no_text",kind="upload"} 1`) {
+		t.Errorf("a repeat of an unrecorded skip was counted again:\n%s", body)
 	}
 }
 
@@ -270,6 +392,19 @@ func TestWebSkipsAreLoggedWithTheHostAndNeverPersisted(t *testing.T) {
 	}
 	if body := scrapeMetrics(t, w); !strings.Contains(body, `kiln_documents_skipped_total{class="extractor_error",kind="web"} 1`) {
 		t.Errorf("web skip not counted:\n%s", body)
+	}
+
+	// The same page on the next rebuild is a repeat: Debug, and not counted.
+	buf.Reset()
+	sink(context.Background(), []jobs.DocSkip{{
+		Kind: "web", Subject: "https://example.com", Class: upload.SkipExtractorError,
+		Raw: "fetch: 404 Not Found",
+	}})
+	if lines := logLines(buf, "page skipped"); len(lines) != 1 || !strings.Contains(lines[0], "level=DEBUG") {
+		t.Errorf("repeat web skip lines = %v, want one Debug line", lines)
+	}
+	if body := scrapeMetrics(t, w); !strings.Contains(body, `kiln_documents_skipped_total{class="extractor_error",kind="web"} 1`) {
+		t.Errorf("a repeated web skip was counted again:\n%s", body)
 	}
 }
 

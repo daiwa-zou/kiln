@@ -529,3 +529,240 @@ func TestSetFileEnabledResumeBumpsContentOnlyWithoutSource(t *testing.T) {
 		t.Errorf("resuming a file with a dropped source left content_changed_at at %v", at)
 	}
 }
+
+func mustCreateConnector(t *testing.T, s *WikiStore, ws, kind string) string {
+	t.Helper()
+	id, err := s.CreateConnector(context.Background(), ConnectorRow{
+		WorkspaceID: ws, Kind: kind, Name: kind, Config: map[string]any{}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create %s connector: %v", kind, err)
+	}
+	return id
+}
+
+// mustInsertPinnedRun is mustInsertRun for a run pinned to one connector, the
+// way the poll scheduler and a connector's "sync now" enqueue them.
+func mustInsertPinnedRun(t *testing.T, s *WikiStore, ws, connectorID, trigger, status string, startedAt any) {
+	t.Helper()
+	if _, err := s.Pool().Exec(context.Background(), `
+		INSERT INTO runs (workspace_id, connector_id, trigger, status, started_at) VALUES ($1, $2, $3, $4, $5)`,
+		ws, connectorID, trigger, status, startedAt); err != nil {
+		t.Fatalf("insert pinned %s %s run: %v", trigger, status, err)
+	}
+}
+
+// A run pinned to the git or web connector builds from that connector alone,
+// so it never staged an upload: it is not the last ingest of the documents,
+// and while queued it is not the ingest about to read them.
+func TestListFilesWithIngestIgnoresRunsPinnedToOtherConnectors(t *testing.T) {
+	s, ws := jobStore(t)
+	uploadID := mustCreateConnector(t, s, ws, "upload")
+	webID := mustCreateConnector(t, s, ws, "web")
+	mustCreateFile(t, s, ws, "a.pdf", "a1")
+	aged := ageContent(t, s, ws, "a.pdf")
+	bench := func() FileIngestBench {
+		t.Helper()
+		_, b, err := s.ListFilesWithIngest(context.Background(), ws)
+		if err != nil {
+			t.Fatalf("ListFilesWithIngest: %v", err)
+		}
+		return b
+	}
+
+	// The red's reproduction: a poll of the web connector after the upload.
+	mustInsertPinnedRun(t, s, ws, webID, "poll", "no_changes", aged.Add(30*time.Minute))
+	if b := bench(); b.LastRun != nil {
+		t.Errorf("a poll pinned to the web connector counts as the last ingest: %+v", b)
+	}
+	mustInsertPinnedRun(t, s, ws, webID, "poll", "queued", nil)
+	if b := bench(); b.PendingRun {
+		t.Error("a queued poll of the web connector reads as a pending ingest")
+	}
+	if _, err := s.Pool().Exec(context.Background(), `DELETE FROM runs WHERE status = 'queued'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pinned to the upload connector, or to none: these stage uploads.
+	want := aged.Add(45 * time.Minute)
+	mustInsertPinnedRun(t, s, ws, uploadID, "manual", "succeeded", want)
+	if b := bench(); b.LastRun == nil || !b.LastRun.Equal(want) {
+		t.Errorf("a run pinned to the upload connector was not counted: %+v", b)
+	}
+	want = aged.Add(time.Hour)
+	mustInsertRun(t, s, ws, "manual", "no_changes", want)
+	if b := bench(); b.LastRun == nil || !b.LastRun.Equal(want) {
+		t.Errorf("an unpinned run was not counted: %+v", b)
+	}
+	mustInsertPinnedRun(t, s, ws, uploadID, "manual", "queued", nil)
+	if b := bench(); !b.PendingRun {
+		t.Error("a queued run pinned to the upload connector is not a pending ingest")
+	}
+}
+
+// BudgetPaused is a fact about the latest run, whatever its connector: the
+// budget is the bench's.
+func TestListFilesWithIngestBudgetPaused(t *testing.T) {
+	s, ws := jobStore(t)
+	bench := func() FileIngestBench {
+		t.Helper()
+		_, b, err := s.ListFilesWithIngest(context.Background(), ws)
+		if err != nil {
+			t.Fatalf("ListFilesWithIngest: %v", err)
+		}
+		return b
+	}
+	insert := func(trigger, status string, createdAt string) {
+		t.Helper()
+		if _, err := s.Pool().Exec(context.Background(), `
+			INSERT INTO runs (workspace_id, trigger, status, started_at, created_at) VALUES ($1, $2, $3, $4, $4)`,
+			ws, trigger, status, createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if bench().BudgetPaused {
+		t.Error("an empty bench reads as budget-paused")
+	}
+	insert("manual", "succeeded", "2026-10-01T00:00:00Z")
+	if bench().BudgetPaused {
+		t.Error("a succeeded run reads as budget-paused")
+	}
+	// The continuation was refused: the deferred documents wait for the window.
+	insert("continuation", "over_budget", "2026-10-02T00:00:00Z")
+	b := bench()
+	if !b.BudgetPaused {
+		t.Error("the latest run is over_budget but the bench is not budget-paused")
+	}
+	if b.LastRun == nil || !b.LastRun.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("an over_budget run moved LastRun: %+v", b)
+	}
+	// A research run after it says nothing about the budget; a later build does.
+	insert("research", "succeeded", "2026-10-03T00:00:00Z")
+	if !bench().BudgetPaused {
+		t.Error("a later research run cleared the pause")
+	}
+	insert("manual", "no_changes", "2026-10-04T00:00:00Z")
+	if bench().BudgetPaused {
+		t.Error("a later build left the bench budget-paused")
+	}
+}
+
+// A path that was skipped and also listed as read (the store does not require
+// the lists to be disjoint) keeps its skip: the clear must not undo the write
+// that preceded it in the same transaction and report it changed anyway.
+func TestRecordFileSkipsPathInBothListsKeepsItsSkip(t *testing.T) {
+	s, ws := jobStore(t)
+	mustCreateFile(t, s, ws, "a.pdf", "a1")
+	mustCreateFile(t, s, ws, "b.pdf", "b1")
+	if _, err := s.RecordFileSkips(context.Background(), ws, []FileSkip{{Path: "b.pdf", SHA256: "b1", Class: "no_text"}}, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := s.RecordFileSkips(context.Background(), ws,
+		[]FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "no_text"}}, []string{"a.pdf", "b.pdf"}, time.Now())
+	if err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if want := []string{"a.pdf"}; !slices.Equal(changed, want) {
+		t.Errorf("changed = %v, want %v", changed, want)
+	}
+	if got := readSkip(t, s, ws, "a.pdf"); strOf(got.reason) != "no_text" {
+		t.Errorf("a.pdf skip after being listed as read too: %q, want no_text kept", strOf(got.reason))
+	}
+	// The read path that was not skipped clears as before.
+	if got := readSkip(t, s, ws, "b.pdf"); got.reason != nil {
+		t.Errorf("b.pdf skip not cleared: %q", strOf(got.reason))
+	}
+}
+
+func TestTouchSourcesStampsLiveRowsOnly(t *testing.T) {
+	s, ws := jobStore(t)
+	ctx := context.Background()
+	other, err := s.EnsureWorkspace(ctx, "test-org", "other", "Other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustCreateFile(t, s, ws, "a.pdf", "a1")
+	mustCreateFile(t, s, ws, "gone.pdf", "g1")
+	mustCreateFile(t, s, other, "a.pdf", "a1")
+	aKey := string(diff.DocKey(diff.UploadOrigin("a.pdf")))
+	goneKey := string(diff.DocKey(diff.UploadOrigin("gone.pdf")))
+	mustImportSources(t, s, ws,
+		diff.SourceRecord{Key: diff.Key(aKey), InputHash: "h", FilesWritten: []string{"sources/a.md"}},
+		diff.SourceRecord{Key: diff.Key(goneKey), InputHash: "h", FilesWritten: []string{"sources/gone.md"}})
+	mustImportSources(t, s, other,
+		diff.SourceRecord{Key: diff.Key(aKey), InputHash: "h", FilesWritten: []string{"sources/a.md"}})
+	past := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := s.Pool().Exec(ctx, `UPDATE sources SET fetched_at = $1`, past); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool().Exec(ctx, `UPDATE sources SET deleted_at = now() WHERE workspace_id = $1 AND key = $2`, ws, goneKey); err != nil {
+		t.Fatal(err)
+	}
+	fetched := func(wsID, key string) time.Time {
+		t.Helper()
+		var at time.Time
+		if err := s.Pool().QueryRow(ctx, `SELECT fetched_at FROM sources WHERE workspace_id = $1 AND key = $2`, wsID, key).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+
+	at := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	if err := s.TouchSources(ctx, ws, []string{aKey, goneKey, "doc:upload:unknown.pdf"}, at); err != nil {
+		t.Fatalf("TouchSources: %v", err)
+	}
+	if got := fetched(ws, aKey); !got.Equal(at) {
+		t.Errorf("live source fetched_at = %v, want %v", got, at)
+	}
+	if got := fetched(ws, goneKey); !got.Equal(past) {
+		t.Errorf("soft-deleted source was touched: %v", got)
+	}
+	if got := fetched(other, aKey); !got.Equal(past) {
+		t.Errorf("another bench's source was touched: %v", got)
+	}
+	// Nothing to touch is not a statement.
+	if err := s.TouchSources(ctx, ws, nil, at); err != nil {
+		t.Errorf("empty TouchSources: %v", err)
+	}
+}
+
+// The red's second finding: a replacement whose bytes differ but whose text
+// does not never regenerates its unit, so only the gate's touch can keep it
+// read. The facts here are what deriveIngest (internal/api) reads: read when
+// the source was fetched at or after the bytes changed.
+func TestReplacementWithUnchangedTextStaysReadOnceTouched(t *testing.T) {
+	s, ws := jobStore(t)
+	ctx := context.Background()
+	mustCreateFile(t, s, ws, "a.pdf", "a1")
+	aKey := diff.DocKey(diff.UploadOrigin("a.pdf"))
+	mustImportSources(t, s, ws, diff.SourceRecord{Key: aKey, InputHash: "h", FilesWritten: []string{"sources/a.md"}})
+	if _, err := s.Pool().Exec(ctx, `UPDATE sources SET fetched_at = now() - interval '1 hour' WHERE workspace_id = $1`, ws); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool().Exec(ctx, `UPDATE workspace_files SET content_changed_at = now() - interval '2 hours' WHERE workspace_id = $1`, ws); err != nil {
+		t.Fatal(err)
+	}
+	if row := ingestRow(t, mustListIngest(t, s, ws), "a.pdf"); row.ReadAt == nil || row.ReadAt.Before(row.ContentAt) {
+		t.Fatalf("setup: the document should read as read: %+v", row)
+	}
+
+	// Re-saved: new sha, same words. The bytes changed after the read.
+	mustCreateFile(t, s, ws, "a.pdf", "a2")
+	row := ingestRow(t, mustListIngest(t, s, ws), "a.pdf")
+	if !row.ReadAt.Before(row.ContentAt) {
+		t.Fatalf("setup: a new sha should make the read stale: read %v, content %v", row.ReadAt, row.ContentAt)
+	}
+
+	// The build's hash gate drops the unit and touches it; the run ends no_changes.
+	if err := s.TouchSources(ctx, ws, []string{string(aKey)}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	mustInsertRun(t, s, ws, "manual", "no_changes", time.Now())
+	row = ingestRow(t, mustListIngest(t, s, ws), "a.pdf")
+	if !row.HasSource || row.ReadAt == nil || row.ReadAt.Before(row.ContentAt) {
+		t.Errorf("after the touch: has_source=%v read %v content %v; want read at or after the change",
+			row.HasSource, row.ReadAt, row.ContentAt)
+	}
+}

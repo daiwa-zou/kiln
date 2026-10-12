@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daiwa-zou/kiln/internal/agent"
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/jobs"
@@ -58,6 +59,11 @@ type loopStore struct {
 	// publishChecks counts looks at the bench's publish target, which is the
 	// first thing a publish attempt does.
 	publishChecks int
+	// publishStarted and publishRelease, when set, make the publish step
+	// block at that first look until the test releases it, so the test can
+	// read the queue while a publish is in flight.
+	publishStarted chan struct{}
+	publishRelease chan struct{}
 	// requeued and sweeps record drain and GC activity.
 	requeued []string
 	sweeps   int
@@ -517,6 +523,41 @@ func TestContinuationRuns(t *testing.T) {
 	}
 }
 
+// The continuation must be on the queue before the publish step starts: a
+// push can take minutes, and until a queued run exists every document this
+// run deferred reads as "not read" on the Ingest page instead of waiting.
+func TestContinuationIsQueuedBeforeThePublishStep(t *testing.T) {
+	st := newLoopStore()
+	st.publishStarted = make(chan struct{})
+	st.publishRelease = make(chan struct{})
+	w, _ := loopWorker(t, st, &pipelineStore{}, agent.FakeOptions{CostPerCall: 0.02})
+	w.Log, _ = bufferLogger()
+	// The bench plans two units; a cap of one defers the other, and the unit
+	// that finished is the progress that earns a continuation.
+	w.Pipeline.Budget.MaxPages = 1
+	run := &store.QueuedRun{ID: "r1", WorkspaceID: "ws", WorkspaceSlug: "bench", Trigger: "manual", ConnectorID: "c1"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.process(context.Background(), run)
+	}()
+	select {
+	case <-st.publishStarted:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the publish step never started")
+	}
+	st.mu.Lock()
+	enqueued := append([]string(nil), st.enqueued...)
+	st.mu.Unlock()
+	close(st.publishRelease)
+	<-done
+
+	if len(enqueued) != 1 || enqueued[0] != "continuation:c1" {
+		t.Errorf("queue while the publish was in flight = %v, want the continuation already there", enqueued)
+	}
+}
+
 func TestWarnNearBudget(t *testing.T) {
 	budget := 10.0
 	cases := []struct {
@@ -743,8 +784,13 @@ func TestRunDrainsInFlightRunOnShutdown(t *testing.T) {
 // that: publishing is opt-in and the loop must be unaffected without it.
 func (l *loopStore) PublishTargetFor(context.Context, string) (store.PublishTarget, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.publishChecks++
+	started, release := l.publishStarted, l.publishRelease
+	l.mu.Unlock()
+	if started != nil {
+		started <- struct{}{}
+		<-release
+	}
 	return store.PublishTarget{}, store.ErrNotFound
 }
 func (l *loopStore) MarkPublished(context.Context, string, string, int64, string) error {

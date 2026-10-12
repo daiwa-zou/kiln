@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/wiki"
@@ -66,6 +67,12 @@ type memStore struct {
 	// failProgress makes both progress calls fail, to prove a build still
 	// succeeds when it cannot report on itself.
 	failProgress error
+
+	// touched records every TouchSources call's keys, in order: what the
+	// hash gate said it read and left alone.
+	touched [][]string
+	// failTouch makes TouchSources fail, to prove the stamp is best-effort.
+	failTouch error
 }
 
 func newMemStore() *memStore {
@@ -116,6 +123,17 @@ func (m *memStore) FiguresForSources(_ context.Context, _ string, keys []string)
 		out = append(out, m.figures[k]...)
 	}
 	return out, nil
+}
+
+func (m *memStore) TouchSources(_ context.Context, _ string, keys []string, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.failTouch != nil {
+		return m.failTouch
+	}
+	m.touched = append(m.touched, keys)
+	return nil
 }
 
 func (m *memStore) LoadSources(context.Context, string) ([]diff.SourceRecord, error) {

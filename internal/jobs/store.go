@@ -8,6 +8,7 @@ package jobs
 
 import (
 	"context"
+	"time"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
 	"github.com/daiwa-zou/kiln/internal/wiki"
@@ -24,6 +25,14 @@ type Store interface {
 	// LoadSources returns every live source record for a workspace, which is
 	// the baseline the incremental skip and cascade deletion are computed from.
 	LoadSources(ctx context.Context, workspaceID string) ([]diff.SourceRecord, error)
+
+	// TouchSources records that the build read the named sources at `at` and
+	// found their text unchanged, so the hash gate dropped them. A source's
+	// fetched_at otherwise moves only when its unit regenerates, and the
+	// per-document ingest status compares it against when the file's bytes
+	// last changed: a replacement that re-saves the same text would read as
+	// never read again without this. Best-effort, like the progress calls.
+	TouchSources(ctx context.Context, workspaceID string, keys []string, at time.Time) error
 
 	// LoadPageMeta returns live pages without their bodies -- path, slug, type,
 	// title and frontmatter -- which is all that resolving wikilinks, keeping

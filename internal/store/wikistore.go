@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -83,6 +84,24 @@ func loadSources(ctx context.Context, q queryer, workspaceID string) ([]diff.Sou
 		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+// TouchSources stamps fetched_at on the live sources named by key: the build
+// read them and found their text unchanged, so nothing else about the row
+// moves. upsertSource is the only other writer of fetched_at, and it runs only
+// for a unit that regenerated; without this a replacement whose bytes differ
+// but whose text does not would never count as read again.
+func (s *WikiStore) TouchSources(ctx context.Context, workspaceID string, keys []string, at time.Time) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE sources SET fetched_at = $3
+		WHERE workspace_id = $1 AND key = ANY($2) AND deleted_at IS NULL`,
+		workspaceID, keys, at); err != nil {
+		return fmt.Errorf("store: touch sources: %w", err)
+	}
+	return nil
 }
 
 // LoadPages returns live pages for a workspace with their bodies. Only callers

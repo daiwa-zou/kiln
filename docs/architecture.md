@@ -460,7 +460,7 @@ file row, its source record and the bench's runs:
 | Status | Means |
 | --- | --- |
 | read, with its page count | A source record exists and was read since the bytes last changed. The count unions the document's own pages with those of its section units. |
-| waiting for the next ingest | Uploaded or replaced after the last build that could have read it, or a build is queued or running. |
+| waiting for the next ingest | Uploaded or replaced after the last build that could have read it, or a build that could read it is queued or running. A run pinned to the git or web connector (a poll) stages no uploads, so it counts as neither. |
 | not read, with a plain-language reason | The worker recorded a skip for exactly these bytes. |
 | paused | `enabled = false` and no source record; a paused document that has one stays read. |
 
@@ -475,15 +475,29 @@ hash still matches, so a replacement voids it with no clearing logic, and
 re-uploading the identical bytes keeps it, because they are still unreadable.
 Web-source skips (a 404, a refused host) take the same path through the sink but
 are **logged only**; nothing on the connector row records them. Skips are
-counted on `kiln_documents_skipped_total{kind,class}`.
+counted on `kiln_documents_skipped_total{kind,class}` the first time they are
+seen: for an upload in files mode that is when the row's skip changes, and for
+a web page or a path-mode folder the worker remembers what it has already
+logged, so a rebuild repeats a known skip at Debug and uncounted.
+
+"Read" means the source was read since the bytes last changed. A build that
+finds a document's extracted text unchanged (a re-saved PDF with the same
+words) regenerates nothing, so the hash gate itself stamps those sources as
+read; without that a harmless replacement would read as never read again.
 
 "Not read" with no recorded reason is the fallback for a document the last
 build did not read and did not explain: an upload from before this version,
 whose skip was discarded at the time, or a unit that failed. A rebuild records
-the reason or reads the document. One caveat is deliberate: a **replaced**
-document keeps its old pages until the next ingest reads the new bytes, and
-reads as waiting meanwhile. The old pages are not removed or marked, because
-the source record that owns them is rewritten by the build, not by the upload.
+the reason or reads the document. While the bench's latest run was refused
+over budget, that sentence instead says the bench has used its budget and the
+document will be read when the window resets, since another ingest would be
+refused too. Two caveats are deliberate. A **replaced** document keeps its old
+pages until the next ingest reads the new bytes, and reads as waiting
+meanwhile; the old pages are not removed or marked, because the source record
+that owns them is rewritten by the build, not by the upload. And a document
+replaced **while a build is running** shows "read" with the previous pages
+until the next ingest: the skip sink runs after the sync and before the units,
+so a replacement that lands later in the build is not seen until the next one.
 
 ---
 

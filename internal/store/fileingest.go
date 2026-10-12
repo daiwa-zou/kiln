@@ -24,10 +24,13 @@ type FileSkip struct {
 }
 
 // sortFileSkips returns the skips ordered by path with one entry per path (the
-// last one wins). Postgres takes row locks in the order the update visits
-// them, so two sinks writing the same bench must agree on that order or they
-// can deadlock; and an UPDATE ... FROM that matches one target row twice picks
-// one of the two unpredictably, which collapsing here rules out.
+// last one wins). An UPDATE ... FROM that matches one target row twice picks
+// one of the two unpredictably, which collapsing here rules out; the sort
+// makes the batch, and the changed list, deterministic for the caller's log.
+// It is not a lock-ordering guarantee: the planner decides the order an
+// UPDATE visits rows, whatever order unnest hands it. What keeps two sinks
+// from writing the same bench at once is the one-active-run-per-bench index
+// (runs_workspace_active_idx), not this.
 func sortFileSkips(skips []FileSkip) []FileSkip {
 	byPath := make(map[string]FileSkip, len(skips))
 	for _, sk := range skips {
@@ -46,7 +49,9 @@ func sortFileSkips(skips []FileSkip) []FileSkip {
 // bytes, so a file replaced during the build is left alone (its skip would
 // describe bytes that are gone; it reads as waiting). readPaths are the
 // documents the same sync did read: their stale skips are cleared, and nothing
-// else is, so a paused file keeps the skip it earned before the pause.
+// else is, so a paused file keeps the skip it earned before the pause. A path
+// in both lists was skipped: the clear leaves it alone rather than undoing the
+// skip just written and reporting it changed.
 //
 // Repeating a skip is a no-op (updated_at is never touched here: the Ingest
 // list sorts on it). changed lists the paths whose skip was set or replaced,
@@ -96,11 +101,16 @@ func (s *WikiStore) RecordFileSkips(ctx context.Context, workspaceID string, ski
 		}
 	}
 	if len(readPaths) > 0 {
+		skipped := make([]string, len(skips))
+		for i, sk := range skips {
+			skipped[i] = sk.Path
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE workspace_files
 			SET skip_reason = NULL, skip_sha256 = NULL, skipped_at = NULL
-			WHERE workspace_id = $1 AND path = ANY($2) AND skip_reason IS NOT NULL`,
-			workspaceID, readPaths); err != nil {
+			WHERE workspace_id = $1 AND path = ANY($2) AND NOT (path = ANY($3))
+			  AND skip_reason IS NOT NULL`,
+			workspaceID, readPaths, skipped); err != nil {
 			return nil, fmt.Errorf("store: clear file skips: %w", err)
 		}
 	}
@@ -139,11 +149,17 @@ type FileIngestRow struct {
 // table says about the last ingest and the next one.
 type FileIngestBench struct {
 	// LastRun is when the last ingest that could have read a document began:
-	// not research, and not failed. Nil when the bench has never built.
+	// not research, not failed, and not pinned to a connector that stages no
+	// uploads. Nil when the bench has never built.
 	LastRun *time.Time
-	// PendingRun says an ingest is queued or running, so a document the last
-	// run did not read is still waiting rather than passed over.
+	// PendingRun says an ingest that could read a document is queued or
+	// running, so a document the last run did not read is still waiting
+	// rather than passed over.
 	PendingRun bool
+	// BudgetPaused says the bench's most recent run (research aside) was
+	// refused over budget: anything unread stays unread until the window
+	// resets, and "press Ingest now" would be refused too.
+	BudgetPaused bool
 }
 
 // listFilesWithIngestSQL is ListFilesWithIngest's row query. A named constant
@@ -201,17 +217,25 @@ func (s *WikiStore) ListFilesWithIngest(ctx context.Context, workspaceID string)
 
 	// 'research' is jobs.TriggerResearch, kept as a SQL literal as queue.go
 	// does. A research run materializes nothing, so it never read a document;
-	// a failed run may have read none of them.
+	// a failed run may have read none of them. A run pinned to a connector
+	// builds from that connector alone (worker.sourceSpec), so a poll of the
+	// git or web connector never stages an upload: it neither counts as the
+	// last ingest nor, while queued, as the one about to read the file.
 	var bench FileIngestBench
 	if err := s.pool.QueryRow(ctx, `
-		SELECT (SELECT max(started_at) FROM runs
-		        WHERE workspace_id = $1 AND trigger <> 'research'
-		          AND status IN ('succeeded', 'partial', 'no_changes')
+		WITH ingests AS (
+		    SELECT status, started_at FROM runs
+		    WHERE workspace_id = $1 AND trigger <> 'research'
+		      AND (connector_id IS NULL
+		           OR connector_id IN (SELECT id FROM connectors WHERE kind = 'upload')))
+		SELECT (SELECT max(started_at) FROM ingests
+		        WHERE status IN ('succeeded', 'partial', 'no_changes')
 		          AND started_at IS NOT NULL),
-		       EXISTS (SELECT 1 FROM runs
-		               WHERE workspace_id = $1 AND trigger <> 'research'
-		                 AND status IN ('queued', 'running'))`,
-		workspaceID).Scan(&bench.LastRun, &bench.PendingRun); err != nil {
+		       EXISTS (SELECT 1 FROM ingests WHERE status IN ('queued', 'running')),
+		       coalesce((SELECT status FROM runs
+		                 WHERE workspace_id = $1 AND trigger <> 'research'
+		                 ORDER BY created_at DESC LIMIT 1) = 'over_budget', false)`,
+		workspaceID).Scan(&bench.LastRun, &bench.PendingRun, &bench.BudgetPaused); err != nil {
 		return nil, FileIngestBench{}, fmt.Errorf("store: load ingest runs: %w", err)
 	}
 	return out, bench, nil

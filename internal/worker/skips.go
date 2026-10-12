@@ -2,11 +2,13 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -30,6 +32,47 @@ const skipLogLines = 20
 // maxSkipRawRunes caps the extractor text one log line carries.
 const maxSkipRawRunes = 300
 
+// maxSkipSeen bounds the worker's memory of unrecorded skips; past it the set
+// starts over and the next rebuild logs each once more. Benches with folders
+// of thousands of scans are not what the set is for.
+const maxSkipSeen = 4096
+
+// skipSeenKey identifies one unrecorded skip: a document (path or host) of
+// one connector kind on one bench, skipped for one reason.
+type skipSeenKey struct {
+	workspace, kind, subject, class string
+}
+
+// skipSeenSet is the worker's memory of unrecorded skips (Worker.skipSeen).
+type skipSeenSet struct {
+	mu   sync.Mutex
+	seen map[skipSeenKey]struct{}
+}
+
+// markSkipSeen records a skip the store has no row for and reports whether
+// this process had seen it before. The store answers that question for
+// uploads in files mode (RecordFileSkips returns the changed paths); this is
+// the same answer, held in memory, for the documents it cannot.
+func (w *Worker) markSkipSeen(k skipSeenKey) (news bool) {
+	if w.skipSeen == nil {
+		w.skipSeen = &skipSeenSet{}
+	}
+	s := w.skipSeen
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.seen) >= maxSkipSeen {
+		s.seen = nil
+	}
+	if s.seen == nil {
+		s.seen = map[skipSeenKey]struct{}{}
+	}
+	if _, seen := s.seen[k]; seen {
+		return false
+	}
+	s.seen[k] = struct{}{}
+	return true
+}
+
 // docSkipSink returns the OnDocSkips callback for one build: it records which
 // uploads the sync could not read, logs them, and counts them.
 //
@@ -41,11 +84,13 @@ const maxSkipRawRunes = 300
 // a fetched page has no row to record on.
 //
 // The extractor's own text is for the operator log, after sanitizeSkipRaw. A
-// new skip (the store reports the path changed) logs at Warn; a repeat, which
-// every rebuild of a bench with a scan produces, at Debug. No review item is
-// filed: the unreadable-blob precedent (reportUnreadableDocuments) is a
-// storage incident, and a scan is a fact about the document that the Ingest
-// page now shows.
+// new skip (the store reports the path changed, or the worker has not seen
+// the unrecorded skip before) logs at Warn and is counted; a repeat, which
+// every rebuild of a bench with a scan produces, logs at Debug and is not.
+// News goes first, so the cap on lines never hides a new skip behind old
+// ones. No review item is filed: the unreadable-blob precedent
+// (reportUnreadableDocuments) is a storage incident, and a scan is a fact
+// about the document that the Ingest page now shows.
 //
 // Nothing here can fail the run. A store error is logged and the build
 // proceeds: the pages are still worth writing, and the Ingest page falls back
@@ -96,34 +141,64 @@ func (w *Worker) docSkipSink(run *store.QueuedRun, connectors jobs.SourceConnect
 			}
 		}
 
-		lines, more := 0, 0
-		emit := func(level slog.Level, msg string, attrs ...any) {
+		// Decide what is news before logging anything, so the news can go
+		// first. A skip the store has a row for is news when the store says
+		// the path changed (or when it could not say); one with no row is
+		// news the first time this process sees it.
+		news := make([]bool, len(skips))
+		for i, s := range skips {
+			if _, hasRow := staged[s.Subject]; hasRow && s.Kind == connector.KindUpload {
+				news[i] = !recorded || changed[s.Subject]
+			} else {
+				news[i] = w.markSkipSeen(skipSeenKey{run.WorkspaceID, s.Kind, s.Subject, s.Class})
+			}
+			if news[i] {
+				w.metrics().DocumentSkipped(s.Kind, s.Class)
+			}
+		}
+
+		// Only a line that reaches the log spends the cap: a Debug repeat at
+		// the default level costs nothing, so twenty stable scans never push a
+		// new one into the summary. The summary names what it folded by class.
+		lines := 0
+		moreByClass := map[string]int{}
+		emit := func(level slog.Level, class, msg string, attrs ...any) {
+			if !log.Enabled(ctx, level) {
+				return
+			}
 			if lines >= skipLogLines {
-				more++
+				moreByClass[class]++
 				return
 			}
 			lines++
 			log.Log(ctx, level, msg, attrs...)
 		}
-		for _, s := range skips {
-			raw := sanitizeSkipRaw(s.Raw, jail)
-			if s.Kind == connector.KindWeb {
-				emit(slog.LevelWarn, "page skipped", "connector", connectors.Web,
-					"host", s.Subject, "class", s.Class, "reason", raw)
-				w.metrics().DocumentSkipped(s.Kind, s.Class)
-				continue
-			}
-			level := slog.LevelWarn
-			if recorded && !changed[s.Subject] {
-				level = slog.LevelDebug
-			}
-			emit(level, "document skipped", "path", s.Subject, "class", s.Class, "reason", raw)
-			if !recorded || changed[s.Subject] {
-				w.metrics().DocumentSkipped(s.Kind, s.Class)
+		for _, wantNews := range []bool{true, false} {
+			for i, s := range skips {
+				if news[i] != wantNews {
+					continue
+				}
+				level := slog.LevelDebug
+				if wantNews {
+					level = slog.LevelWarn
+				}
+				raw := sanitizeSkipRaw(s.Raw, jail)
+				if s.Kind == connector.KindWeb {
+					emit(level, s.Class, "page skipped", "connector", connectors.Web,
+						"host", s.Subject, "class", s.Class, "reason", raw)
+					continue
+				}
+				emit(level, s.Class, "document skipped", "path", s.Subject, "class", s.Class, "reason", raw)
 			}
 		}
-		if more > 0 {
-			log.Warn("more documents skipped", "count", more)
+		if len(moreByClass) > 0 {
+			more, classes := 0, make([]string, 0, len(moreByClass))
+			for class, n := range moreByClass {
+				more += n
+				classes = append(classes, fmt.Sprintf("%s=%d", class, n))
+			}
+			sort.Strings(classes)
+			log.Warn("more documents skipped", "count", more, "classes", strings.Join(classes, " "))
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daiwa-zou/kiln/internal/connector"
 	"github.com/daiwa-zou/kiln/internal/extract"
@@ -225,8 +226,19 @@ func itemKeys(set *connector.SourceSet) []string {
 
 func TestSkipClassIsDecidedByTheExtractSentinels(t *testing.T) {
 	// The class is what a server build persists, so it comes from errors.Is on
-	// the sentinels, not from the prose skipReason prints. The one exception is
-	// the converter timeout, which runTool reports as text.
+	// the sentinels, not from the prose skipReason prints. The timeout row is
+	// the real error a hanging converter produces, not a hand-written copy of
+	// its message: the message is not the contract, the sentinel is.
+	hanging := filepath.Join(t.TempDir(), "hanging-pdftotext")
+	if err := os.WriteFile(hanging, []byte("#!/bin/sh\nexec sleep 20\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	es := extract.Extractors{&extract.PDFExtractor{Binary: hanging, Timeout: 100 * time.Millisecond}}
+	_, timedOut := es.Extract(context.Background(), filepath.Join(fixture(t, map[string]string{"a.pdf": "%PDF"}), "a.pdf"))
+	if timedOut == nil {
+		t.Fatal("a hanging converter did not fail")
+	}
+
 	for _, tc := range []struct {
 		err  error
 		want string
@@ -234,7 +246,8 @@ func TestSkipClassIsDecidedByTheExtractSentinels(t *testing.T) {
 		{fmt.Errorf("extract: %w: pdf needs a tool that is not installed", extract.ErrToolMissing), SkipExtractorMissing},
 		{fmt.Errorf("%w: office", extract.ErrNoExtractor), SkipUnsupportedType},
 		{fmt.Errorf("extract: a.pdf: %w", context.DeadlineExceeded), SkipTimedOut},
-		{errors.New("extract: a.pdf (pdftotext): pdftotext timed out after 2m0s"), SkipTimedOut},
+		{timedOut, SkipTimedOut},
+		{errors.New("extract: a.pdf (pdftotext): pdftotext timed out after 2m0s"), SkipExtractorError},
 		{errors.New("extract: a.pdf (pdftotext): pdftotext: exit status 1 (Syntax Error)"), SkipExtractorError},
 	} {
 		if got := skipClass(tc.err); got != tc.want {

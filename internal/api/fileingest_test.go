@@ -48,6 +48,9 @@ func TestDeriveIngest(t *testing.T) {
 	ranAfter := store.FileIngestBench{LastRun: tm(after)}
 	ranBefore := store.FileIngestBench{LastRun: tm(before)}
 	ranAfterPending := store.FileIngestBench{LastRun: tm(after), PendingRun: true}
+	ranAfterPaused := store.FileIngestBench{LastRun: tm(after), BudgetPaused: true}
+	ranBeforePaused := store.FileIngestBench{LastRun: tm(before), BudgetPaused: true}
+	ranAfterPendingPaused := store.FileIngestBench{LastRun: tm(after), PendingRun: true, BudgetPaused: true}
 
 	cases := []struct {
 		name   string
@@ -64,6 +67,17 @@ func TestDeriveIngest(t *testing.T) {
 		{"uploaded before the last build, no source, no class", row(nil), ranAfter, ingestSkipped,
 			nil, nil, str(skipSentenceUnrecorded), nil},
 		{"pending continuation keeps an unread file waiting", row(nil), ranAfterPending, ingestWaiting, nil, nil, nil, nil},
+		// A continuation refused over budget: the file was passed over, and
+		// "press Ingest now" would be refused too, so the sentence says why.
+		{"budget-paused bench names the budget, not another ingest", row(nil), ranAfterPaused, ingestSkipped,
+			nil, nil, str(skipSentenceBudgetPaused), nil},
+		{"budget-paused bench, uploaded after the last build, still waiting", row(nil), ranBeforePaused,
+			ingestWaiting, nil, nil, nil, nil},
+		{"budget-paused bench with a queued run is waiting", row(nil), ranAfterPendingPaused, ingestWaiting, nil, nil, nil, nil},
+		{"budget-paused bench does not touch a read file", row(source(after)), ranAfterPaused, ingestRead,
+			&pages, str("2026-10-01T13:00:00Z"), nil, nil},
+		{"budget-paused bench does not touch a recorded skip", row(skip("no_text", true)), ranAfterPaused, ingestSkipped,
+			nil, nil, str(skipSentences["no_text"]), str("no_text")},
 		{"read: source after the bytes changed", row(source(after)), ranAfter, ingestRead,
 			&pages, str("2026-10-01T13:00:00Z"), nil, nil},
 		{"read: equal timestamps count as read", row(source(t0)), noRuns, ingestRead,

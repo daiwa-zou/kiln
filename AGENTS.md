@@ -33,6 +33,9 @@ never `==` against `pgx.ErrNoRows` or a sentinel), `errcheck` (write
   database.** `internal/api` and `internal/store` each drop and recreate the
   schema on the shared database, so parallel package runs cause failures
   that are not real.
+- `make cover` and `make test-integration` take `TEST_DB_URL` from the
+  environment, so a session that must not touch the shared `kiln` database
+  points them at its own (`TEST_DB_URL=postgres://kiln:kiln@localhost:55432/kiln_mine?sslmode=disable make cover`).
 - Dev state lives in a separate `kiln_dev` database on the same container
   (`make dev-db`), so test runs cannot wipe it.
 

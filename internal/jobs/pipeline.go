@@ -249,7 +249,23 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	if req.Force {
 		log.Info("hash gate skipped; every routed unit regenerates", "units", len(dirty))
 	} else {
-		dirty = p.filterUnchanged(dirty, req.Map, sources)
+		var unchanged []diff.Key
+		dirty, unchanged = p.filterUnchanged(dirty, req.Map, sources)
+		// The gate is the only place that knows a unit was read and found
+		// unchanged. Recording that is what keeps a re-uploaded document whose
+		// text did not change counted as read; a dry run reads nothing of
+		// record, and research never reaches the gate.
+		if !req.DryRun && req.Trigger != TriggerResearch && len(unchanged) > 0 {
+			keys := make([]string, len(unchanged))
+			for i, k := range unchanged {
+				keys[i] = string(k)
+			}
+			if err := p.Store.TouchSources(ctx, req.WorkspaceID, keys, now); err != nil {
+				// Not fatal: the pages are current whether or not the stamp
+				// landed, and the Ingest page falls back to the last run.
+				log.Warn("could not stamp unchanged sources as read", "err", err, "units", len(keys))
+			}
+		}
 	}
 
 	cascade := diff.PlanCascade(sources, req.ApprovedDeletions)
@@ -471,8 +487,9 @@ func (p *Pipeline) checkBudgetEnforceable() error {
 }
 
 // filterUnchanged drops units whose content hash matches what the last
-// successful run recorded. This is where a no-op run becomes free.
-func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sources []diff.SourceRecord) []diff.Key {
+// successful run recorded. This is where a no-op run becomes free. The
+// dropped keys come back too, so the caller can record that they were read.
+func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sources []diff.SourceRecord) (kept, unchanged []diff.Key) {
 	prior := make(map[diff.Key]string, len(sources))
 	for _, s := range sources {
 		prior[s.Key] = s.InputHash
@@ -499,9 +516,11 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 		// No hash means no basis for skipping: regenerate.
 		if hash == "" || prior[k] != hash {
 			out = append(out, k)
+		} else {
+			unchanged = append(unchanged, k)
 		}
 	}
-	return out
+	return out, unchanged
 }
 
 // unitResult is one unit's outcome. A struct rather than a long return list:

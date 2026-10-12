@@ -40,6 +40,12 @@ var skipSentences = map[string]string{
 // unit that failed. Never "re-upload": identical bytes change nothing.
 const skipSentenceUnrecorded = "Not read by the last ingest. Press Ingest now to try again, or check the Log."
 
+// skipSentenceBudgetPaused replaces skipSentenceUnrecorded while the bench's
+// latest run was refused over budget: the continuation that would have read
+// the file was refused, and so would the "Ingest now" the other sentence asks
+// for, until the window resets.
+const skipSentenceBudgetPaused = "Not read yet. This bench has used its budget for now; it will be read when the budget window resets."
+
 // ingestJSON is the ingest member of a file row. Pointers are deliberate: a
 // waiting file has no pages, readAt or reason, and the UI reads an explicit
 // null rather than a missing key.
@@ -60,7 +66,9 @@ type ingestJSON struct {
 //  2. a skip recorded against the current bytes -> skipped, its class;
 //  3. a source row read at or after the bytes changed -> read;
 //  4. the last ingest began after the bytes changed and no ingest is queued
-//     or running -> skipped, class null (the cause was not recorded);
+//     or running -> skipped, class null (the cause was not recorded; when
+//     the bench's latest run was refused over budget, the sentence says so
+//     instead of asking for another ingest that would be refused too);
 //  5. otherwise waiting: no qualifying run yet, uploaded since the last one,
 //     or a continuation is still pending.
 //
@@ -82,6 +90,9 @@ func deriveIngest(row store.FileIngestRow, bench store.FileIngestBench) ingestJS
 		return ingestJSON{Status: ingestRead, Pages: row.Pages, ReadAt: &readAt}
 	case bench.LastRun != nil && !bench.LastRun.Before(row.ContentAt) && !bench.PendingRun:
 		reason := skipSentenceUnrecorded
+		if bench.BudgetPaused {
+			reason = skipSentenceBudgetPaused
+		}
 		return ingestJSON{Status: ingestSkipped, Reason: &reason}
 	default:
 		return ingestJSON{Status: ingestWaiting}

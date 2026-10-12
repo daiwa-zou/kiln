@@ -127,7 +127,7 @@ func NewMetrics() *Metrics {
 
 		docsSkipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kiln_documents_skipped_total",
-			Help: "Documents a sync could not read, by connector kind and skip class. Counted when the skip is first recorded, not on every rebuild that repeats it.",
+			Help: "Documents a sync could not read, by connector kind and skip class. Counted when the skip is first seen, not on every rebuild that repeats it.",
 		}, []string{"kind", "class"}),
 
 		queueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{

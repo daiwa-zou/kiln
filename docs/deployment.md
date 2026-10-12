@@ -404,7 +404,10 @@ no backfill. To roll back on one node: stop the new binary, run
 Kubernetes, `helm rollback` runs no migrate hook (it is a pre-upgrade hook), so
 delete the row before the old pods restart or they crash-loop on the schema
 check. Nothing else is needed: the old code names its columns explicitly and
-never reads the new ones.
+never reads the new ones. One thing to expect on rolling forward again: the old
+binary does not stamp `content_changed_at`, so a document replaced while it ran
+reads as "read" with its previous pages on the Ingest page until the next
+ingest reads the new bytes and clears it.
 
 **Backups.** Postgres holds every page, run, and credential; object storage
 holds uploaded documents. Back up both. A wiki can be rebuilt from its sources,

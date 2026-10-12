@@ -149,6 +149,14 @@ type Worker struct {
 	// Metrics instruments builds. Nil is fine -- metrics() substitutes a
 	// no-op registry -- so tests and embedded uses need not wire one.
 	Metrics *observability.Metrics
+
+	// skipSeen remembers the skips this process has already logged and
+	// counted for documents that have no file row to record them on (a
+	// path-mode upload connector's folder, web pages), so a rebuild repeats
+	// them at Debug and uncounted the way a recorded skip's repeat is. A
+	// pointer, built on first use like Metrics, so a Worker literal stays
+	// copyable. See docSkipSink.
+	skipSeen *skipSeenSet
 }
 
 // metrics never returns nil, so the recording calls need no guard at each
@@ -417,12 +425,17 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		w.metrics().RunFinished(string(res.Summary.Status), time.Since(started),
 			res.Summary.CostUSD, res.Summary.Created, res.Summary.Updated, res.Summary.Deleted)
 		w.warnNearBudget(ctx, run.WorkspaceID, log)
+		// The continuation goes on the queue before the publish, which does
+		// not depend on it: a push can take minutes, and until a queued run
+		// exists every document this run deferred reads as "not read" on the
+		// Ingest page rather than waiting. A build starting while the publish
+		// runs is nothing new; a manual or poll run could already do that.
+		w.enqueueContinuation(ctx, run, res, log)
 		// Mirror the finished wiki to its repository, if this bench publishes.
 		// After the import and outside the run's success: the wiki is already
 		// committed and correct by now, so a repository that cannot be written
 		// is a degraded copy of something that exists, not a broken build.
 		w.publishAfterBuild(ctx, run.WorkspaceID, run.WorkspaceSlug, run.Trigger, log)
-		w.enqueueContinuation(ctx, run, res, log)
 	}
 	// Terminal bookkeeping, so it outlives cancellation like the requeue and
 	// the run record do. On the interrupted path ctx is already canceled by
