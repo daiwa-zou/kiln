@@ -33,19 +33,38 @@ func TestUIIngestStatusHelpersExist(t *testing.T) {
 	}
 }
 
+// stripLineComments drops every line that is only a `//` comment, so a guard
+// that was commented out no longer satisfies a substring match. Trailing
+// comments are left alone: a URL in a string carries `//` too.
+func stripLineComments(src string) string {
+	lines := strings.Split(src, "\n")
+	kept := lines[:0]
+	for _, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "//") {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
+}
+
 // TestUIConnectorBarGuardsReadCleanly: the upload source's bar says "Read
 // cleanly" only when no document is unread. The literal may appear once, and
-// the return that carries it must be preceded by the unread guard.
+// the return that carries it must be preceded by the unread guard as a live
+// statement: comments are stripped first, and the guard has to start its own
+// line, so neither `// if (unread > 0) …` nor `/* if (unread > 0) … */` counts.
+// The behaviour itself is proven by web/test/ingest-status.test.ts.
 func TestUIConnectorBarGuardsReadCleanly(t *testing.T) {
-	src := uiSource(t, "sources.js")
+	src := stripLineComments(uiSource(t, "sources.js"))
 	const literal = `"Read cleanly"`
 	if n := strings.Count(src, literal); n != 1 {
 		t.Fatalf("sources.js: %q appears %d times, want exactly 1", literal, n)
 	}
 	at := strings.Index(src, literal)
 	before := src[max(0, at-400):at]
-	if !strings.Contains(before, "if (unread > 0) return") {
-		t.Errorf("sources.js: %q is not guarded by the unread count within the preceding 400 chars:\n%s", literal, before)
+	guard := regexp.MustCompile(`(?m)^\s*if \(unread > 0\) return`)
+	if !guard.MatchString(before) {
+		t.Errorf("sources.js: %q is not guarded by a live unread check within the preceding 400 chars:\n%s", literal, before)
 	}
 	for _, want := range []string{
 		`"Some documents are unread; see below."`,

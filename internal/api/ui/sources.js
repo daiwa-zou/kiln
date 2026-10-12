@@ -60,19 +60,21 @@ function plural(n, word) {
 
 // ingestSummary tallies the Documents list by what the wiki did with each
 // upload, from the `ingest` member every file row carries: read, waiting for
-// the next ingest, or skipped. A paused file is counted as paused whatever
-// its status, and a paused skip is not "not read" -- the member chose that.
+// the next ingest, or skipped. The buckets are disjoint and sum to the list:
+// a paused file is counted as paused and nowhere else, whatever its status,
+// because the member chose that and nothing will read it -- a paused skip is
+// not "not read", and a paused file is not "waiting" for anything. The
+// unread count the bar and the Ingest now link act on is waiting + notRead.
 // Computed here, from rows a member can already read, so the Documents stat
 // and header reconcile against Overview's count without a new endpoint.
 function ingestSummary(files) {
   const n = { read: 0, waiting: 0, notRead: 0, paused: 0 };
   for (const f of files || []) {
+    if (f.enabled === false) { n.paused++; continue; }
     const status = f.ingest?.status;
-    const paused = f.enabled === false;
-    if (paused) n.paused++;
     if (status === "read") n.read++;
     else if (status === "waiting") n.waiting++;
-    else if (status === "skipped" && !paused) n.notRead++;
+    else if (status === "skipped") n.notRead++;
   }
   return n;
 }
@@ -114,6 +116,15 @@ function ingestChip(f, nextCheck = "") {
   }
 }
 
+// ingestReason is the line under a skipped row's path saying why it was not
+// read, in the API's own sentence. It is text about a member's file and is
+// always escaped; the class token rides along so an operator can search the
+// Log by it. Paused files have said why already and get nothing.
+function ingestReason(f) {
+  if (f.enabled === false || f.ingest?.status !== "skipped") return "";
+  return `<div class="hint src-reason" data-class="${esc(f.ingest?.class)}">${esc(f.ingest?.reason)}</div>`;
+}
+
 // attentionLine flags, above the Documents list, the uploads the last ingest
 // passed over -- the one state a member cannot otherwise tell from "read"
 // without opening each row. Names only: the reason sits on the row, so the
@@ -132,6 +143,22 @@ function attentionLine(files) {
   }
   return `<div class="hint ingest-attention">${lede}<ul>${
     names.map((s) => `<li>${s}</li>`).join("")}</ul></div>`;
+}
+
+// connectorHealth is a source's bar: what the server actually knows about it
+// -- whether it is enabled, whether the last read failed, and when it
+// happened. There is no per-source unit count on the API, so the bar carries
+// state rather than a proportion: full when a source is reading cleanly,
+// empty when it is paused, oxide when the last read failed. The upload source
+// also knows how many of its documents are unread (waiting or skipped), and a
+// run that finished without error has still not "read cleanly" while one is.
+// Pure, so the rule is testable away from the page.
+function connectorHealth(c, unread = 0) {
+  if (!c.enabled) return { pct: 0, cls: "fill-soft", note: "Paused — skipped on ingest" };
+  if (c.lastError) return { pct: 100, cls: "fill-err", note: "Last read failed" };
+  if (!c.lastSynced) return { pct: 0, cls: "fill-soft", note: "Not read yet" };
+  if (unread > 0) return { pct: 100, cls: "fill-soft", note: "Some documents are unread; see below." };
+  return { pct: 100, cls: "fill-ember", note: "Read cleanly" };
 }
 
 // kilnFiring draws the one state this whole page exists to produce: a bench
@@ -1122,21 +1149,7 @@ async function showSources() {
       const phrase = triggerPhrase[c.triggerMode];
       return phrase ? `${phrase}; ${read}.` : `${read[0].toUpperCase()}${read.slice(1)}.`;
     };
-    // The health line is what the server actually knows: whether the source is
-    // enabled, whether the last read failed, and when it happened. There is no
-    // per-source unit count on the API, so the bar carries state rather than a
-    // proportion -- full when a source is reading cleanly, empty when it is
-    // paused, oxide when the last read failed. The upload source also knows
-    // how many of its documents are unread (waiting or skipped), and a run
-    // that finished without error has still not "read cleanly" while one is.
     const SRC_ICONS = { git: iconRepo, web: iconWeb, upload: iconDoc };
-    const connectorHealth = (c, unread = 0) => {
-      if (!c.enabled) return { pct: 0, cls: "fill-soft", note: "Paused — skipped on ingest" };
-      if (c.lastError) return { pct: 100, cls: "fill-err", note: "Last read failed" };
-      if (!c.lastSynced) return { pct: 0, cls: "fill-soft", note: "Not read yet" };
-      if (unread > 0) return { pct: 100, cls: "fill-soft", note: "Some documents are unread; see below." };
-      return { pct: 100, cls: "fill-ember", note: "Read cleanly" };
-    };
 
     // What the wiki did with each upload; read by the stat, the Documents
     // header, the attention line and the upload source's bar below.
@@ -1190,13 +1203,7 @@ async function showSources() {
                answer is "which upload is this" when someone is looking for the
                copy they replaced. -->
           <div class="src-where" title="${esc(f.path)}">${esc(f.path)}</div>
-          <!-- Why a skipped document was not read, in the API's own sentence.
-               It is text about a member's file and is always escaped; the
-               class token rides along so an operator can search the Log by
-               it. Paused files have said why already. -->
-          ${f.enabled !== false && f.ingest?.status === "skipped"
-            ? `<div class="hint src-reason" data-class="${esc(f.ingest?.class)}">${esc(f.ingest?.reason)}</div>`
-            : ""}
+          ${ingestReason(f)}
         </div>
         <span class="src-when">${timeTag(f.updated)}</span>
         <div class="src-tools">
