@@ -254,8 +254,8 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		// The gate is the only place that knows a unit was read and found
 		// unchanged. Recording that is what keeps a re-uploaded document whose
 		// text did not change counted as read; a dry run reads nothing of
-		// record, and research never reaches the gate.
-		if !req.DryRun && req.Trigger != TriggerResearch && len(unchanged) > 0 {
+		// record, and research never reaches the gate (it has its own Run).
+		if !req.DryRun && len(unchanged) > 0 {
 			keys := make([]string, len(unchanged))
 			for i, k := range unchanged {
 				keys[i] = string(k)

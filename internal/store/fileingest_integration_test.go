@@ -583,6 +583,19 @@ func TestListFilesWithIngestIgnoresRunsPinnedToOtherConnectors(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// An upload connector with a path reads a worker-local folder, not the
+	// workspace's files, so a poll pinned to it stages no upload either.
+	folderID, err := s.CreateConnector(context.Background(), ConnectorRow{
+		WorkspaceID: ws, Kind: "upload", Name: "folder", Config: map[string]any{"path": "/srv/docs"}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create path-mode upload connector: %v", err)
+	}
+	mustInsertPinnedRun(t, s, ws, folderID, "poll", "no_changes", aged.Add(35*time.Minute))
+	if b := bench(); b.LastRun != nil {
+		t.Errorf("a poll pinned to a path-mode upload connector counts as the last ingest: %+v", b)
+	}
+
 	// Pinned to the upload connector, or to none: these stage uploads.
 	want := aged.Add(45 * time.Minute)
 	mustInsertPinnedRun(t, s, ws, uploadID, "manual", "succeeded", want)
@@ -597,6 +610,39 @@ func TestListFilesWithIngestIgnoresRunsPinnedToOtherConnectors(t *testing.T) {
 	mustInsertPinnedRun(t, s, ws, uploadID, "manual", "queued", nil)
 	if b := bench(); !b.PendingRun {
 		t.Error("a queued run pinned to the upload connector is not a pending ingest")
+	}
+}
+
+// runs.connector_id is ON DELETE SET NULL, so deleting the web connector
+// turns its pinned poll runs into unpinned ones. They still never staged an
+// upload; the scheduler pins every poll, so an unpinned poll is not counted.
+// (Red QA's regression test, round 2.)
+func TestListFilesWithIngestIgnoresRunsOfDeletedConnectors(t *testing.T) {
+	s, ws := jobStore(t)
+	ctx := context.Background()
+	_ = mustCreateConnector(t, s, ws, "upload")
+	webID := mustCreateConnector(t, s, ws, "web")
+	mustCreateFile(t, s, ws, "a.pdf", "a1")
+	aged := ageContent(t, s, ws, "a.pdf")
+
+	mustInsertPinnedRun(t, s, ws, webID, "poll", "no_changes", aged.Add(30*time.Minute))
+	_, b, err := s.ListFilesWithIngest(ctx, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.LastRun != nil {
+		t.Fatalf("setup: pinned poll counted: %+v", b)
+	}
+
+	if _, err := s.DeleteConnector(ctx, ws, webID); err != nil {
+		t.Fatalf("DeleteConnector: %v", err)
+	}
+	_, b, err = s.ListFilesWithIngest(ctx, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.LastRun != nil {
+		t.Errorf("after the web connector was deleted its old poll run counts as the last ingest: %+v", b)
 	}
 }
 

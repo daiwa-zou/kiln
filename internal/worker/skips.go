@@ -44,6 +44,10 @@ type skipSeenKey struct {
 }
 
 // skipSeenSet is the worker's memory of unrecorded skips (Worker.skipSeen).
+// Nothing removes a key: a skip that clears (the scan is replaced by a text
+// version) and later recurs with the same class stays seen, so it is logged
+// at Debug and not counted again, for the life of the process or until the
+// maxSkipSeen reset. A restart forgets everything and logs each once more.
 type skipSeenSet struct {
 	mu   sync.Mutex
 	seen map[skipSeenKey]struct{}

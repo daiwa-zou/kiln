@@ -42,9 +42,11 @@ const skipSentenceUnrecorded = "Not read by the last ingest. Press Ingest now to
 
 // skipSentenceBudgetPaused replaces skipSentenceUnrecorded while the bench's
 // latest run was refused over budget: the continuation that would have read
-// the file was refused, and so would the "Ingest now" the other sentence asks
-// for, until the window resets.
-const skipSentenceBudgetPaused = "Not read yet. This bench has used its budget for now; it will be read when the budget window resets."
+// the file was refused, and so would an "Ingest now" pressed before the window
+// resets. It asks for the press rather than promising a read, because a
+// refusal enqueues nothing (worker.refuseOverBudget): only a poll connector
+// comes back on its own, and a manual or webhook bench waits for a person.
+const skipSentenceBudgetPaused = "Not read yet. This bench has used its budget for now. Press Ingest now once the budget window has reset."
 
 // ingestJSON is the ingest member of a file row. Pointers are deliberate: a
 // waiting file has no pages, readAt or reason, and the UI reads an explicit

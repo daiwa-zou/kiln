@@ -460,7 +460,7 @@ file row, its source record and the bench's runs:
 | Status | Means |
 | --- | --- |
 | read, with its page count | A source record exists and was read since the bytes last changed. The count unions the document's own pages with those of its section units. |
-| waiting for the next ingest | Uploaded or replaced after the last build that could have read it, or a build that could read it is queued or running. A run pinned to the git or web connector (a poll) stages no uploads, so it counts as neither. |
+| waiting for the next ingest | Uploaded or replaced after the last build that could have read it, or a build that could read it is queued or running. A run that stages no uploads counts as neither: a poll (also once its connector is deleted, which unpins its old runs), or a run pinned to any connector but the files-mode upload one (git, web, an upload connector reading a folder). |
 | not read, with a plain-language reason | The worker recorded a skip for exactly these bytes. |
 | paused | `enabled = false` and no source record; a paused document that has one stays read. |
 
@@ -489,15 +489,20 @@ read; without that a harmless replacement would read as never read again.
 build did not read and did not explain: an upload from before this version,
 whose skip was discarded at the time, or a unit that failed. A rebuild records
 the reason or reads the document. While the bench's latest run was refused
-over budget, that sentence instead says the bench has used its budget and the
-document will be read when the window resets, since another ingest would be
-refused too. Two caveats are deliberate. A **replaced** document keeps its old
-pages until the next ingest reads the new bytes, and reads as waiting
-meanwhile; the old pages are not removed or marked, because the source record
-that owns them is rewritten by the build, not by the upload. And a document
-replaced **while a build is running** shows "read" with the previous pages
-until the next ingest: the skip sink runs after the sync and before the units,
-so a replacement that lands later in the build is not seen until the next one.
+over budget, that sentence instead says the bench has used its budget and asks
+for Ingest now once the window has reset: a refusal enqueues no continuation,
+so on a manual or webhook bench nothing reads the document on its own, and an
+ingest pressed before the reset would be refused too. A bench whose upload
+connector is **disabled or deleted** shows its documents as waiting or "not
+read" although no connector will stage them; a bench-level fact for that case
+is tracked as ST-E-7. Two caveats are deliberate. A **replaced** document
+keeps its old pages until the next ingest reads the new bytes, and reads as
+waiting meanwhile; the old pages are not removed or marked, because the source
+record that owns them is rewritten by the build, not by the upload. And a
+document replaced **while a build is running** shows "read" with the previous
+pages until the next ingest: the skip sink runs after the sync and before the
+units, so a replacement that lands later in the build is not seen until the
+next one.
 
 ---
 

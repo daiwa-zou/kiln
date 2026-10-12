@@ -44,7 +44,7 @@ describe("ingestSummary", () => {
     expect(S.ingestSummaryText(n)).toBe("1 read · 1 not read · 3 paused");
     // The unread count the bar and the Ingest now link act on: a paused file
     // is never read and must not trigger either.
-    expect(n.waiting + n.notRead).toBe(1);
+    expect(S.unreadCount(n)).toBe(1);
   });
 
   test("Marcus's bench: 25 read, one waiting, one not read", () => {
@@ -64,6 +64,31 @@ describe("ingestSummary", () => {
     // A row without an ingest member (an older API) counts nowhere.
     expect(S.ingestSummary([{ name: "y.md", path: "uploads/y.md" }]))
       .toEqual({ read: 0, waiting: 0, notRead: 0, paused: 0 });
+  });
+});
+
+describe("unreadCount", () => {
+  test("a waiting document is unread", () => {
+    // Marcus's case: one upload waiting for the next ingest must stop the bar
+    // from saying Read cleanly, so waiting counts as unread on its own.
+    expect(S.unreadCount(S.ingestSummary([read("a.md", 3), waiting("7 Questions.pdf")]))).toBe(1);
+    expect(S.unreadCount({ read: 25, waiting: 1, notRead: 0, paused: 0 })).toBe(1);
+  });
+
+  test("a skipped document is unread", () => {
+    expect(S.unreadCount(S.ingestSummary([read("a.md", 3), skipped("scan.pdf")]))).toBe(1);
+    expect(S.unreadCount({ read: 25, waiting: 0, notRead: 1, paused: 0 })).toBe(1);
+  });
+
+  test("waiting and not read add; read and paused do not count", () => {
+    expect(S.unreadCount({ read: 25, waiting: 1, notRead: 1, paused: 0 })).toBe(2);
+    expect(S.unreadCount({ read: 25, waiting: 0, notRead: 0, paused: 0 })).toBe(0);
+    expect(S.unreadCount(S.ingestSummary([
+      read("a.md", 3),
+      waiting("c.pdf", { enabled: false }),
+      skipped("old-scan.pdf", { enabled: false }),
+    ]))).toBe(0);
+    expect(S.unreadCount({ read: 0, waiting: 0, notRead: 0, paused: 3 })).toBe(0);
   });
 });
 

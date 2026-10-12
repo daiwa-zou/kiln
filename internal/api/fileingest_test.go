@@ -69,8 +69,10 @@ func TestDeriveIngest(t *testing.T) {
 		{"pending continuation keeps an unread file waiting", row(nil), ranAfterPending, ingestWaiting, nil, nil, nil, nil},
 		// A continuation refused over budget: the file was passed over, and
 		// "press Ingest now" would be refused too, so the sentence says why.
+		// The wording is pinned: nothing re-enqueues after a refusal, so the
+		// sentence must ask for the press, not promise an automatic read.
 		{"budget-paused bench names the budget, not another ingest", row(nil), ranAfterPaused, ingestSkipped,
-			nil, nil, str(skipSentenceBudgetPaused), nil},
+			nil, nil, str("Not read yet. This bench has used its budget for now. Press Ingest now once the budget window has reset."), nil},
 		{"budget-paused bench, uploaded after the last build, still waiting", row(nil), ranBeforePaused,
 			ingestWaiting, nil, nil, nil, nil},
 		{"budget-paused bench with a queued run is waiting", row(nil), ranAfterPendingPaused, ingestWaiting, nil, nil, nil, nil},

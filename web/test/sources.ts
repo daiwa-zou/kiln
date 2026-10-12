@@ -52,6 +52,7 @@ export interface Sources {
   plural(n: number, word: string): string;
   ingestSummary(files: FileRow[]): Summary;
   ingestSummaryText(n: Summary): string;
+  unreadCount(n: Summary): number;
   ingestChip(f: FileRow, nextCheck?: string): string;
   ingestReason(f: FileRow): string;
   attentionLine(files: FileRow[]): string;
@@ -64,8 +65,8 @@ export interface Helpers {
   relTime: (iso: string) => string;
 }
 
-const EXPORTS = ["plural", "ingestSummary", "ingestSummaryText", "ingestChip", "ingestReason",
-  "attentionLine", "connectorHealth"] as const;
+const EXPORTS = ["plural", "ingestSummary", "ingestSummaryText", "unreadCount", "ingestChip",
+  "ingestReason", "attentionLine", "connectorHealth"] as const;
 
 // esc as app.js defines it (app.js:587), copied rather than evaluated out of
 // app.js: the loader in legacy.ts returns the characterized functions only,

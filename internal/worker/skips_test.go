@@ -319,6 +319,29 @@ func TestPathModeSkipIsLoggedAndCountedOnce(t *testing.T) {
 	}
 }
 
+// The seen set is bounded: a worker that outlives thousands of distinct
+// unrecorded skips starts over rather than growing, and a skip the reset
+// forgot is news again.
+func TestSkipSeenSetIsBounded(t *testing.T) {
+	w := &Worker{}
+	first := skipSeenKey{workspace: "ws", kind: "upload", subject: "scan-0.pdf", class: "no_text"}
+	if !w.markSkipSeen(first) {
+		t.Fatal("a never-seen skip is not news")
+	}
+	if w.markSkipSeen(first) {
+		t.Fatal("a skip seen a moment ago is news again")
+	}
+	for i := 1; i < 3*maxSkipSeen; i++ {
+		w.markSkipSeen(skipSeenKey{workspace: "ws", kind: "upload", subject: fmt.Sprintf("scan-%d.pdf", i), class: "no_text"})
+	}
+	if n := len(w.skipSeen.seen); n > maxSkipSeen {
+		t.Errorf("seen set grew to %d (> %d)", n, maxSkipSeen)
+	}
+	if !w.markSkipSeen(first) {
+		t.Error("the first skip is still seen after the set was reset")
+	}
+}
+
 func TestSkipLogSanitisesTheExtractorText(t *testing.T) {
 	st := newLoopStore()
 	w, buf := filesWorker(t, st, map[string]string{"nasty.pdf": blankPDF, "ok.md": "# Fine\n\nReadable.\n"})

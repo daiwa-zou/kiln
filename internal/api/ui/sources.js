@@ -64,7 +64,7 @@ function plural(n, word) {
 // a paused file is counted as paused and nowhere else, whatever its status,
 // because the member chose that and nothing will read it -- a paused skip is
 // not "not read", and a paused file is not "waiting" for anything. The
-// unread count the bar and the Ingest now link act on is waiting + notRead.
+// unread count the bar and the Ingest now link act on is unreadCount below.
 // Computed here, from rows a member can already read, so the Documents stat
 // and header reconcile against Overview's count without a new endpoint.
 function ingestSummary(files) {
@@ -88,6 +88,15 @@ function ingestSummaryText(n) {
   if (n.notRead) parts.push(`${n.notRead} not read`);
   if (n.paused) parts.push(`${n.paused} paused`);
   return parts.join(" · ");
+}
+
+// unreadCount is the number the upload source's bar and the Documents note's
+// Ingest now link act on: the documents the wiki has not read, whether they
+// are waiting for the next ingest or were skipped by the last one. Paused
+// files are not in it, because nothing will read them until the member says
+// so. One place, so the bar and the link cannot drift apart.
+function unreadCount(summary) {
+  return summary.waiting + summary.notRead;
 }
 
 // ingestChip is the status a document row carries beside its size: how many
@@ -1155,7 +1164,7 @@ async function showSources() {
     // header, the attention line and the upload source's bar below.
     const summary = ingestSummary(files);
     const summaryText = ingestSummaryText(summary);
-    const unreadDocs = summary.waiting + summary.notRead;
+    const unreadDocs = unreadCount(summary);
     const nextBuild = nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0);
 
     const connectorRow = (c) => {

@@ -149,8 +149,8 @@ type FileIngestRow struct {
 // table says about the last ingest and the next one.
 type FileIngestBench struct {
 	// LastRun is when the last ingest that could have read a document began:
-	// not research, not failed, and not pinned to a connector that stages no
-	// uploads. Nil when the bench has never built.
+	// not research, not failed, not a poll, and if pinned, pinned to the
+	// files-mode upload connector. Nil when the bench has never built.
 	LastRun *time.Time
 	// PendingRun says an ingest that could read a document is queued or
 	// running, so a document the last run did not read is still waiting
@@ -215,19 +215,28 @@ func (s *WikiStore) ListFilesWithIngest(ctx context.Context, workspaceID string)
 		return nil, FileIngestBench{}, fmt.Errorf("store: load files with ingest: %w", err)
 	}
 
-	// 'research' is jobs.TriggerResearch, kept as a SQL literal as queue.go
-	// does. A research run materializes nothing, so it never read a document;
-	// a failed run may have read none of them. A run pinned to a connector
-	// builds from that connector alone (worker.sourceSpec), so a poll of the
-	// git or web connector never stages an upload: it neither counts as the
-	// last ingest nor, while queued, as the one about to read the file.
+	// 'research' and 'poll' are jobs.TriggerResearch and TriggerPoll, kept as
+	// SQL literals as queue.go does. A research run materializes nothing, so
+	// it never read a document; a failed run may have read none of them. A run
+	// pinned to a connector builds from that connector alone
+	// (worker.sourceSpec), so only a pin to the files-mode upload connector
+	// (kind upload, no path: worker.go stages a path-mode one from a folder)
+	// stages an upload. An unpinned poll is excluded too: the scheduler always
+	// pins its polls, so a poll with no connector is one whose connector was
+	// deleted (runs.connector_id is ON DELETE SET NULL) and never staged
+	// uploads, or one whose pin a queue merge cleared (EnqueueBuild keeps the
+	// waiting row's trigger and nulls its connector_id when the merged request
+	// names another). The merged row does stage uploads, so leaving it out
+	// errs the gentler way: a document it passes over without a recorded
+	// reason reads waiting, not "not read", until the next counted ingest.
 	var bench FileIngestBench
 	if err := s.pool.QueryRow(ctx, `
 		WITH ingests AS (
 		    SELECT status, started_at FROM runs
 		    WHERE workspace_id = $1 AND trigger <> 'research'
-		      AND (connector_id IS NULL
-		           OR connector_id IN (SELECT id FROM connectors WHERE kind = 'upload')))
+		      AND ((connector_id IS NULL AND trigger <> 'poll')
+		           OR connector_id IN (SELECT id FROM connectors
+		                               WHERE kind = 'upload' AND coalesce(config->>'path', '') = '')))
 		SELECT (SELECT max(started_at) FROM ingests
 		        WHERE status IN ('succeeded', 'partial', 'no_changes')
 		          AND started_at IS NOT NULL),

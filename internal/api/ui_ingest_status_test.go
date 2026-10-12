@@ -18,25 +18,59 @@ func TestUIIngestStatusHelpersExist(t *testing.T) {
 	src := uiSource(t, "sources.js")
 	for _, want := range []string{
 		"function ingestSummary(",
+		"function unreadCount(",
 		"function ingestChip(",
+		"function ingestReason(",
 		"function attentionLine(",
+		"function connectorHealth(",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("sources.js: missing %q", want)
 		}
 	}
-	// The helpers are used, not merely defined.
-	for _, want := range []string{"ingestSummary(files)", "ingestChip(f", "attentionLine(files)"} {
-		if !strings.Contains(src, want) {
+	// The helpers are used, not merely defined: each call site has to appear
+	// on a line that is not a function declaration, so `function ingestChip(f,
+	// …) {` does not stand in for the row that renders the chip. The `${`
+	// prefixes pin the template positions; unreadCount feeds the bar and the
+	// Ingest now link through unreadDocs.
+	calls := withoutDeclarations(src)
+	for _, want := range []string{
+		"ingestSummary(files)",
+		"${ingestChip(f",
+		"${ingestReason(f)",
+		"${attentionLine(files)",
+		"connectorHealth(c,",
+		"unreadCount(summary)",
+	} {
+		if !strings.Contains(calls, want) {
 			t.Errorf("sources.js: %q is never called", want)
 		}
 	}
 }
 
-// stripLineComments drops every line that is only a `//` comment, so a guard
-// that was commented out no longer satisfies a substring match. Trailing
-// comments are left alone: a URL in a string carries `//` too.
-func stripLineComments(src string) string {
+// withoutDeclarations drops every line that declares a function, leaving the
+// lines that can only be call sites.
+func withoutDeclarations(src string) string {
+	decl := regexp.MustCompile(`^\s*(async\s+)?function\s`)
+	lines := strings.Split(src, "\n")
+	kept := lines[:0]
+	for _, l := range lines {
+		if decl.MatchString(l) {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// stripComments drops every `/* … */` block, across lines, and then every
+// line that is only a `//` comment, so a guard that was commented out either
+// way no longer satisfies a substring match. Trailing `//` comments are left
+// alone: a URL in a string carries `//` too. sources.js has no `/*` inside a
+// string or regex literal; if one arrives, the non-greedy match ends at the
+// first `*/` and the pin fails loudly rather than passing by accident.
+func stripComments(src string) string {
+	src = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(src, "")
 	lines := strings.Split(src, "\n")
 	kept := lines[:0]
 	for _, l := range lines {
@@ -52,10 +86,11 @@ func stripLineComments(src string) string {
 // cleanly" only when no document is unread. The literal may appear once, and
 // the return that carries it must be preceded by the unread guard as a live
 // statement: comments are stripped first, and the guard has to start its own
-// line, so neither `// if (unread > 0) …` nor `/* if (unread > 0) … */` counts.
+// line, so neither `// if (unread > 0) …` nor a `/* … */` block around it,
+// on one line or several, counts.
 // The behaviour itself is proven by web/test/ingest-status.test.ts.
 func TestUIConnectorBarGuardsReadCleanly(t *testing.T) {
-	src := stripLineComments(uiSource(t, "sources.js"))
+	src := stripComments(uiSource(t, "sources.js"))
 	const literal = `"Read cleanly"`
 	if n := strings.Count(src, literal); n != 1 {
 		t.Fatalf("sources.js: %q appears %d times, want exactly 1", literal, n)
