@@ -84,8 +84,9 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO workspace_files
-			(workspace_id, path, display_name, blob_key, size_bytes, content_type, sha256, uploaded_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			(workspace_id, path, display_name, blob_key, size_bytes, content_type, sha256, uploaded_by,
+			 content_changed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
 		ON CONFLICT (workspace_id, path) DO UPDATE SET
 			display_name = excluded.display_name,
 			blob_key     = excluded.blob_key,
@@ -96,7 +97,13 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 			-- Re-uploading a paused path resumes it: fresh content is the
 			-- clearest possible signal the file is wanted again.
 			enabled      = TRUE,
-			updated_at   = now()
+			updated_at   = now(),
+			-- Only a change of bytes is a change of content. Re-uploading the
+			-- same file must not make a read document look unread, and
+			-- updated_at cannot carry this: the build's own naming pass bumps it.
+			content_changed_at = CASE
+				WHEN workspace_files.sha256 IS DISTINCT FROM excluded.sha256 THEN now()
+				ELSE workspace_files.content_changed_at END
 		RETURNING id`,
 		f.WorkspaceID, f.Path, f.DisplayName, f.BlobKey, f.SizeBytes,
 		nullable(f.ContentType), f.SHA256, nullable(f.UploadedBy)).Scan(&id); err != nil {
@@ -118,9 +125,22 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 
 // SetFileEnabled pauses or resumes one file's ingestion, scoped to the
 // workspace so a cross-tenant id reads as absent.
+//
+// Resuming a file the wiki has never read marks its content as changed, so
+// the Ingest view says "waiting" rather than "not read by the last ingest":
+// the last ingest skipped it on purpose. A resumed file that has a live source
+// row keeps its stamp, because its pages are still current. The key literal
+// is the same one ListFilesWithIngest joins on (see uploadDocKeyPrefix).
 func (s *WikiStore) SetFileEnabled(ctx context.Context, workspaceID, id string, enabled bool) error {
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE workspace_files SET enabled = $3, updated_at = now()
+		UPDATE workspace_files SET enabled = $3, updated_at = now(),
+		    content_changed_at = CASE
+		        WHEN $3::boolean AND NOT EXISTS (
+		            SELECT 1 FROM sources s
+		            WHERE s.workspace_id = workspace_files.workspace_id
+		              AND s.key = 'doc:upload:' || workspace_files.path
+		              AND s.deleted_at IS NULL)
+		        THEN now() ELSE content_changed_at END
 		WHERE workspace_id = $1 AND id = $2`, workspaceID, id, enabled)
 	if err != nil {
 		return fmt.Errorf("store: set file enabled: %w", err)
