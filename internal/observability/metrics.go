@@ -37,6 +37,10 @@ type Metrics struct {
 	staleRuns    prometheus.Counter
 	pagesWritten *prometheus.CounterVec
 	activeRuns   prometheus.Gauge
+	// Documents a sync could not read, by connector kind and skip class. A
+	// rising no_text rate is a bench full of scans; a rising extractor_missing
+	// rate is a deployment missing a converter.
+	docsSkipped *prometheus.CounterVec
 
 	// Queue depth, sampled rather than scraped from the database on demand:
 	// a scrape must not become a database query multiplier when several
@@ -121,6 +125,11 @@ func NewMetrics() *Metrics {
 			Help: "Builds in flight in this process. A worker claims one at a time, so this is 0 or 1 per worker.",
 		}),
 
+		docsSkipped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kiln_documents_skipped_total",
+			Help: "Documents a sync could not read, by connector kind and skip class. Counted when the skip is first recorded, not on every rebuild that repeats it.",
+		}, []string{"kind", "class"}),
+
 		queueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kiln_queue_depth",
 			Help: "Runs waiting or executing, by status. The signal to scale workers on.",
@@ -145,7 +154,7 @@ func NewMetrics() *Metrics {
 	reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.httpInFlight,
 		m.runsStarted, m.runsFinished, m.runDuration, m.runCost, m.staleRuns,
-		m.pagesWritten, m.activeRuns, m.queueDepth, m.searches,
+		m.pagesWritten, m.activeRuns, m.docsSkipped, m.queueDepth, m.searches,
 		m.dutyLastSuccess, m.dutyErrors,
 		// Go runtime and process collectors: the questions "is it leaking"
 		// and "is it being throttled" are asked of every service, and
@@ -203,6 +212,25 @@ func (m *Metrics) RunFinished(status string, d time.Duration, costUSD float64, c
 			m.pagesWritten.WithLabelValues(action).Add(float64(n))
 		}
 	}
+}
+
+// skipClasses is the label allow-list for DocumentSkipped. The tokens are the
+// upload connector's Skip* constants, repeated here rather than imported so the
+// metrics package stays a leaf.
+var skipClasses = map[string]bool{
+	"no_text": true, "extractor_missing": true, "unsupported_type": true,
+	"timed_out": true, "extractor_error": true,
+}
+
+// DocumentSkipped records one document a sync could not read. kind is the
+// connector kind (upload, web); class is one of the skip classes, and anything
+// else is folded into extractor_error -- the class is a token the code
+// chooses, but a label is forever, so the allow-list is enforced here too.
+func (m *Metrics) DocumentSkipped(kind, class string) {
+	if !skipClasses[class] {
+		class = "extractor_error"
+	}
+	m.docsSkipped.WithLabelValues(orUnknown(kind), class).Inc()
 }
 
 // StaleRequeued records runs the stale sweep returned to the queue. Healthy

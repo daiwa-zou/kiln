@@ -47,7 +47,7 @@ func syncStubDocs(t *testing.T, origin func(string) string, renames bool, docs [
 		config:  connector.Config{},
 		renames: renames,
 		origin:  origin,
-		payload: func(*connector.SourceSet) ([]docmap.Doc, [][2]string, bool) {
+		payload: func(*connector.SourceSet) ([]docmap.Doc, []docSkipped, bool) {
 			return docs, nil, true
 		},
 	})

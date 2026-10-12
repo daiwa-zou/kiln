@@ -41,10 +41,28 @@ func (c *Connector) Kind() string { return connector.KindUpload }
 
 // SkipReason records why a file was not ingested, so a folder with one
 // unreadable PDF still produces a wiki and says what it left out.
+//
+// Reason is the text the CLI prints; Class is the same fact as a fixed token,
+// for the server, which persists a token and never extractor text about a
+// user's file. Partial marks a document that was ingested with something
+// missing (its figures), as opposed to one that produced nothing.
 type SkipReason struct {
-	Path   string
-	Reason string
+	Path    string
+	Reason  string
+	Class   string
+	Partial bool
 }
+
+// The skip classes. A sink keys its persistence, its log and its metric labels
+// on these and nothing else, so an unknown class is folded into
+// SkipExtractorError rather than given a label of its own.
+const (
+	SkipNoText           = "no_text"
+	SkipExtractorMissing = "extractor_missing"
+	SkipUnsupportedType  = "unsupported_type"
+	SkipTimedOut         = "timed_out"
+	SkipExtractorError   = "extractor_error"
+)
 
 // Sync extracts every supported document under the configured path.
 //
@@ -98,7 +116,7 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 
 		res, err := extractors.ExtractWithFigures(ctx, full, figures)
 		if err != nil {
-			skips = append(skips, SkipReason{Path: rel, Reason: skipReason(err)})
+			skips = append(skips, SkipReason{Path: rel, Reason: skipReason(err), Class: skipClass(err)})
 			continue
 		}
 		// A document whose text read fine but whose pictures did not is
@@ -106,12 +124,13 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		// loss of figures is exactly the failure nobody would notice.
 		if res.FigureErr != nil {
 			skips = append(skips, SkipReason{
-				Path: rel, Reason: "figures could not be read: " + res.FigureErr.Error()})
+				Path: rel, Reason: "figures could not be read: " + res.FigureErr.Error(),
+				Class: SkipExtractorError, Partial: true})
 		}
 		if strings.TrimSpace(res.Text) == "" {
 			// An empty extraction is not material. Sending it on would spend a
 			// model call to write a page about nothing.
-			skips = append(skips, SkipReason{Path: rel, Reason: "extracted no text"})
+			skips = append(skips, SkipReason{Path: rel, Reason: "extracted no text", Class: SkipNoText})
 			continue
 		}
 
@@ -178,6 +197,24 @@ func skipReason(err error) string {
 		return "unsupported file type"
 	default:
 		return err.Error()
+	}
+}
+
+// skipClass is skipReason's token form, for a sink that persists facts about a
+// file rather than extractor text.
+func skipClass(err error) string {
+	switch {
+	case errors.Is(err, extract.ErrToolMissing):
+		return SkipExtractorMissing
+	case errors.Is(err, extract.ErrNoExtractor):
+		return SkipUnsupportedType
+	// runTool reports its own deadline as prose ("pdftotext timed out after
+	// 2m0s") without wrapping the context error, so the sentinel check alone
+	// would never match a converter that hung; the text is the contract there.
+	case errors.Is(err, context.DeadlineExceeded), strings.Contains(err.Error(), " timed out after "):
+		return SkipTimedOut
+	default:
+		return SkipExtractorError
 	}
 }
 

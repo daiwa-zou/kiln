@@ -67,6 +67,12 @@ type loopStore struct {
 	// its write-back.
 	question   *store.ResearchQuestion
 	researched []string
+	// files is the bench's upload list; skipCalls, skipErr and skipsSeen
+	// record and script the skip sink's one write.
+	files     []store.FileRow
+	skipCalls []recordedSkips
+	skipErr   error
+	skipsSeen map[string]bool
 
 	claimErr   error
 	requeueErr error
@@ -144,7 +150,44 @@ func (l *loopStore) HeartbeatRun(_ context.Context, runID, workerID string) erro
 }
 
 func (l *loopStore) ListFiles(context.Context, string) ([]store.FileRow, error) {
-	return nil, nil
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.files, nil
+}
+
+// recordedSkips is one RecordFileSkips call as the worker made it.
+type recordedSkips struct {
+	skips     []store.FileSkip
+	readPaths []string
+}
+
+func (l *loopStore) RecordFileSkips(ctx context.Context, _ string, skips []store.FileSkip, readPaths []string, _ time.Time) ([]string, error) {
+	// As EnqueueRun: a write through a canceled context fails against a real
+	// database, so a double that accepts it would hide a sink that forgot to
+	// detach from the run's context.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.skipCalls = append(l.skipCalls, recordedSkips{skips: skips, readPaths: readPaths})
+	if l.skipErr != nil {
+		return nil, l.skipErr
+	}
+	// Scripted like the store: a skip is news until the same path and class
+	// has been recorded once.
+	if l.skipsSeen == nil {
+		l.skipsSeen = map[string]bool{}
+	}
+	var changed []string
+	for _, s := range skips {
+		key := s.Path + "\x00" + s.Class
+		if !l.skipsSeen[key] {
+			l.skipsSeen[key] = true
+			changed = append(changed, s.Path)
+		}
+	}
+	return changed, nil
 }
 
 func (l *loopStore) QueueDepth(context.Context) (map[string]int, error) {
@@ -560,7 +603,7 @@ func TestSourceSpecRejectsForbiddenRemoteURL(t *testing.T) {
 	w := &Worker{Store: st}
 
 	run := &store.QueuedRun{ID: "r", WorkspaceID: "ws", WorkspaceSlug: "bench", ConnectorID: "c1"}
-	spec, _, cleanup, err := w.sourceSpec(context.Background(), run)
+	spec, _, _, cleanup, err := w.sourceSpec(context.Background(), run)
 	if cleanup != nil {
 		cleanup()
 	}

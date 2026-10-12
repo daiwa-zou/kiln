@@ -2,6 +2,8 @@ package upload
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,4 +221,72 @@ func itemKeys(set *connector.SourceSet) []string {
 		out = append(out, item.Key)
 	}
 	return out
+}
+
+func TestSkipClassIsDecidedByTheExtractSentinels(t *testing.T) {
+	// The class is what a server build persists, so it comes from errors.Is on
+	// the sentinels, not from the prose skipReason prints. The one exception is
+	// the converter timeout, which runTool reports as text.
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("extract: %w: pdf needs a tool that is not installed", extract.ErrToolMissing), SkipExtractorMissing},
+		{fmt.Errorf("%w: office", extract.ErrNoExtractor), SkipUnsupportedType},
+		{fmt.Errorf("extract: a.pdf: %w", context.DeadlineExceeded), SkipTimedOut},
+		{errors.New("extract: a.pdf (pdftotext): pdftotext timed out after 2m0s"), SkipTimedOut},
+		{errors.New("extract: a.pdf (pdftotext): pdftotext: exit status 1 (Syntax Error)"), SkipExtractorError},
+	} {
+		if got := skipClass(tc.err); got != tc.want {
+			t.Errorf("skipClass(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestSyncFlagsAFigureFailureAsPartial(t *testing.T) {
+	// echo stands in for pdftotext: it prints its arguments, which is text
+	// enough for a page. The figure tool is missing, so the figures fail and
+	// the document is reported partial: a page was written, pictures were lost.
+	root := fixture(t, map[string]string{"report.pdf": "%PDF-1.4 not really\n"})
+	c := &Connector{Extractors: extract.Extractors{
+		&extract.PDFExtractor{Binary: "/bin/echo", FigureBinary: "kiln-nonexistent-pdfimages"},
+	}}
+	set, err := c.Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set.Items) != 1 {
+		t.Fatalf("items = %v, want the report's page", itemKeys(set))
+	}
+	skips := PayloadOf(set).Skipped
+	if len(skips) != 1 || !skips[0].Partial || skips[0].Class != SkipExtractorError ||
+		!strings.HasPrefix(skips[0].Reason, "figures could not be read: ") {
+		t.Errorf("skips = %+v, want one partial extractor_error with the figures reason", skips)
+	}
+}
+
+func TestSyncClassifiesAndFlagsPartialSkips(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"empty.md": "   \n",
+		"bad.pdf":  "%PDF-1.4 not really\n",
+	})
+	c := &Connector{Extractors: extract.Extractors{
+		&extract.PassthroughExtractor{},
+		&extract.PDFExtractor{Binary: "kiln-nonexistent-pdftotext"},
+	}}
+	set, err := c.Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]SkipReason{}
+	for _, s := range PayloadOf(set).Skipped {
+		got[s.Path] = s
+	}
+	// The printed reasons are unchanged; the class rides beside them.
+	if s := got["empty.md"]; s.Reason != "extracted no text" || s.Class != SkipNoText || s.Partial {
+		t.Errorf("empty.md skip = %+v", s)
+	}
+	if s := got["bad.pdf"]; s.Reason != "required extraction tool is not installed" || s.Class != SkipExtractorMissing || s.Partial {
+		t.Errorf("bad.pdf skip = %+v", s)
+	}
 }

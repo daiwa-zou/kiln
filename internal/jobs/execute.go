@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/daiwa-zou/kiln/internal/agent"
@@ -92,6 +94,90 @@ type ExecuteRequest struct {
 
 	// Progress receives human-readable sync narration; nil discards it.
 	Progress io.Writer
+
+	// OnDocSkips, when set, receives the documents the sync could not read,
+	// once, after every source has synced and before anything is built. It is
+	// the typed counterpart of the "skipped ..." lines Progress narrates: the
+	// CLI reads those, a server build has no Progress, and without this hook a
+	// skipped upload was discarded there. It is called even when nothing was
+	// skipped, so a sink can clear what an earlier build recorded.
+	OnDocSkips func(ctx context.Context, skips []DocSkip)
+}
+
+// DocSkip is one document a sync left out, typed for a sink rather than
+// narrated for a person.
+//
+// Raw is the extractor's own text and is about a user's file: it is for an
+// operator log after sanitising, never for persistence or a prompt. Class is
+// the fact to persist. Subject for a fetched page is reduced to scheme and
+// host, so a query string or userinfo in a configured URL never leaves the
+// connector.
+type DocSkip struct {
+	// Kind is the connector that skipped it: connector.KindUpload or
+	// connector.KindWeb.
+	Kind string
+	// Subject is the stored path of an upload, or the scheme and host of a
+	// fetched page.
+	Subject string
+	// Class is one of the upload package's Skip* tokens.
+	Class string
+	// Raw is the first line of the reason, with URLs reduced to scheme and
+	// host.
+	Raw string
+	// Partial marks a document that was ingested with something missing
+	// (its figures); it still produced a page.
+	Partial bool
+}
+
+// docSkipped is one skipped item in the two forms it is reported in: the
+// (subject, reason) pair the CLI prints verbatim, and the typed skip the
+// sink receives, whose subject and text are already reduced for a log.
+type docSkipped struct {
+	subject, reason string
+	skip            DocSkip
+}
+
+// deliverableSkips is what a sink should hear about from one sync: nothing
+// about a document that produced a page (a partial skip, or a skip followed
+// by a successful read of the same path), and one entry per subject, the
+// last one. A sink that persisted a partial skip would mark a document with
+// a page on the bench as unread.
+func deliverableSkips(skipped []docSkipped, docs []docmap.Doc) []DocSkip {
+	produced := make(map[string]bool, len(docs))
+	for _, d := range docs {
+		produced[d.Origin] = true
+	}
+	var out []DocSkip
+	index := map[string]int{}
+	for _, s := range skipped {
+		if s.skip.Partial || produced[s.subject] {
+			continue
+		}
+		if i, ok := index[s.skip.Subject]; ok {
+			out[i] = s.skip
+			continue
+		}
+		index[s.skip.Subject] = len(out)
+		out = append(out, s.skip)
+	}
+	return out
+}
+
+// urlPattern finds the URLs in free text, for RedactURLs.
+var urlPattern = regexp.MustCompile(`https?://[^\s"'<>()\[\]]+`)
+
+// RedactURLs reduces every URL in s to its scheme and host, dropping the
+// path, query and userinfo. A configured web URL can carry a token in its
+// query, and a connector's error text quotes the URL it failed on; both
+// would otherwise reach a log line.
+func RedactURLs(s string) string {
+	return urlPattern.ReplaceAllStringFunc(s, func(raw string) string {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return "<url>"
+		}
+		return u.Scheme + "://" + u.Host
+	})
 }
 
 // material is one call's synced sources: the map every later step reads, the
@@ -114,6 +200,11 @@ type material struct {
 	// Figures are the pictures recovered from each document, keyed by unit
 	// key. Empty for a repository-only build: source code has no figures.
 	Figures map[string][]extract.Figure
+
+	// Skips are the documents the document sources could not read, for
+	// ExecuteRequest.OnDocSkips. Already reduced to what a sink should hear
+	// (see deliverableSkips).
+	Skips []DocSkip
 
 	staging []string
 }
@@ -263,6 +354,7 @@ func (m *material) absorb(root string, s docSync) error {
 		}
 		maps.Copy(m.Figures, s.Figures)
 	}
+	m.Skips = append(m.Skips, s.Skips...)
 	return nil
 }
 
@@ -285,6 +377,13 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 	}
 	defer mat.Close()
 	wm, router, rm := mat.Map, mat.Router, mat.Repo
+
+	// Before the build rather than after: what was skipped is a fact about
+	// extraction, true whatever the build goes on to do, and a build that
+	// fails or is interrupted should not take the record of it down too.
+	if req.OnDocSkips != nil {
+		req.OnDocSkips(ctx, mat.Skips)
+	}
 
 	// Without a base ref, every unit is a candidate and the pipeline's hash
 	// gate decides — a repeat build still costs nothing. With one (webhook
@@ -368,8 +467,8 @@ type docSource struct {
 	// (diff.UploadOrigin / diff.WebOrigin).
 	origin func(string) string
 	// payload reads the connector's native result: the docs to map, and the
-	// skipped items as (subject, reason) pairs.
-	payload func(*connector.SourceSet) ([]docmap.Doc, [][2]string, bool)
+	// skipped items, each as the line to print and the skip to deliver.
+	payload func(*connector.SourceSet) ([]docmap.Doc, []docSkipped, bool)
 }
 
 // docSync is what one document ingest produced. A struct rather than a fifth
@@ -388,6 +487,10 @@ type docSync struct {
 	// the sync -- prompts are assembled from it -- so the caller owns removing
 	// it.
 	Staging string
+	// Skips are the documents this sync could not read, reduced to what a
+	// sink should hear (deliverableSkips). The same skips were narrated to the
+	// progress writer in full.
+	Skips []DocSkip
 }
 
 // syncDocSource ingests documents through one connector and maps them with
@@ -429,8 +532,9 @@ func syncDocSource(ctx context.Context, out io.Writer, src docSource) (res docSy
 	// Skips are reported rather than swallowed: a folder that silently ingested
 	// half its files would look like a working build.
 	for _, s := range skipped {
-		fmt.Fprintf(out, "  skipped %s: %s\n", s[0], s[1])
+		fmt.Fprintf(out, "  skipped %s: %s\n", s.subject, s.reason)
 	}
+	res.Skips = deliverableSkips(skipped, docs)
 
 	// Routes are keyed by the namespaced origin, the same namespace the
 	// connector keys the source cache with, so an ingested document can never
@@ -471,18 +575,29 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (docSync, error) {
 		config:  connector.Config{"path": absDocs},
 		renames: true,
 		origin:  diff.UploadOrigin,
-		payload: func(set *connector.SourceSet) ([]docmap.Doc, [][2]string, bool) {
-			p := upload.PayloadOf(set)
-			if p == nil {
-				return nil, nil, false
-			}
-			skipped := make([][2]string, 0, len(p.Skipped))
-			for _, s := range p.Skipped {
-				skipped = append(skipped, [2]string{s.Path, s.Reason})
-			}
-			return p.Docs, skipped, true
-		},
+		payload: uploadPayload,
 	})
+}
+
+// uploadPayload reads the upload connector's result. The skip's Raw is the
+// whole reason: an extractor names the file it failed on, and that path is
+// the staging directory's, which is the sink's to strip.
+func uploadPayload(set *connector.SourceSet) ([]docmap.Doc, []docSkipped, bool) {
+	p := upload.PayloadOf(set)
+	if p == nil {
+		return nil, nil, false
+	}
+	skipped := make([]docSkipped, 0, len(p.Skipped))
+	for _, s := range p.Skipped {
+		skipped = append(skipped, docSkipped{
+			subject: s.Path, reason: s.Reason,
+			skip: DocSkip{
+				Kind: connector.KindUpload, Subject: s.Path, Class: s.Class,
+				Raw: RedactURLs(firstLine(s.Reason)), Partial: s.Partial,
+			},
+		})
+	}
+	return p.Docs, skipped, true
 }
 
 // syncWeb ingests fetched pages through the web connector.
@@ -494,18 +609,40 @@ func syncWeb(ctx context.Context, out io.Writer, urls []string) (docSync, error)
 		noun:    "page(s)",
 		config:  connector.Config{"urls": urls},
 		origin:  diff.WebOrigin,
-		payload: func(set *connector.SourceSet) ([]docmap.Doc, [][2]string, bool) {
-			p := webconn.PayloadOf(set)
-			if p == nil {
-				return nil, nil, false
-			}
-			skipped := make([][2]string, 0, len(p.Skipped))
-			for _, s := range p.Skipped {
-				skipped = append(skipped, [2]string{s.URL, s.Reason})
-			}
-			return p.Docs, skipped, true
-		},
+		payload: webPayload,
 	})
+}
+
+// webPayload reads the web connector's result. The web connector has no
+// classes of its own: a page that could not be fetched or read is one failure
+// kind to the bench, so every skip is an extractor error. The URL is reduced
+// to scheme and host in both the subject and the text, because a configured
+// URL may carry a token in its query.
+func webPayload(set *connector.SourceSet) ([]docmap.Doc, []docSkipped, bool) {
+	p := webconn.PayloadOf(set)
+	if p == nil {
+		return nil, nil, false
+	}
+	skipped := make([]docSkipped, 0, len(p.Skipped))
+	for _, s := range p.Skipped {
+		skipped = append(skipped, docSkipped{
+			subject: s.URL, reason: s.Reason,
+			skip: DocSkip{
+				Kind: connector.KindWeb, Subject: RedactURLs(s.URL), Class: upload.SkipExtractorError,
+				Raw: RedactURLs(firstLine(s.Reason)),
+			},
+		})
+	}
+	return p.Docs, skipped, true
+}
+
+// firstLine is the part of an error that belongs on one log line.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // routerFor maps module directories to their cache keys so a changed path is

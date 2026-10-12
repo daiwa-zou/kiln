@@ -52,6 +52,9 @@ type Store interface {
 	LoadSealedCredential(ctx context.Context, id string) (*store.SealedCredential, error)
 	InstallationServesWorkspace(ctx context.Context, workspaceID string, installationID int64) (bool, error)
 	ListFiles(ctx context.Context, workspaceID string) ([]store.FileRow, error)
+	// RecordFileSkips persists which uploads a sync could not read (and clears
+	// the ones it could), returning the paths whose skip is new.
+	RecordFileSkips(ctx context.Context, workspaceID string, skips []store.FileSkip, readPaths []string, at time.Time) ([]string, error)
 	LastSuccessfulRef(ctx context.Context, workspaceID string) (string, error)
 	WorkspaceBudgetUSD(ctx context.Context, workspaceID string) (*float64, error)
 	SpendInWindow(ctx context.Context, workspaceID string, window time.Duration) (float64, error)
@@ -302,7 +305,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		return
 	}
 
-	spec, connectors, cleanup, err := w.sourceSpec(ctx, run)
+	spec, connectors, staged, cleanup, err := w.sourceSpec(ctx, run)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -365,6 +368,7 @@ func (w *Worker) process(ctx context.Context, run *store.QueuedRun) {
 		Source:      spec,
 		Connectors:  connectors,
 		BaseRef:     baseRef,
+		OnDocSkips:  w.docSkipSink(run, connectors, spec.DocsDir, staged, log),
 	})
 	// The pipeline has recorded the run, so its row is no longer 'running' and
 	// a further beat would be refused as a lost claim -- canceling the publish
@@ -590,11 +594,14 @@ func findingsText(res *jobs.ResearchOutcome) string {
 // a connector uses that one; otherwise every enabled connector on the
 // workspace feeds the build, merged into one map like the CLI's --docs flag.
 // The returned SourceConnectors carries the id of every connector that fed
-// the build, for per-source attribution and sync bookkeeping; the cleanup
-// (possibly nil) removes any staging a remote clone materialized.
-func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.SourceSpec, jobs.SourceConnectors, func(), error) {
-	fail := func(err error) (jobs.SourceSpec, jobs.SourceConnectors, func(), error) {
-		return jobs.SourceSpec{}, jobs.SourceConnectors{}, nil, err
+// the build, for per-source attribution and sync bookkeeping; staged is the
+// sha256 of each uploaded file that was materialized from the blob store,
+// keyed by stored path, for the skip sink (nil when no upload connector is in
+// files mode); the cleanup (possibly nil) removes any staging a remote clone
+// materialized.
+func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.SourceSpec, jobs.SourceConnectors, map[string]string, func(), error) {
+	fail := func(err error) (jobs.SourceSpec, jobs.SourceConnectors, map[string]string, func(), error) {
+		return jobs.SourceSpec{}, jobs.SourceConnectors{}, nil, nil, err
 	}
 
 	var connectors []store.ConnectorRow
@@ -618,6 +625,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 
 	spec := jobs.SourceSpec{Slug: run.WorkspaceSlug}
 	var ids jobs.SourceConnectors
+	var staged map[string]string
 	// More than one connector can stage material (a remote clone and a
 	// blob-store materialization in the same run), so cleanups accumulate
 	// rather than occupy a single slot that a second stage would overwrite.
@@ -627,8 +635,8 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 			fn()
 		}
 	}
-	fail2 := func(err error) (jobs.SourceSpec, jobs.SourceConnectors, func(), error) {
-		return jobs.SourceSpec{}, jobs.SourceConnectors{}, cleanup, err
+	fail2 := func(err error) (jobs.SourceSpec, jobs.SourceConnectors, map[string]string, func(), error) {
+		return jobs.SourceSpec{}, jobs.SourceConnectors{}, nil, cleanup, err
 	}
 	for _, c := range connectors {
 		// Web connectors carry URLs, not paths: policy is enforced by the
@@ -652,13 +660,14 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 			if spec.DocsDir != "" {
 				return fail2(fmt.Errorf("workspace %s has multiple upload connectors; only one is supported", run.WorkspaceSlug))
 			}
-			dir, blobKeys, skipped, unreadable, clean, err := w.materializeFiles(ctx, run.WorkspaceID)
+			dir, blobKeys, skipped, unreadable, shas, clean, err := w.materializeFiles(ctx, run.WorkspaceID)
 			if clean != nil {
 				cleanups = append(cleanups, clean)
 			}
 			if err != nil {
 				return fail2(fmt.Errorf("connector %s (upload): %w", c.Name, err))
 			}
+			staged = shas
 			// Documents whose bytes are gone are an operational incident, not
 			// a decision anyone made. The build continues without them; the
 			// review queue is where the wiki asks its humans about exactly
@@ -720,7 +729,7 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 			return fail2(fmt.Errorf("connector %s has unsupported kind %q", c.Name, c.Kind))
 		}
 	}
-	return spec, ids, cleanup, nil
+	return spec, ids, staged, cleanup, nil
 }
 
 // materializeFiles stages every enabled workspace file from the blob store
@@ -731,26 +740,29 @@ func (w *Worker) sourceSpec(ctx context.Context, run *store.QueuedRun) (jobs.Sou
 // skipped lists the unit keys of files left out of this sync -- paused ones,
 // whose absence is deliberate, and unreadable ones, whose absence is an
 // incident. Both must be reported as skipped rather than missing, or the
-// deletion cascade would offer to delete their pages.
+// deletion cascade would offer to delete their pages. staged is the sha256
+// of each file that was staged, by stored path: a skip the extractor reports
+// is recorded against the bytes it read, not against whatever the row holds
+// by the time the sink runs.
 //
 // A blob that cannot be read does not fail the run. One unreadable document
 // is data loss for that document; failing the whole build would also stop the
 // repository, the web pages, and every other document from ingesting, turning
 // a storage incident into a total outage. The failure is returned so the
 // caller can surface it where humans look.
-func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir string, blobKeys map[string][]string, skipped []diff.Key, unreadable []string, cleanup func(), err error) {
+func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir string, blobKeys map[string][]string, skipped []diff.Key, unreadable []string, staged map[string]string, cleanup func(), err error) {
 	if w.Blobs == nil {
-		return "", nil, nil, nil, nil, fmt.Errorf(
+		return "", nil, nil, nil, nil, nil, fmt.Errorf(
 			"object storage is not configured on this worker; set storage.* (or give the connector a path under permitted_source_roots)")
 	}
 	files, err := w.Store.ListFiles(ctx, workspaceID)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 
 	dir, err = os.MkdirTemp("", "kiln-files-")
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	cleanup = func() { os.RemoveAll(dir) }
 	// Even though stored paths were sanitized at upload time, staging goes
@@ -758,11 +770,12 @@ func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir 
 	// staging directory.
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return dir, nil, nil, nil, cleanup, err
+		return dir, nil, nil, nil, nil, cleanup, err
 	}
 	defer root.Close()
 
 	blobKeys = make(map[string][]string, len(files))
+	staged = make(map[string]string, len(files))
 	for _, f := range files {
 		key := diff.DocKey(diff.UploadOrigin(f.Path))
 		if !f.Enabled {
@@ -774,15 +787,16 @@ func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (dir 
 			// draining, and every remaining file would "fail" the same way.
 			// Report it as the interruption it is.
 			if ctx.Err() != nil {
-				return dir, nil, nil, nil, cleanup, ctx.Err()
+				return dir, nil, nil, nil, nil, cleanup, ctx.Err()
 			}
 			unreadable = append(unreadable, f.Path)
 			skipped = append(skipped, key)
 			continue
 		}
 		blobKeys[string(key)] = append(blobKeys[string(key)], f.BlobKey)
+		staged[f.Path] = f.SHA256
 	}
-	return dir, blobKeys, skipped, unreadable, cleanup, nil
+	return dir, blobKeys, skipped, unreadable, staged, cleanup, nil
 }
 
 // reportUnreadableDocuments records a storage incident where an operator will
