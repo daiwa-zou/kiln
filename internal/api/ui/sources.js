@@ -53,6 +53,87 @@ function connectorSummary(c) {
   return "";
 }
 
+// plural renders a count with its noun: "1 page", "6 pages".
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+// ingestSummary tallies the Documents list by what the wiki did with each
+// upload, from the `ingest` member every file row carries: read, waiting for
+// the next ingest, or skipped. A paused file is counted as paused whatever
+// its status, and a paused skip is not "not read" -- the member chose that.
+// Computed here, from rows a member can already read, so the Documents stat
+// and header reconcile against Overview's count without a new endpoint.
+function ingestSummary(files) {
+  const n = { read: 0, waiting: 0, notRead: 0, paused: 0 };
+  for (const f of files || []) {
+    const status = f.ingest?.status;
+    const paused = f.enabled === false;
+    if (paused) n.paused++;
+    if (status === "read") n.read++;
+    else if (status === "waiting") n.waiting++;
+    else if (status === "skipped" && !paused) n.notRead++;
+  }
+  return n;
+}
+
+// ingestSummaryText is the summary as one line: "25 read · 1 waiting · 1 not
+// read · 2 paused", zero parts omitted. Empty when nothing is counted.
+function ingestSummaryText(n) {
+  const parts = [];
+  if (n.read) parts.push(`${n.read} read`);
+  if (n.waiting) parts.push(`${n.waiting} waiting`);
+  if (n.notRead) parts.push(`${n.notRead} not read`);
+  if (n.paused) parts.push(`${n.paused} paused`);
+  return parts.join(" · ");
+}
+
+// ingestChip is the status a document row carries beside its size: how many
+// pages a read produced (quiet -- it is the expected case), that it is
+// waiting for the next ingest, or that it was not read, in oxide. A paused
+// file keeps its paused chip and gets nothing here; the reason for a skip is
+// a line of its own under the path, not a hover. nextCheck, when given, is
+// the schedule line already on the page and becomes the waiting chip's title.
+function ingestChip(f, nextCheck = "") {
+  if (f.enabled === false) return "";
+  const ing = f.ingest || {};
+  switch (ing.status) {
+    case "read": {
+      const label = ing.pages ? plural(ing.pages, "page") : "read";
+      const title = ing.readAt ? ` title="${esc(`Read ${relTime(ing.readAt)}`)}"` : "";
+      return `<span class="chip"${title}>${esc(label)}</span>`;
+    }
+    case "waiting": {
+      const title = nextCheck ? ` title="${esc(nextCheck)}"` : "";
+      return `<span class="chip"${title}>Waiting for the next ingest</span>`;
+    }
+    case "skipped":
+      return `<span class="chip not-read">Not read</span>`;
+    default:
+      return "";
+  }
+}
+
+// attentionLine flags, above the Documents list, the uploads the last ingest
+// passed over -- the one state a member cannot otherwise tell from "read"
+// without opening each row. Names only: the reason sits on the row, so the
+// same fact is not said three times. Up to three names ride in the sentence;
+// more go beneath it as a list. Paused files are the member's own choice and
+// are left out.
+function attentionLine(files) {
+  const skipped = (files || []).filter((f) => f.enabled !== false && f.ingest?.status === "skipped");
+  if (!skipped.length) return "";
+  const names = skipped.map((f) => `${esc(f.name || String(f.path || "").split("/").pop())}`);
+  const n = skipped.length;
+  const lede = `${plural(n, "document")} ${n === 1 ? "was" : "were"} not read`;
+  if (n <= 3) {
+    return `<p class="hint ingest-attention">${lede}: ${
+      names.map((s) => `<span class="att-name">${s}</span>`).join(", ")}</p>`;
+  }
+  return `<div class="hint ingest-attention">${lede}<ul>${
+    names.map((s) => `<li>${s}</li>`).join("")}</ul></div>`;
+}
+
 // kilnFiring draws the one state this whole page exists to produce: a bench
 // being fired. "A build is running now" spent a sentence telling the reader
 // something the page could simply show them, so the kiln says it instead --
@@ -1045,17 +1126,27 @@ async function showSources() {
     // enabled, whether the last read failed, and when it happened. There is no
     // per-source unit count on the API, so the bar carries state rather than a
     // proportion -- full when a source is reading cleanly, empty when it is
-    // paused, oxide when the last read failed.
+    // paused, oxide when the last read failed. The upload source also knows
+    // how many of its documents are unread (waiting or skipped), and a run
+    // that finished without error has still not "read cleanly" while one is.
     const SRC_ICONS = { git: iconRepo, web: iconWeb, upload: iconDoc };
-    const connectorHealth = (c) => {
+    const connectorHealth = (c, unread = 0) => {
       if (!c.enabled) return { pct: 0, cls: "fill-soft", note: "Paused — skipped on ingest" };
       if (c.lastError) return { pct: 100, cls: "fill-err", note: "Last read failed" };
       if (!c.lastSynced) return { pct: 0, cls: "fill-soft", note: "Not read yet" };
+      if (unread > 0) return { pct: 100, cls: "fill-soft", note: "Some documents are unread; see below." };
       return { pct: 100, cls: "fill-ember", note: "Read cleanly" };
     };
 
+    // What the wiki did with each upload; read by the stat, the Documents
+    // header, the attention line and the upload source's bar below.
+    const summary = ingestSummary(files);
+    const summaryText = ingestSummaryText(summary);
+    const unreadDocs = summary.waiting + summary.notRead;
+    const nextBuild = nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0);
+
     const connectorRow = (c) => {
-      const h = connectorHealth(c);
+      const h = connectorHealth(c, c.kind === "upload" ? unreadDocs : 0);
       return `
       <div class="src-row" data-connector-row="${esc(c.id)}">
         <span class="src-icon kind-${esc(c.kind)}">${SRC_ICONS[c.kind] || iconDoc}</span>
@@ -1092,12 +1183,20 @@ async function showSources() {
             <strong>${esc(f.name || f.path.split("/").pop())}</strong>
             <span class="chip">${esc(humanBytes(f.size))}</span>
             ${f.enabled === false ? `<span class="chip">paused</span>` : ""}
+            ${ingestChip(f, runningNow(runs) ? "" : nextBuild)}
           </div>
           <!-- The filename it arrived as, kept where the path already was:
                the label above is derived, and the one question it cannot
                answer is "which upload is this" when someone is looking for the
                copy they replaced. -->
           <div class="src-where" title="${esc(f.path)}">${esc(f.path)}</div>
+          <!-- Why a skipped document was not read, in the API's own sentence.
+               It is text about a member's file and is always escaped; the
+               class token rides along so an operator can search the Log by
+               it. Paused files have said why already. -->
+          ${f.enabled !== false && f.ingest?.status === "skipped"
+            ? `<div class="hint src-reason" data-class="${esc(f.ingest?.class)}">${esc(f.ingest?.reason)}</div>`
+            : ""}
         </div>
         <span class="src-when">${timeTag(f.updated)}</span>
         <div class="src-tools">
@@ -1114,12 +1213,24 @@ async function showSources() {
     // window the API does not report, and the note says which -- a "7 days"
     // label over ten runs would be a number nothing measured.
     const spend = runs.reduce((n, r) => n + (Number(r.costUsd) || 0), 0);
-    const stat = (label, value, note) => `<div class="stat">
+    // A note is plain text unless the caller hands over markup it has already
+    // escaped: the Documents note carries a control.
+    const stat = (label, value, note, noteHTML = esc(note)) => `<div class="stat">
       <div class="stat-label">${esc(label)}</div>
       <div class="stat-value">${esc(value)}</div>
-      <div class="stat-note">${esc(note)}</div>
+      <div class="stat-note">${noteHTML}</div>
     </div>`;
     const liveSources = connectors.filter((c) => c.enabled).length;
+    // The Documents note is the summary a member reads first: what the wiki
+    // did with the uploads. Waiting is actionable, so the note ends with the
+    // way out -- the same Ingest now the header button queues -- or says a
+    // build is already on it.
+    let docsNote = esc(files.length ? summaryText || "uploaded to this bench" : "none uploaded yet");
+    if (summary.waiting) {
+      docsNote += buildActive
+        ? " · ingest in progress"
+        : ` · <button class="linkish" data-ingest-now>Ingest now</button>`;
+    }
 
     if (!view.done(`
       <div class="head-row">
@@ -1130,15 +1241,14 @@ async function showSources() {
             title="${buildActive ? "An ingest is already queued or running" : "Ingest now"}">${iconIngest}Ingest now</button>
         </div>
       </div>
-      <p class="head-note" id="next-build">${runningNow(runs)
-        || esc(nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0))}</p>
+      <p class="head-note" id="next-build">${runningNow(runs) || esc(nextBuild)}</p>
       <div class="meta"><span class="hint" id="sources-build-note" role="status"></span></div>
 
       <div class="stats n4">
         ${stat("Pages", String(state.pages.length), "in this bench's wiki")}
         ${stat("Sources", String(canAdmin ? connectors.length : "—"),
           canAdmin ? `${liveSources} enabled` : "needs an owner to see")}
-        ${stat("Documents", String(files.length), files.length ? "uploaded to this bench" : "none uploaded yet")}
+        ${stat("Documents", String(files.length), "", docsNote)}
         ${stat("Spend", `$${spend.toFixed(2)}`,
           runs.length ? `across the last ${runs.length} run${runs.length === 1 ? "" : "s"}` : "no queued runs")}
       </div>
@@ -1159,10 +1269,12 @@ async function showSources() {
 
       <div class="sec-head">
         <div class="group-label">Documents</div>
+        ${summaryText ? `<span class="gloss">${files.length} · ${esc(summaryText)}</span>` : ""}
         <span class="gloss">— uploaded straight from this browser${
           uploadConn && !uploadConn.enabled ? "; paused, so skipped on ingest" : ""}</span>
       </div>
       <div id="upload-progress" class="hint" role="status"></div>
+      ${attentionLine(files)}
       <div class="card rows" id="file-drop" role="region" aria-label="Uploaded documents; drop files to add more">
         ${filesErr ? `<div class="empty card-empty">${esc(filesErr)}</div>`
           : files.map(fileRow).join("") ||
@@ -1216,6 +1328,12 @@ async function showSources() {
         if (!err.handled) buildNote(err.message, true);
       }
     });
+    // The Documents note's "Ingest now" is the same action, not a second
+    // enqueue path: it presses the header button, whose handler owns the
+    // disabled state and the refresh.
+    for (const b of document.querySelectorAll("[data-ingest-now]")) {
+      b.addEventListener("click", () => buildBtn?.click());
+    }
 
     // ---- connector actions --------------------------------------------------
     const connNote = (msg, isErr) => {
@@ -1450,7 +1568,9 @@ async function showGetStarted() {
           <p><strong>Web pages</strong> — https addresses fetched and folded in,
           re-checked on a schedule.</p>
           <p><strong>Documents</strong> — PDFs, Office files, markdown, and HTML
-          uploaded from your browser.</p>
+          uploaded from your browser. Each one then says whether the wiki has
+          read it, is waiting for the next ingest to read it, or did not read
+          it and why.</p>
           <p class="hint">All three fire into one wiki whose pages link across
           the boundary.</p>
         </div>
