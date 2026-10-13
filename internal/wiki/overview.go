@@ -221,9 +221,13 @@ func uploadsReadPhrase(in OverviewInput) string {
 }
 
 // uploadsListPhrase is the "What this bench reads" line for uploads when the
-// build skipped some: the lede's phrase plus how many were not read.
+// build skipped some. It leads with the count that was read and keeps the
+// rest as one label, because the Overview page cuts each bullet into a tile
+// whose value is the leading number and whose label is everything after it:
+// the lede's "N of M" order would put "of M ..." in the label over a bare N.
 func uploadsListPhrase(in OverviewInput) string {
-	return fmt.Sprintf("%s; %d not read", uploadsReadPhrase(in), in.UploadsSkipped)
+	return fmt.Sprintf("%s read; %d of %d not read",
+		plural(in.UploadsStaged-in.UploadsSkipped, "uploaded document"), in.UploadsSkipped, in.UploadsStaged)
 }
 
 // uploadCount is how many uploaded units the build was compiled from, by the

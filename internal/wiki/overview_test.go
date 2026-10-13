@@ -140,7 +140,7 @@ func TestOverviewReadsListReconcilesSkippedUploads(t *testing.T) {
 		UploadsStaged:  28,
 		UploadsSkipped: 1,
 	})
-	if !strings.Contains(skipped, "## What this bench reads\n\n- 2 code modules\n- 27 of 28 uploaded documents; 1 not read\n") {
+	if !strings.Contains(skipped, "## What this bench reads\n\n- 2 code modules\n- 27 uploaded documents read; 1 of 28 not read\n") {
 		t.Errorf("reads list does not account for the skipped document:\n%s", skipped)
 	}
 
@@ -151,7 +151,7 @@ func TestOverviewReadsListReconcilesSkippedUploads(t *testing.T) {
 		UploadsStaged:  28,
 		UploadsSkipped: 2,
 	})
-	if !strings.Contains(sectioned, "- 26 of 28 uploaded documents; 2 not read\n") || strings.Contains(sectioned, "31 uploaded") {
+	if !strings.Contains(sectioned, "- 26 uploaded documents read; 2 of 28 not read\n") || strings.Contains(sectioned, "31 uploaded") {
 		t.Errorf("reads list counts units rather than documents:\n%s", sectioned)
 	}
 
@@ -162,7 +162,7 @@ func TestOverviewReadsListReconcilesSkippedUploads(t *testing.T) {
 		UploadsStaged:  1,
 		UploadsSkipped: 1,
 	})
-	if !strings.Contains(allSkipped, "## What this bench reads\n\n- 0 of 1 uploaded document; 1 not read\n") {
+	if !strings.Contains(allSkipped, "## What this bench reads\n\n- 0 uploaded documents read; 1 of 1 not read\n") {
 		t.Errorf("reads list is silent about a bench whose one upload was skipped:\n%s", allSkipped)
 	}
 
