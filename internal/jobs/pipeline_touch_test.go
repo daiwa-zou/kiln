@@ -10,31 +10,45 @@ import (
 	"github.com/daiwa-zou/kiln/internal/mapper"
 )
 
-// twoModuleRequest is a build in which the ripple unit hashes as it did last
-// run and the eddy unit does not: one for the gate to drop, one to regenerate.
+// notesKey is the uploaded document the gate drops in twoModuleRequest.
+var notesKey = diff.DocKey(diff.UploadOrigin("notes.md"))
+
+// twoModuleRequest is a build in which the ripple unit and an uploaded
+// document (with a section) hash as they did last run and the eddy unit does
+// not: three for the gate to drop, one to regenerate.
 func twoModuleRequest(t *testing.T, store *memStore, runner *scriptedRunner) BuildRequest {
 	t.Helper()
 	store.sources[diff.ModuleKey("ripple")] = diff.SourceRecord{
 		Key: diff.ModuleKey("ripple"), InputHash: "hash-v1", FilesWritten: []string{"entities/ripple.md"},
 	}
 	store.sources[diff.ModuleKey("eddy")] = diff.SourceRecord{Key: diff.ModuleKey("eddy"), InputHash: "hash-v1"}
+	store.sources[notesKey] = diff.SourceRecord{Key: notesKey, InputHash: "hash-v1", FilesWritten: []string{"sources/notes.md"}}
+	store.sources[notesKey+"#intro"] = diff.SourceRecord{Key: notesKey + "#intro", InputHash: "hash-v1"}
 	runner.filesByAttempt[0] = map[string]string{"entities/eddy.md": validPage("entity", "Eddy")}
 
 	m := testMap(
 		mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "hash-v1"},
 		mapper.Unit{Key: "module:eddy", Slug: "eddy", Hash: "hash-v2"},
+		mapper.Unit{Key: string(notesKey), Slug: "notes", Hash: "hash-v1"},
+		mapper.Unit{Key: string(notesKey) + "#intro", Slug: "notes-intro", Hash: "hash-v1"},
 	)
 	req := testRequest(t, m, diff.ChangeSet{Changes: []diff.Change{
 		{Path: "apps/ripple/main.go", Kind: diff.Modified},
 		{Path: "apps/eddy/main.go", Kind: diff.Modified},
+		{Path: diff.UploadOrigin("notes.md"), Kind: diff.Modified},
 	}})
 	req.Router.ModuleDirs["apps/eddy"] = diff.ModuleKey("eddy")
+	req.Router.DocPaths = map[string]diff.Key{diff.UploadOrigin("notes.md"): notesKey}
+	req.Router.DocSections = map[diff.Key][]diff.Key{notesKey: {notesKey + "#intro"}}
 	return req
 }
 
-// A unit the gate drops was read and found unchanged; that is recorded on its
-// source, because the per-document ingest status reads fetched_at and nothing
-// else would move it. A unit that regenerates is stamped by its own import.
+// An uploaded document the gate drops was read and found unchanged; that is
+// recorded on its source, because the per-document ingest status reads
+// fetched_at and nothing else would move it. Only the document's own key is
+// stamped: the Ingest page joins on it alone, so the module and the section
+// the gate dropped beside it would be rewritten for no reader. A unit that
+// regenerates is stamped by its own import.
 func TestBuildStampsUnitsTheGateDroppedAsRead(t *testing.T) {
 	store := newMemStore()
 	runner := newScriptedRunner()
@@ -47,8 +61,8 @@ func TestBuildStampsUnitsTheGateDroppedAsRead(t *testing.T) {
 	if res.Summary.Status != StatusSucceeded {
 		t.Fatalf("Status = %q, want succeeded (violations: %v)", res.Summary.Status, res.Violations)
 	}
-	if want := [][]string{{"module:ripple"}}; !reflect.DeepEqual(store.touched, want) {
-		t.Errorf("TouchSources calls = %v, want %v: the dropped unit once, the regenerated one never", store.touched, want)
+	if want := [][]string{{string(notesKey)}}; !reflect.DeepEqual(store.touched, want) {
+		t.Errorf("TouchSources calls = %v, want %v: the dropped document once, not its section, not the module, not the regenerated unit", store.touched, want)
 	}
 	// The regenerated unit's source is written by the import, as before.
 	if imp := store.lastImport(); imp == nil || len(imp.UpsertSources) != 1 || imp.UpsertSources[0].Key != diff.ModuleKey("eddy") {

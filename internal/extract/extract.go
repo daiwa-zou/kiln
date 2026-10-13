@@ -50,7 +50,7 @@ var ErrToolMissing = errors.New("extract: required tool is not installed")
 // A sentinel rather than prose so a caller classifying the failure (the
 // upload connector's skip class) checks it with errors.Is instead of matching
 // the message, which a rewording would silently break.
-var ErrTimedOut = errors.New("extraction timed out")
+var ErrTimedOut = errors.New("extract: converter timed out")
 
 // Result is extracted content plus how it was produced.
 type Result struct {
@@ -311,7 +311,7 @@ func runTool(ctx context.Context, binary string, timeout time.Duration, args ...
 	}
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("%s timed out after %s: %w", binary, timeout, ErrTimedOut)
+			return "", fmt.Errorf("%s: %w after %s", binary, ErrTimedOut, timeout)
 		}
 		return "", fmt.Errorf("%s: %w (%s)", binary, err, truncate(stderr.String(), 200))
 	}

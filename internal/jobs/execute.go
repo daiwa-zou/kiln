@@ -108,10 +108,12 @@ type ExecuteRequest struct {
 // narrated for a person.
 //
 // Raw is the extractor's own text and is about a user's file: it is for an
-// operator log after sanitising, never for persistence or a prompt. Class is
-// the fact to persist. Subject for a fetched page is reduced to scheme and
-// host, so a query string or userinfo in a configured URL never leaves the
-// connector.
+// operator log after the sink has sanitised it, never for persistence or a
+// prompt. It is handed on as the connector wrote it (first line only) so the
+// sink is the one owner of what a log line may carry; a second pass here
+// would be a second place to keep right. Class is the fact to persist.
+// Subject for a fetched page is reduced to scheme and host, so a query string
+// or userinfo in a configured URL never leaves the connector.
 type DocSkip struct {
 	// Kind is the connector that skipped it: connector.KindUpload or
 	// connector.KindWeb.
@@ -121,8 +123,7 @@ type DocSkip struct {
 	Subject string
 	// Class is one of the upload package's Skip* tokens.
 	Class string
-	// Raw is the first line of the reason, with URLs reduced to scheme and
-	// host.
+	// Raw is the first line of the reason, as the connector wrote it.
 	Raw string
 	// Partial marks a document that was ingested with something missing
 	// (its figures); it still produced a page.
@@ -205,6 +206,11 @@ type material struct {
 	// ExecuteRequest.OnDocSkips. Already reduced to what a sink should hear
 	// (see deliverableSkips).
 	Skips []DocSkip
+
+	// UploadsStaged and UploadsSkipped count the uploaded documents the sync
+	// listed and the ones among them it could not read, for the overview's
+	// lede (BuildRequest.UploadsStaged). Zero without a documents directory.
+	UploadsStaged, UploadsSkipped int
 
 	staging []string
 }
@@ -291,6 +297,11 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 		if err := m.absorb(src.Path, doc); err != nil {
 			return fail(err)
 		}
+		// Every document listed was either read or skipped (a partial skip
+		// still produced a page and is not in Skips), so the two sum to what
+		// the sync saw.
+		m.UploadsSkipped = len(doc.Skips)
+		m.UploadsStaged = doc.Docs + len(doc.Skips)
 	}
 
 	// Web pages merge the same way: a third source kind, one wiki.
@@ -428,6 +439,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		SourceDir:        req.Source.Path,
 		BlobKeys:         req.Source.BlobKeys,
 		SkippedKeys:      req.Source.SkippedKeys,
+		UploadsStaged:    mat.UploadsStaged,
+		UploadsSkipped:   mat.UploadsSkipped,
 		Map:              wm,
 		DocumentNames:    mat.DocNames,
 		Figures:          mat.Figures,
@@ -491,6 +504,9 @@ type docSync struct {
 	// sink should hear (deliverableSkips). The same skips were narrated to the
 	// progress writer in full.
 	Skips []DocSkip
+	// Docs counts the documents that were read and mapped, each once however
+	// many section units it became.
+	Docs int
 }
 
 // syncDocSource ingests documents through one connector and maps them with
@@ -535,6 +551,7 @@ func syncDocSource(ctx context.Context, out io.Writer, src docSource) (res docSy
 		fmt.Fprintf(out, "  skipped %s: %s\n", s.subject, s.reason)
 	}
 	res.Skips = deliverableSkips(skipped, docs)
+	res.Docs = len(docs)
 
 	// Routes are keyed by the namespaced origin, the same namespace the
 	// connector keys the source cache with, so an ingested document can never
@@ -580,8 +597,9 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (docSync, error) {
 }
 
 // uploadPayload reads the upload connector's result. The skip's Raw is the
-// whole reason: an extractor names the file it failed on, and that path is
-// the staging directory's, which is the sink's to strip.
+// reason's first line, unredacted: an extractor names the file it failed on,
+// and that path is the staging directory's, which is the sink's to strip
+// along with anything else a log must not carry.
 func uploadPayload(set *connector.SourceSet) ([]docmap.Doc, []docSkipped, bool) {
 	p := upload.PayloadOf(set)
 	if p == nil {
@@ -593,7 +611,7 @@ func uploadPayload(set *connector.SourceSet) ([]docmap.Doc, []docSkipped, bool) 
 			subject: s.Path, reason: s.Reason,
 			skip: DocSkip{
 				Kind: connector.KindUpload, Subject: s.Path, Class: s.Class,
-				Raw: RedactURLs(firstLine(s.Reason)), Partial: s.Partial,
+				Raw: firstLine(s.Reason), Partial: s.Partial,
 			},
 		})
 	}
@@ -616,8 +634,8 @@ func syncWeb(ctx context.Context, out io.Writer, urls []string) (docSync, error)
 // webPayload reads the web connector's result. The web connector has no
 // classes of its own: a page that could not be fetched or read is one failure
 // kind to the bench, so every skip is an extractor error. The URL is reduced
-// to scheme and host in both the subject and the text, because a configured
-// URL may carry a token in its query.
+// to scheme and host in the subject, because a configured URL may carry a
+// token in its query; the text is the sink's to redact, like every Raw.
 func webPayload(set *connector.SourceSet) ([]docmap.Doc, []docSkipped, bool) {
 	p := webconn.PayloadOf(set)
 	if p == nil {
@@ -629,7 +647,7 @@ func webPayload(set *connector.SourceSet) ([]docmap.Doc, []docSkipped, bool) {
 			subject: s.URL, reason: s.Reason,
 			skip: DocSkip{
 				Kind: connector.KindWeb, Subject: RedactURLs(s.URL), Class: upload.SkipExtractorError,
-				Raw: RedactURLs(firstLine(s.Reason)),
+				Raw: firstLine(s.Reason),
 			},
 		})
 	}

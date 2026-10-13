@@ -71,6 +71,66 @@ func TestOverviewLedeQualifiesTheDocumentCountOnlyWithUploads(t *testing.T) {
 	}
 }
 
+// When the build skipped an upload, the gap between the lede's count and the
+// Ingest list is that document, not a later upload, so the lede says so: how
+// many of the documents it was handed went in, and that the rest could not be
+// read. The after-this-build clause stays, because it is also still true.
+func TestOverviewLedeSaysWhatCouldNotBeRead(t *testing.T) {
+	skipped := BuildOverview(samplePages(), OverviewInput{
+		Workspace:      "w",
+		Date:           "2026-07-25",
+		BuiltAt:        "2026-07-25 09:42 UTC",
+		Sources:        []SourceTally{{Kind: "doc:upload", Count: 27}},
+		UploadsStaged:  28,
+		UploadsSkipped: 1,
+	})
+	want := "compiled from 27 of 28 uploaded documents; 1 could not be read (see Ingest). " +
+		"9 pages, last built 2026-07-25 09:42 UTC; documents uploaded after this build are not counted."
+	if !strings.Contains(skipped, want) {
+		t.Errorf("lede does not account for the skipped document:\n%s", skipped)
+	}
+
+	// The phrase is about documents, so it comes from the build's counts even
+	// where the tally (which counts a long document's sections too) differs.
+	sectioned := BuildOverview(samplePages(), OverviewInput{
+		Workspace:      "w",
+		Date:           "2026-07-25",
+		Sources:        []SourceTally{{Kind: "module", Count: 2}, {Kind: "doc:upload", Count: 31}},
+		UploadsStaged:  28,
+		UploadsSkipped: 2,
+	})
+	if !strings.Contains(sectioned, "compiled from 2 code modules and 26 of 28 uploaded documents; 2 could not be read (see Ingest).") {
+		t.Errorf("lede counts units rather than documents:\n%s", sectioned)
+	}
+
+	// A bench whose only upload was skipped has no upload tally at all, and
+	// the lede still says what happened to it.
+	allSkipped := BuildOverview(nil, OverviewInput{
+		Workspace:      "w",
+		Date:           "2026-07-25",
+		UploadsStaged:  1,
+		UploadsSkipped: 1,
+	})
+	if !strings.Contains(allSkipped, "compiled from 0 of 1 uploaded document; 1 could not be read (see Ingest). "+
+		"Last built 2026-07-25; documents uploaded after this build are not counted.") {
+		t.Errorf("lede is silent about a bench whose one upload was skipped:\n%s", allSkipped)
+	}
+
+	// Nothing skipped: the plain tally, as before.
+	plain := BuildOverview(samplePages(), OverviewInput{
+		Workspace:     "w",
+		Date:          "2026-07-25",
+		Sources:       []SourceTally{{Kind: "doc:upload", Count: 27}},
+		UploadsStaged: 27,
+	})
+	if !strings.Contains(plain, "compiled from 27 uploaded documents. 9 pages, last built 2026-07-25; documents uploaded after this build are not counted.") {
+		t.Errorf("a build that skipped nothing changed the lede:\n%s", plain)
+	}
+	if strings.Contains(plain, "could not be read") {
+		t.Errorf("a build that skipped nothing claims a skip:\n%s", plain)
+	}
+}
+
 func TestOverviewLedeReportsBuildTimeToTheMinute(t *testing.T) {
 	// A bench rebuilt three times in a morning said "last built" the same way
 	// all three times, which is the one question the line exists to answer.

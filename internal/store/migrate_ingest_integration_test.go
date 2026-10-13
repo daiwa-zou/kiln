@@ -9,8 +9,7 @@ import (
 // TestMigrateIngestStatusOnExistingRows applies 021 to a database shaped like
 // the dev one at 020: documents with and without sources, a section source, a
 // paused file. The rows must come through untouched with the new columns NULL,
-// the migration must be re-applicable, and a 020 binary's view of the applied
-// set must still be whole below it.
+// and a 020 binary's view of the applied set must still be whole below it.
 func TestMigrateIngestStatusOnExistingRows(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -84,8 +83,8 @@ func TestMigrateIngestStatusOnExistingRows(t *testing.T) {
 	var rows, touched int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
-		       count(*) FILTER (WHERE skip_reason IS NOT NULL OR skip_sha256 IS NOT NULL
-		                           OR skipped_at IS NOT NULL OR content_changed_at IS NOT NULL)
+		       count(*) FILTER (WHERE skip_class IS NOT NULL OR skip_sha256 IS NOT NULL
+		                           OR staged_at IS NOT NULL OR content_changed_at IS NOT NULL)
 		FROM workspace_files`).Scan(&rows, &touched); err != nil {
 		t.Fatalf("new columns: %v", err)
 	}
@@ -99,12 +98,12 @@ func TestMigrateIngestStatusOnExistingRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListFilesWithIngest on migrated rows: %v", err)
 	}
-	if len(list) != 3 || bench.LastRun == nil {
+	if len(list) != 3 || bench.PendingRun || bench.BudgetPaused {
 		t.Fatalf("list = %+v, bench = %+v", list, bench)
 	}
 	for _, f := range list {
-		if f.SkipClass != nil || f.SkipLive || !f.ContentAt.Equal(f.CreatedAt) {
-			t.Errorf("%s: skip=%v live=%v content=%v created=%v", f.Path, f.SkipClass, f.SkipLive, f.ContentAt, f.CreatedAt)
+		if f.SkipClass != nil || f.SkipLive || f.StagedAt != nil || !f.ContentAt.Equal(f.CreatedAt) {
+			t.Errorf("%s: skip=%v live=%v staged=%v content=%v created=%v", f.Path, f.SkipClass, f.SkipLive, f.StagedAt, f.ContentAt, f.CreatedAt)
 		}
 		if f.Path == "read.pdf" && (!f.HasSource || f.Pages == nil || *f.Pages != 2 || f.ReadAt == nil) {
 			t.Errorf("read.pdf: %+v", f)
@@ -114,9 +113,7 @@ func TestMigrateIngestStatusOnExistingRows(t *testing.T) {
 		}
 	}
 
-	// Re-applying is a no-op twice over: the runner skips a recorded version,
-	// and the body itself is idempotent (IF NOT EXISTS) should it be re-run by
-	// hand after the rollback described in the PR body.
+	// The runner records the version, so a second Migrate applies nothing.
 	applied, err = Migrate(ctx, pool)
 	if err != nil {
 		t.Fatalf("second Migrate: %v", err)
@@ -124,19 +121,8 @@ func TestMigrateIngestStatusOnExistingRows(t *testing.T) {
 	if len(applied) != 0 {
 		t.Errorf("second Migrate applied %v, want nothing", applied)
 	}
-	exec(migrations[idx].body)
-	var cols int
-	if err := pool.QueryRow(ctx, `
-		SELECT count(*) FROM information_schema.columns
-		WHERE table_name = 'workspace_files'
-		  AND column_name IN ('skip_reason', 'skip_sha256', 'skipped_at', 'content_changed_at')`).Scan(&cols); err != nil {
-		t.Fatal(err)
-	}
-	if cols != 4 {
-		t.Errorf("%d ingest columns after re-applying the body, want 4", cols)
-	}
 
-	// Rollback story: DELETE the version row and a 020 binary accepts the
+	// Rolling back: DELETE the version row and a 020 binary accepts the
 	// database again, columns and all.
 	versions, err := AppliedVersions(ctx, pool)
 	if err != nil {

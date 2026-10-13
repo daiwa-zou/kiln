@@ -36,11 +36,11 @@ func TestFilesListIngestThroughTheStore(t *testing.T) {
 	      VALUES ($1, 'doc:upload:read.md', 'doc', 'h1', '["sources/read.md", "concepts/shared.md"]', now()),
 	             ($1, 'doc:upload:read.md#intro', 'doc', 'h2', '["sources/read-intro.md", "concepts/shared.md"]', now())`, wsID)
 	// What the worker's sink records: a class token against the current bytes.
-	exec(`UPDATE workspace_files SET skip_reason = 'no_text', skip_sha256 = sha256, skipped_at = now()
+	exec(`UPDATE workspace_files SET skip_class = 'no_text', skip_sha256 = sha256, staged_at = now()
 	      WHERE workspace_id = $1 AND path = 'scan.pdf'`, wsID)
-	// A token the allow-list never produced, with characters JSON must escape:
+	// A token the connector never produces, with characters JSON must escape:
 	// the API echoes it as a string and falls back to the generic sentence.
-	exec(`UPDATE workspace_files SET skip_reason = $2, skip_sha256 = sha256, skipped_at = now()
+	exec(`UPDATE workspace_files SET skip_class = $2, skip_sha256 = sha256, staged_at = now()
 	      WHERE workspace_id = $1 AND path = 'odd.pdf'`, wsID, "<b>&\n\"odd\"")
 
 	type ingest struct {
@@ -87,9 +87,9 @@ func TestFilesListIngestThroughTheStore(t *testing.T) {
 		t.Errorf("later.md = %+v, want waiting with nulls", r)
 	}
 
-	// A build that began after the upload and read nothing of it: passed over,
-	// cause unrecorded. The read document is unaffected.
-	exec(`INSERT INTO runs (workspace_id, trigger, status, started_at) VALUES ($1, 'manual', 'succeeded', now())`, wsID)
+	// A build staged the upload and read nothing of it: passed over, cause
+	// unrecorded. The read document is unaffected.
+	exec(`UPDATE workspace_files SET staged_at = now() WHERE workspace_id = $1 AND path = 'later.md'`, wsID)
 	memberBody, got := list("kiln_valid")
 	if r := got["later.md"]; r.Status != "skipped" || r.Reason == nil || *r.Reason != skipSentenceUnrecorded || r.Class != nil {
 		t.Errorf("later.md after a build = %+v, want skipped with the unrecorded sentence and a null class", r)

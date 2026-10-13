@@ -125,6 +125,14 @@ type BuildRequest struct {
 	// pass over them and their section children.
 	SkippedKeys []diff.Key
 
+	// UploadsStaged counts the uploaded documents this run's sync listed, and
+	// UploadsSkipped the ones among them it could not read (a scan, a missing
+	// extractor). The overview reads "N of M uploaded documents" from them
+	// when something was skipped, so a reader who compares it with the Ingest
+	// list is told why the two differ. Both zero when the run synced no
+	// uploads.
+	UploadsStaged, UploadsSkipped int
+
 	// WorkspaceSlug names the bench for anything a human reads. WorkspaceID is
 	// a UUID, and putting it on the overview -- the first page anyone opens --
 	// labelled the wiki with a string that identifies nothing to its reader.
@@ -255,11 +263,11 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		// unchanged. Recording that is what keeps a re-uploaded document whose
 		// text did not change counted as read; a dry run reads nothing of
 		// record, and research never reaches the gate (it has its own Run).
-		if !req.DryRun && len(unchanged) > 0 {
-			keys := make([]string, len(unchanged))
-			for i, k := range unchanged {
-				keys[i] = string(k)
-			}
+		// Only an uploaded document's own key is stamped: the Ingest page is
+		// its one reader, and it joins on the document key, so stamping every
+		// module, page and section the gate dropped would rewrite rows on
+		// every poll for nobody.
+		if keys := uploadDocKeys(unchanged); !req.DryRun && len(keys) > 0 {
 			if err := p.Store.TouchSources(ctx, req.WorkspaceID, keys, now); err != nil {
 				// Not fatal: the pages are current whether or not the stamp
 				// landed, and the Ingest page falls back to the last run.
@@ -408,6 +416,9 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		BuiltAt:   now.Format(wiki.StampFormat),
 		Narrative: findings,
 		Sources:   sourceTallies(req.Map, sources, cascade.DropSources, req.SyncedNamespaces),
+
+		UploadsStaged:  req.UploadsStaged,
+		UploadsSkipped: req.UploadsSkipped,
 	})
 
 	created, updated := countChanges(pages, written)
@@ -496,7 +507,7 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 	}
 	units := unitsByKey(m)
 
-	out := make([]diff.Key, 0, len(dirty))
+	kept = make([]diff.Key, 0, len(dirty))
 	for _, k := range dirty {
 		var hash string
 		if k == diff.ArchOverview {
@@ -515,12 +526,25 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 		}
 		// No hash means no basis for skipping: regenerate.
 		if hash == "" || prior[k] != hash {
-			out = append(out, k)
+			kept = append(kept, k)
 		} else {
 			unchanged = append(unchanged, k)
 		}
 	}
-	return out, unchanged
+	return kept, unchanged
+}
+
+// uploadDocKeys keeps the keys of uploaded documents themselves: the upload
+// namespace, without the section units ('doc:upload:<path>#<section>'), whose
+// parent is always among the keys when they are.
+func uploadDocKeys(keys []diff.Key) []string {
+	var out []string
+	for _, k := range keys {
+		if diff.Namespace(k) == diff.NamespaceUpload && !strings.Contains(string(k), "#") {
+			out = append(out, string(k))
+		}
+	}
+	return out
 }
 
 // unitResult is one unit's outcome. A struct rather than a long return list:

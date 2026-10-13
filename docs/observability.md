@@ -94,8 +94,8 @@ them.
 
 `kiln_documents_skipped_total` counts documents a sync could not read: `kind`
 is `upload` or `web`, and `class` is one of `no_text`, `extractor_missing`,
-`unsupported_type`, `timed_out` and `extractor_error`, drawn from an
-allow-list so the label set stays bounded. A steady `no_text` rate is users
+`unsupported_type`, `timed_out`, `extractor_error` and `hidden_path`, drawn
+from an allow-list so the label set stays bounded. A steady `no_text` rate is users
 uploading scans; `extractor_missing` on a fresh deployment is an image missing
 a tool. The worker's log names each skipped file with its run, workspace and
 class, and for uploads the skip is also recorded on the file row, which is what

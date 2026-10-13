@@ -308,9 +308,10 @@ const VIEW_HELP = {
       across the boundary rather than forming separate wikis.</p>
       <p>Each ingest regenerates only the pages whose sources changed — an
       unchanged bench costs nothing. Runs execute one at a time per bench.</p>
-      <p>Each uploaded document says whether the wiki has <em>read</em> it and
-      how many pages that produced, is <em>waiting</em> for the next ingest to
-      read it, or did <em>not read</em> it, with the reason on the row.</p>
+      <p>Each uploaded document shows one of three states: <em>read</em> (and
+      how many pages it produced), <em>waiting</em> for the next ingest, or
+      <em>not read</em>, with the reason on its row. Paused documents are left
+      out.</p>
       <p>Pausing a source skips it on the next ingest without touching the pages
       it already produced.</p>`,
   },

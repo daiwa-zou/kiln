@@ -5,18 +5,23 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/daiwa-zou/kiln/internal/diff"
 )
 
-// uploadDocKeyPrefix is what the SQL in this file and in SetFileEnabled spells
-// out as 'doc:upload:' || path: the sources key of an uploaded document. It
-// must equal diff.DocKey(diff.UploadOrigin(path)) for every path, or the join
-// quietly reports every document unread; fileingest_test.go pins the parity.
-const uploadDocKeyPrefix = "doc:upload:"
+// uploadDocKeyPrefix is the sources key of an uploaded document with the path
+// left off. SQL that joins workspace_files to sources binds it as a parameter
+// and appends the path, so the key is spelled by diff alone and the join can
+// not drift from the producers; fileingest_test.go pins that appending the
+// path is all diff does.
+var uploadDocKeyPrefix = string(diff.DocKey(diff.UploadOrigin("")))
 
 // FileSkip is one document the sync could not read: the path and sha256 of
 // the bytes that were staged, and the class token that says why (no_text,
-// extractor_missing, ...). Class is a token from the worker's allow-list, never
-// extractor text; the column's CHECK caps it at 40 characters.
+// extractor_missing, ...). Class is one of the upload connector's closed set
+// (upload.SkipClasses), never extractor text; the column's CHECK caps it at
+// 40 characters and left() below keeps a stray long token from failing the
+// batch.
 type FileSkip struct {
 	Path   string
 	SHA256 string
@@ -44,21 +49,25 @@ func sortFileSkips(skips []FileSkip) []FileSkip {
 	return out
 }
 
-// RecordFileSkips persists what a sync could not read and clears what it
-// could. skips are set on the file rows whose sha256 still matches the staged
-// bytes, so a file replaced during the build is left alone (its skip would
-// describe bytes that are gone; it reads as waiting). readPaths are the
-// documents the same sync did read: their stale skips are cleared, and nothing
-// else is, so a paused file keeps the skip it earned before the pause. A path
-// in both lists was skipped: the clear leaves it alone rather than undoing the
-// skip just written and reporting it changed.
+// RecordFileSkips records what one sync did with the bench's uploads: staged
+// is every file it materialized (path to the sha256 of the bytes it staged),
+// skips the ones it could not read. One transaction, three statements:
+//
+//   - staged_at = at on every staged row whose sha256 still matches, so a
+//     file replaced while the build ran is left alone (the stamp would claim a
+//     build saw bytes it never had; it reads as waiting instead);
+//   - the skip on the skipped rows, sha-guarded the same way;
+//   - the skip cleared on the staged rows that were not skipped: the sync read
+//     them, so a skip an earlier build recorded is stale. Nothing else is
+//     cleared, so a paused file keeps the skip it earned before the pause, and
+//     a skipped path is never cleared by the statement that follows its write.
 //
 // Repeating a skip is a no-op (updated_at is never touched here: the Ingest
 // list sorts on it). changed lists the paths whose skip was set or replaced,
 // so the caller can log a new skip louder than a repeat.
-func (s *WikiStore) RecordFileSkips(ctx context.Context, workspaceID string, skips []FileSkip, readPaths []string, at time.Time) (changed []string, err error) {
+func (s *WikiStore) RecordFileSkips(ctx context.Context, workspaceID string, skips []FileSkip, staged map[string]string, at time.Time) (changed []string, err error) {
 	skips = sortFileSkips(skips)
-	if len(skips) == 0 && len(readPaths) == 0 {
+	if len(skips) == 0 && len(staged) == 0 {
 		return nil, nil
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -67,6 +76,33 @@ func (s *WikiStore) RecordFileSkips(ctx context.Context, workspaceID string, ski
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
+	skipped := make(map[string]bool, len(skips))
+	for _, sk := range skips {
+		skipped[sk.Path] = true
+	}
+	var stagedPaths, stagedSHAs, readPaths []string
+	for p := range staged {
+		stagedPaths = append(stagedPaths, p)
+		if !skipped[p] {
+			readPaths = append(readPaths, p)
+		}
+	}
+	sort.Strings(stagedPaths)
+	sort.Strings(readPaths)
+	for _, p := range stagedPaths {
+		stagedSHAs = append(stagedSHAs, staged[p])
+	}
+
+	if len(stagedPaths) > 0 {
+		if _, err := tx.Exec(ctx, `
+			UPDATE workspace_files f
+			SET staged_at = $4
+			FROM unnest($2::text[], $3::text[]) AS v(path, sha)
+			WHERE f.workspace_id = $1 AND f.path = v.path AND f.sha256 = v.sha`,
+			workspaceID, stagedPaths, stagedSHAs, at); err != nil {
+			return nil, fmt.Errorf("store: stamp staged files: %w", err)
+		}
+	}
 	if len(skips) > 0 {
 		paths := make([]string, len(skips))
 		shas := make([]string, len(skips))
@@ -74,16 +110,16 @@ func (s *WikiStore) RecordFileSkips(ctx context.Context, workspaceID string, ski
 		for i, sk := range skips {
 			paths[i], shas[i], classes[i] = sk.Path, sk.SHA256, sk.Class
 		}
-		// left() is a belt under the CHECK: a class the allow-list should have
-		// caught is truncated rather than failing every other row in the batch.
+		// left() is a belt under the CHECK: a token longer than the column
+		// takes is truncated rather than failing every other row in the batch.
 		rows, err := tx.Query(ctx, `
 			UPDATE workspace_files f
-			SET skip_reason = left(v.class, 40), skip_sha256 = v.sha, skipped_at = $5
+			SET skip_class = left(v.class, 40), skip_sha256 = v.sha
 			FROM unnest($2::text[], $3::text[], $4::text[]) AS v(path, sha, class)
 			WHERE f.workspace_id = $1 AND f.path = v.path AND f.sha256 = v.sha
-			  AND (f.skip_sha256, f.skip_reason) IS DISTINCT FROM (v.sha, left(v.class, 40))
+			  AND (f.skip_sha256, f.skip_class) IS DISTINCT FROM (v.sha, left(v.class, 40))
 			RETURNING f.path`,
-			workspaceID, paths, shas, classes, at)
+			workspaceID, paths, shas, classes)
 		if err != nil {
 			return nil, fmt.Errorf("store: record file skips: %w", err)
 		}
@@ -101,16 +137,11 @@ func (s *WikiStore) RecordFileSkips(ctx context.Context, workspaceID string, ski
 		}
 	}
 	if len(readPaths) > 0 {
-		skipped := make([]string, len(skips))
-		for i, sk := range skips {
-			skipped[i] = sk.Path
-		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE workspace_files
-			SET skip_reason = NULL, skip_sha256 = NULL, skipped_at = NULL
-			WHERE workspace_id = $1 AND path = ANY($2) AND NOT (path = ANY($3))
-			  AND skip_reason IS NOT NULL`,
-			workspaceID, readPaths, skipped); err != nil {
+			SET skip_class = NULL, skip_sha256 = NULL
+			WHERE workspace_id = $1 AND path = ANY($2) AND skip_class IS NOT NULL`,
+			workspaceID, readPaths); err != nil {
 			return nil, fmt.Errorf("store: clear file skips: %w", err)
 		}
 	}
@@ -143,18 +174,20 @@ type FileIngestRow struct {
 	// ContentAt is when the bytes last changed (content_changed_at, falling
 	// back to created_at for rows uploaded before it was recorded).
 	ContentAt time.Time
+	// StagedAt is when a build last staged the current bytes for the
+	// connector (staged_at); nil when none has. A document staged since its
+	// bytes changed, with no source row and no recorded skip, was passed over
+	// by a build that saw it.
+	StagedAt *time.Time
 }
 
 // FileIngestBench is the bench-level half of the derivation: what the runs
-// table says about the last ingest and the next one.
+// table says about the next ingest.
 type FileIngestBench struct {
-	// LastRun is when the last ingest that could have read a document began:
-	// not research, not failed, not a poll, and if pinned, pinned to the
-	// files-mode upload connector. Nil when the bench has never built.
-	LastRun *time.Time
-	// PendingRun says an ingest that could read a document is queued or
-	// running, so a document the last run did not read is still waiting
-	// rather than passed over.
+	// PendingRun says a build is queued or running (research aside), so a
+	// document the last one did not read is still waiting rather than passed
+	// over. Any build counts: which uploads a run stages is recorded on the
+	// rows (StagedAt), so the bench need not guess from the run's connector.
 	PendingRun bool
 	// BudgetPaused says the bench's most recent run (research aside) was
 	// refused over budget: anything unread stays unread until the window
@@ -162,8 +195,8 @@ type FileIngestBench struct {
 	BudgetPaused bool
 }
 
-// listFilesWithIngestSQL is ListFilesWithIngest's row query. A named constant
-// so the hermetic parity test can see the key literal it joins on.
+// listFilesWithIngestSQL is ListFilesWithIngest's row query. $2 is the upload
+// key prefix (uploadDocKeyPrefix).
 //
 // Pages unions the document's own files_written with those of its section
 // units ('doc:upload:<path>#<section>'), which collect.go attributes to the
@@ -173,7 +206,7 @@ const listFilesWithIngestSQL = `
 	SELECT f.id, f.workspace_id, f.path, f.display_name, f.blob_key, f.size_bytes,
 	       coalesce(f.content_type, ''), f.sha256, coalesce(f.uploaded_by::text, ''),
 	       f.enabled, f.created_at, f.updated_at,
-	       f.skip_reason,
+	       f.skip_class,
 	       coalesce(f.skip_sha256 = f.sha256, false),
 	       s.id IS NOT NULL,
 	       CASE WHEN s.id IS NULL THEN NULL ELSE (
@@ -182,11 +215,12 @@ const listFilesWithIngestSQL = `
 	           WHERE x.workspace_id = f.workspace_id AND x.deleted_at IS NULL
 	             AND (x.key = s.key OR starts_with(x.key, s.key || '#'))) END,
 	       coalesce(s.fetched_at, s.updated_at),
-	       coalesce(f.content_changed_at, f.created_at)
+	       coalesce(f.content_changed_at, f.created_at),
+	       f.staged_at
 	FROM workspace_files f
 	LEFT JOIN sources s
 	       ON s.workspace_id = f.workspace_id
-	      AND s.key = 'doc:upload:' || f.path
+	      AND s.key = $2::text || f.path
 	      AND s.deleted_at IS NULL
 	WHERE f.workspace_id = $1
 	ORDER BY f.path`
@@ -194,8 +228,29 @@ const listFilesWithIngestSQL = `
 // ListFilesWithIngest is ListFiles with the facts the per-document ingest
 // status is derived from, for the API. The worker keeps ListFiles: it
 // materializes files and has no use for the join.
+//
+// The bench facts are read before the rows. A build finishing between the two
+// statements then leaves a row stamped and sourced against a bench that still
+// says a run is pending, which derives waiting or read; the other order could
+// pair a stamped, sourceless row with an idle bench and derive a false "not
+// read" until the next load.
 func (s *WikiStore) ListFilesWithIngest(ctx context.Context, workspaceID string) ([]FileIngestRow, FileIngestBench, error) {
-	rows, err := s.pool.Query(ctx, listFilesWithIngestSQL, workspaceID)
+	// 'research' is jobs.TriggerResearch, kept as a SQL literal as queue.go
+	// does. A research run materializes nothing, so it is never the ingest
+	// about to read a document.
+	var bench FileIngestBench
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM runs
+		               WHERE workspace_id = $1 AND trigger <> 'research'
+		                 AND status IN ('queued', 'running')),
+		       coalesce((SELECT status FROM runs
+		                 WHERE workspace_id = $1 AND trigger <> 'research'
+		                 ORDER BY created_at DESC LIMIT 1) = 'over_budget', false)`,
+		workspaceID).Scan(&bench.PendingRun, &bench.BudgetPaused); err != nil {
+		return nil, FileIngestBench{}, fmt.Errorf("store: load ingest runs: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx, listFilesWithIngestSQL, workspaceID, uploadDocKeyPrefix)
 	if err != nil {
 		return nil, FileIngestBench{}, fmt.Errorf("store: load files with ingest: %w", err)
 	}
@@ -206,46 +261,13 @@ func (s *WikiStore) ListFilesWithIngest(ctx context.Context, workspaceID string)
 		var f FileIngestRow
 		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.Path, &f.DisplayName, &f.BlobKey, &f.SizeBytes,
 			&f.ContentType, &f.SHA256, &f.UploadedBy, &f.Enabled, &f.CreatedAt, &f.UpdatedAt,
-			&f.SkipClass, &f.SkipLive, &f.HasSource, &f.Pages, &f.ReadAt, &f.ContentAt); err != nil {
+			&f.SkipClass, &f.SkipLive, &f.HasSource, &f.Pages, &f.ReadAt, &f.ContentAt, &f.StagedAt); err != nil {
 			return nil, FileIngestBench{}, fmt.Errorf("store: scan file with ingest: %w", err)
 		}
 		out = append(out, f)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, FileIngestBench{}, fmt.Errorf("store: load files with ingest: %w", err)
-	}
-
-	// 'research' and 'poll' are jobs.TriggerResearch and TriggerPoll, kept as
-	// SQL literals as queue.go does. A research run materializes nothing, so
-	// it never read a document; a failed run may have read none of them. A run
-	// pinned to a connector builds from that connector alone
-	// (worker.sourceSpec), so only a pin to the files-mode upload connector
-	// (kind upload, no path: worker.go stages a path-mode one from a folder)
-	// stages an upload. An unpinned poll is excluded too: the scheduler always
-	// pins its polls, so a poll with no connector is one whose connector was
-	// deleted (runs.connector_id is ON DELETE SET NULL) and never staged
-	// uploads, or one whose pin a queue merge cleared (EnqueueBuild keeps the
-	// waiting row's trigger and nulls its connector_id when the merged request
-	// names another). The merged row does stage uploads, so leaving it out
-	// errs the gentler way: a document it passes over without a recorded
-	// reason reads waiting, not "not read", until the next counted ingest.
-	var bench FileIngestBench
-	if err := s.pool.QueryRow(ctx, `
-		WITH ingests AS (
-		    SELECT status, started_at FROM runs
-		    WHERE workspace_id = $1 AND trigger <> 'research'
-		      AND ((connector_id IS NULL AND trigger <> 'poll')
-		           OR connector_id IN (SELECT id FROM connectors
-		                               WHERE kind = 'upload' AND coalesce(config->>'path', '') = '')))
-		SELECT (SELECT max(started_at) FROM ingests
-		        WHERE status IN ('succeeded', 'partial', 'no_changes')
-		          AND started_at IS NOT NULL),
-		       EXISTS (SELECT 1 FROM ingests WHERE status IN ('queued', 'running')),
-		       coalesce((SELECT status FROM runs
-		                 WHERE workspace_id = $1 AND trigger <> 'research'
-		                 ORDER BY created_at DESC LIMIT 1) = 'over_budget', false)`,
-		workspaceID).Scan(&bench.LastRun, &bench.PendingRun, &bench.BudgetPaused); err != nil {
-		return nil, FileIngestBench{}, fmt.Errorf("store: load ingest runs: %w", err)
 	}
 	return out, bench, nil
 }

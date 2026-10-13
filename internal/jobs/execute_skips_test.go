@@ -16,6 +16,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/connector/upload"
 	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
 	"github.com/daiwa-zou/kiln/internal/diff"
+	"github.com/daiwa-zou/kiln/internal/mapper"
 	"github.com/daiwa-zou/kiln/internal/mapper/docmap"
 )
 
@@ -199,12 +200,54 @@ func TestExecuteClassifiesSkips(t *testing.T) {
 	if _, ok := got["sub/other.pdf"]; ok {
 		t.Error("a readable PDF was reported skipped")
 	}
-	// Raw is one line with URLs reduced to scheme and host; the staging
-	// path it quotes is for the sink to strip, which it knows and this
-	// package does not.
+	// Raw is the first line as the converter wrote it: the URL with its token
+	// and the staging path it quotes are both for the sink to reduce, so
+	// there is one place that decides what a log line may carry.
 	raw := got["nasty.pdf"].Raw
-	if strings.Contains(raw, "SECRET") || strings.Contains(raw, "second line") || !strings.Contains(raw, "https://files.test") {
-		t.Errorf("raw = %q, want one line with the URL reduced", raw)
+	if strings.Contains(raw, "second line") || !strings.Contains(raw, "https://files.test/p?token=SECRET") {
+		t.Errorf("raw = %q, want the first line as written", raw)
+	}
+}
+
+// The counts reach the overview through the build request, for the worker and
+// the CLI alike (both go through Execute).
+func TestBuildOverviewAccountsForSkippedUploads(t *testing.T) {
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.filesByAttempt[0] = map[string]string{"entities/ripple.md": validPage("entity", "Ripple")}
+	p := testPipeline(store, runner)
+	m := testMap(mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "h"})
+	req := testRequest(t, m, diff.ChangeSet{FullRebuild: true})
+	req.UploadsStaged, req.UploadsSkipped = 3, 1
+
+	if _, err := p.Build(context.Background(), req); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	imp := store.lastImport()
+	if imp == nil {
+		t.Fatal("nothing was imported")
+	}
+	if !strings.Contains(imp.Overview, "compiled from 1 code module and 2 of 3 uploaded documents, at `abc1234`; 1 could not be read (see Ingest).") {
+		t.Errorf("overview does not account for the skipped upload:\n%s", imp.Overview)
+	}
+}
+
+// The overview's "N of M uploaded documents" comes from the sync: every
+// document listed was read or skipped, and a partial skip (figures only) is
+// a read.
+func TestMaterializeCountsUploadsForTheOverview(t *testing.T) {
+	popplerShims(t, false)
+	docs := t.TempDir()
+	writeTree(t, docs, map[string]string{
+		"bad.pdf": blankPDF, "ok.md": "# Fine\n\nReadable.\n", "report-nofig.pdf": blankPDF,
+	})
+	mat, err := materialize(context.Background(), io.Discard, SourceSpec{DocsDir: docs, Slug: "bench"})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	defer mat.Close()
+	if mat.UploadsStaged != 3 || mat.UploadsSkipped != 1 {
+		t.Errorf("uploads staged/skipped = %d/%d, want 3/1", mat.UploadsStaged, mat.UploadsSkipped)
 	}
 }
 

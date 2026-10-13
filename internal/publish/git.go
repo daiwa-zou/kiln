@@ -26,8 +26,12 @@ import (
 // that moved on rejects the push rather than losing whatever moved it -- and
 // the next build tries again from the new tip.
 
+// DefaultPushTimeout bounds a push whose options name no Timeout. Exported so
+// the worker can hold a follow-up build back until a push in flight must have
+// finished or given up.
+const DefaultPushTimeout = 3 * time.Minute
+
 const (
-	defaultPushTimeout = 3 * time.Minute
 	// defaultAuthor is what appears in the log when a deployment has not said
 	// who is publishing. A name and address that obviously belong to a machine
 	// beats borrowing a person's.
@@ -93,7 +97,7 @@ func Push(ctx context.Context, opts PushOptions) (Result, error) {
 
 	timeout := opts.Timeout
 	if timeout == 0 {
-		timeout = defaultPushTimeout
+		timeout = DefaultPushTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

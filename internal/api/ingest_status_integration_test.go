@@ -268,4 +268,26 @@ func TestIngestStatusEndToEnd(t *testing.T) {
 	if len(lines) != 3 || !strings.Contains(lines[2], "level=WARN") {
 		t.Errorf("a new blank file should log a fresh Warn; lines = %v", lines)
 	}
+
+	// A file the connector leaves out by name (an AppleDouble shadow, a file
+	// under .obsidian) is staged like any other, so it must come back as a
+	// skip with its own reason rather than read "not read, press Ingest now"
+	// for ever.
+	put("._shadow.pdf", append(ingestBlankPDF("v5"), []byte("%TEXTY\n")...))
+	if r := list()["._shadow.pdf"]; r.Status != "waiting" {
+		t.Errorf("before a build: ._shadow.pdf = %+v, want waiting", r)
+	}
+	build()
+	got = list()
+	if r := got["._shadow.pdf"]; r.Status != "skipped" || r.Class == nil || *r.Class != "hidden_path" ||
+		r.Reason == nil || *r.Reason != skipSentences["hidden_path"] {
+		t.Errorf("hidden upload: ._shadow.pdf = %+v, want skipped / hidden_path with the fixed sentence", r)
+	}
+	wantReadMD("after the hidden upload", got)
+	// One fresh Warn for it, ahead of the scan's Debug repeat.
+	lines = logs.lines("document skipped")
+	if len(lines) != 5 || !strings.Contains(lines[3], "class=hidden_path") || !strings.Contains(lines[3], "level=WARN") ||
+		!strings.Contains(lines[4], "level=DEBUG") {
+		t.Errorf("the hidden upload should log one fresh Warn before the repeat; lines = %v", lines)
+	}
 }

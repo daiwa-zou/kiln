@@ -215,11 +215,12 @@ func (m *Metrics) RunFinished(status string, d time.Duration, costUSD float64, c
 }
 
 // skipClasses is the label allow-list for DocumentSkipped. The tokens are the
-// upload connector's Skip* constants, repeated here rather than imported so the
-// metrics package stays a leaf.
+// upload connector's SkipClasses, repeated here rather than imported so the
+// metrics package stays a leaf; the connector's test pins the two lists to
+// each other.
 var skipClasses = map[string]bool{
 	"no_text": true, "extractor_missing": true, "unsupported_type": true,
-	"timed_out": true, "extractor_error": true,
+	"timed_out": true, "extractor_error": true, "hidden_path": true,
 }
 
 // DocumentSkipped records one document a sync could not read. kind is the

@@ -14,6 +14,7 @@ import (
 	"github.com/daiwa-zou/kiln/internal/config"
 	"github.com/daiwa-zou/kiln/internal/crypto"
 	"github.com/daiwa-zou/kiln/internal/jobs"
+	"github.com/daiwa-zou/kiln/internal/publish"
 	"github.com/daiwa-zou/kiln/internal/scheduler"
 	"github.com/daiwa-zou/kiln/internal/store"
 	"github.com/daiwa-zou/kiln/internal/wiki"
@@ -49,9 +50,12 @@ type loopStore struct {
 	// pinned is what ConnectorByID returns when set, for scripting a run
 	// pinned to one connector.
 	pinned *store.ConnectorRow
-	// pollDue and enqueued script and record the poll scheduler.
-	pollDue  []store.ConnectorRow
-	enqueued []string
+	// pollDue and enqueued script and record the poll scheduler and the
+	// continuation; enqueuedNotBefore is each enqueued run's not_before,
+	// zero when it was claimable at once.
+	pollDue           []store.ConnectorRow
+	enqueued          []string
+	enqueuedNotBefore []time.Time
 	// budget/spent/reviews script and record the budget warning.
 	budget  *float64
 	spent   float64
@@ -59,9 +63,13 @@ type loopStore struct {
 	// publishChecks counts looks at the bench's publish target, which is the
 	// first thing a publish attempt does.
 	publishChecks int
+	// publishTarget, when set, is the bench's publish target; nil is the
+	// default, a bench that does not publish.
+	publishTarget *store.PublishTarget
 	// publishStarted and publishRelease, when set, make the publish step
-	// block at that first look until the test releases it, so the test can
-	// read the queue while a publish is in flight.
+	// block at its first read of the wiki (the revision check) until the test
+	// releases it, so the test can read the queue while a publish is in
+	// flight. The revision reported equals the target's, so no push follows.
 	publishStarted chan struct{}
 	publishRelease chan struct{}
 	// requeued and sweeps record drain and GC activity.
@@ -163,11 +171,11 @@ func (l *loopStore) ListFiles(context.Context, string) ([]store.FileRow, error) 
 
 // recordedSkips is one RecordFileSkips call as the worker made it.
 type recordedSkips struct {
-	skips     []store.FileSkip
-	readPaths []string
+	skips  []store.FileSkip
+	staged map[string]string
 }
 
-func (l *loopStore) RecordFileSkips(ctx context.Context, _ string, skips []store.FileSkip, readPaths []string, _ time.Time) ([]string, error) {
+func (l *loopStore) RecordFileSkips(ctx context.Context, _ string, skips []store.FileSkip, staged map[string]string, _ time.Time) ([]string, error) {
 	// As EnqueueRun: a write through a canceled context fails against a real
 	// database, so a double that accepts it would hide a sink that forgot to
 	// detach from the run's context.
@@ -176,7 +184,7 @@ func (l *loopStore) RecordFileSkips(ctx context.Context, _ string, skips []store
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.skipCalls = append(l.skipCalls, recordedSkips{skips: skips, readPaths: readPaths})
+	l.skipCalls = append(l.skipCalls, recordedSkips{skips: skips, staged: staged})
 	if l.skipErr != nil {
 		return nil, l.skipErr
 	}
@@ -273,6 +281,10 @@ func (l *loopStore) PollDueConnectors(context.Context, time.Duration) ([]store.C
 }
 
 func (l *loopStore) EnqueueRun(ctx context.Context, workspaceID, trigger, connectorID string) (string, bool, error) {
+	return l.EnqueueRunOpts(ctx, workspaceID, trigger, connectorID, store.EnqueueOptions{})
+}
+
+func (l *loopStore) EnqueueRunOpts(ctx context.Context, _, trigger, connectorID string, opts store.EnqueueOptions) (string, bool, error) {
 	// A write through a canceled context fails against a real database, so it
 	// must here: a double that accepts it hides every bug of enqueueing from a
 	// worker that is draining.
@@ -282,6 +294,7 @@ func (l *loopStore) EnqueueRun(ctx context.Context, workspaceID, trigger, connec
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.enqueued = append(l.enqueued, trigger+":"+connectorID)
+	l.enqueuedNotBefore = append(l.enqueuedNotBefore, opts.NotBefore)
 	return "run-" + connectorID, true, nil
 }
 
@@ -519,15 +532,22 @@ func TestContinuationRuns(t *testing.T) {
 			if tc.want == 1 && st.enqueued[0] != "continuation:c1" {
 				t.Errorf("continuation = %q", st.enqueued[0])
 			}
+			// A bench that does not publish has no push to wait out.
+			if tc.want == 1 && !st.enqueuedNotBefore[0].IsZero() {
+				t.Errorf("continuation held back until %v on a bench with no publish target", st.enqueuedNotBefore[0])
+			}
 		})
 	}
 }
 
 // The continuation must be on the queue before the publish step starts: a
 // push can take minutes, and until a queued run exists every document this
-// run deferred reads as "not read" on the Ingest page instead of waiting.
+// run deferred reads as "not read" on the Ingest page instead of waiting. On
+// a bench that publishes it is held back past the push's timeout, so no other
+// worker can claim it and reach its own publish while this push is in flight.
 func TestContinuationIsQueuedBeforeThePublishStep(t *testing.T) {
 	st := newLoopStore()
+	st.publishTarget = &store.PublishTarget{RepoURL: "https://github.com/o/r", Branch: "main", Enabled: true, PublishedRevision: 7}
 	st.publishStarted = make(chan struct{})
 	st.publishRelease = make(chan struct{})
 	w, _ := loopWorker(t, st, &pipelineStore{}, agent.FakeOptions{CostPerCall: 0.02})
@@ -549,12 +569,16 @@ func TestContinuationIsQueuedBeforeThePublishStep(t *testing.T) {
 	}
 	st.mu.Lock()
 	enqueued := append([]string(nil), st.enqueued...)
+	notBefore := append([]time.Time(nil), st.enqueuedNotBefore...)
 	st.mu.Unlock()
 	close(st.publishRelease)
 	<-done
 
 	if len(enqueued) != 1 || enqueued[0] != "continuation:c1" {
-		t.Errorf("queue while the publish was in flight = %v, want the continuation already there", enqueued)
+		t.Fatalf("queue while the publish was in flight = %v, want the continuation already there", enqueued)
+	}
+	if wait := time.Until(notBefore[0]); wait < publish.DefaultPushTimeout-time.Minute || wait > publish.DefaultPushTimeout {
+		t.Errorf("continuation claimable in %v, want about the push timeout (%v) from now", wait.Round(time.Second), publish.DefaultPushTimeout)
 	}
 }
 
@@ -781,22 +805,38 @@ func TestRunDrainsInFlightRunOnShutdown(t *testing.T) {
 }
 
 // A bench with no publish target is the default, so these stubs report exactly
-// that: publishing is opt-in and the loop must be unaffected without it.
+// that unless a test sets one: publishing is opt-in and the loop must be
+// unaffected without it.
 func (l *loopStore) PublishTargetFor(context.Context, string) (store.PublishTarget, error) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.publishChecks++
-	started, release := l.publishStarted, l.publishRelease
-	l.mu.Unlock()
-	if started != nil {
-		started <- struct{}{}
-		<-release
+	if l.publishTarget != nil {
+		return *l.publishTarget, nil
 	}
 	return store.PublishTarget{}, store.ErrNotFound
 }
 func (l *loopStore) MarkPublished(context.Context, string, string, int64, string) error {
 	return nil
 }
-func (l *loopStore) WikiRevision(context.Context, string) (int64, error) { return 0, nil }
+
+// WikiRevision is the publish step's first read once it has a target; it
+// blocks when the test asked the publish to, and reports the target's own
+// published revision so the step then skips the push.
+func (l *loopStore) WikiRevision(context.Context, string) (int64, error) {
+	l.mu.Lock()
+	started, release := l.publishStarted, l.publishRelease
+	var revision int64
+	if l.publishTarget != nil {
+		revision = l.publishTarget.PublishedRevision
+	}
+	l.mu.Unlock()
+	if started != nil {
+		started <- struct{}{}
+		<-release
+	}
+	return revision, nil
+}
 func (l *loopStore) LoadArtifact(context.Context, string, string) (string, error) {
 	return "", nil
 }

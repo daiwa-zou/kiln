@@ -4,11 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/daiwa-zou/kiln/internal/connector/upload"
 )
 
 // scrape renders the exposition the way Prometheus would read it.
@@ -121,6 +124,33 @@ func TestQueueDepthZeroesStaleStatuses(t *testing.T) {
 	}
 	if strings.Contains(body, `kiln_queue_depth{status="queued"} 7`) {
 		t.Error("stale queue depth survived a resample")
+	}
+}
+
+// The metric's label list is a copy of the upload connector's classes (this
+// package stays a leaf). Each class must land under its own label: one the
+// copy lacks would fold into extractor_error and the dashboard would never
+// show it.
+func TestDocumentSkippedLabelsEveryUploadClass(t *testing.T) {
+	m := NewMetrics()
+	for _, class := range upload.SkipClasses {
+		m.DocumentSkipped("upload", class)
+	}
+	body := scrape(t, m)
+	for _, class := range upload.SkipClasses {
+		if !strings.Contains(body, `kiln_documents_skipped_total{class="`+class+`",kind="upload"} 1`) {
+			t.Errorf("class %q has no label of its own:\n%s", class, body)
+		}
+	}
+	for class := range skipClasses {
+		if !slices.Contains(upload.SkipClasses, class) {
+			t.Errorf("label %q is not a class the connector produces", class)
+		}
+	}
+	// Anything else still folds, so the label set stays bounded.
+	m.DocumentSkipped("upload", "mystery")
+	if body := scrape(t, m); !strings.Contains(body, `kiln_documents_skipped_total{class="extractor_error",kind="upload"} 2`) {
+		t.Errorf("an unknown class was given a label:\n%s", body)
 	}
 }
 

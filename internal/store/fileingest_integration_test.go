@@ -14,9 +14,9 @@ import (
 // skipFacts is what the skip columns hold for one path, read raw so the tests
 // see the row and not the store's view of it.
 type skipFacts struct {
-	reason    *string
+	class     *string
 	sha       *string
-	skippedAt *time.Time
+	stagedAt  *time.Time
 	updatedAt time.Time
 }
 
@@ -24,9 +24,9 @@ func readSkip(t *testing.T, s *WikiStore, ws, path string) skipFacts {
 	t.Helper()
 	var f skipFacts
 	if err := s.Pool().QueryRow(context.Background(), `
-		SELECT skip_reason, skip_sha256, skipped_at, updated_at
+		SELECT skip_class, skip_sha256, staged_at, updated_at
 		FROM workspace_files WHERE workspace_id = $1 AND path = $2`, ws, path).
-		Scan(&f.reason, &f.sha, &f.skippedAt, &f.updatedAt); err != nil {
+		Scan(&f.class, &f.sha, &f.stagedAt, &f.updatedAt); err != nil {
 		t.Fatalf("read skip columns for %s: %v", path, err)
 	}
 	return f
@@ -87,8 +87,9 @@ func TestRecordFileSkipsSetsRepeatsAndGuardsSHA(t *testing.T) {
 	mustCreateFile(t, s, ws, "b.pdf", "b1")
 	before := readSkip(t, s, ws, "a.pdf")
 	at := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	stagedA := map[string]string{"a.pdf": "a1"}
 
-	changed, err := s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "no_text"}}, nil, at)
+	changed, err := s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "no_text"}}, stagedA, at)
 	if err != nil {
 		t.Fatalf("record: %v", err)
 	}
@@ -96,51 +97,55 @@ func TestRecordFileSkipsSetsRepeatsAndGuardsSHA(t *testing.T) {
 		t.Errorf("changed = %v, want %v", changed, want)
 	}
 	got := readSkip(t, s, ws, "a.pdf")
-	if strOf(got.reason) != "no_text" || strOf(got.sha) != "a1" || got.skippedAt == nil || !got.skippedAt.Equal(at) {
-		t.Errorf("after record: reason=%s sha=%s at=%v", strOf(got.reason), strOf(got.sha), got.skippedAt)
+	if strOf(got.class) != "no_text" || strOf(got.sha) != "a1" || got.stagedAt == nil || !got.stagedAt.Equal(at) {
+		t.Errorf("after record: class=%s sha=%s staged=%v", strOf(got.class), strOf(got.sha), got.stagedAt)
 	}
 	if !got.updatedAt.Equal(before.updatedAt) {
 		t.Errorf("recording a skip moved updated_at %v -> %v; the Ingest list sorts on it", before.updatedAt, got.updatedAt)
 	}
 
-	// The same skip again is a no-op: nothing reported, the stamp stays.
-	changed, err = s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "no_text"}}, nil, at.Add(time.Hour))
+	// The same skip again is a no-op for the skip: nothing reported. The
+	// staged stamp moves, because the build did stage the file again.
+	changed, err = s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "no_text"}}, stagedA, at.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("repeat: %v", err)
 	}
 	if len(changed) != 0 {
 		t.Errorf("repeat reported changed = %v, want nothing", changed)
 	}
-	if got := readSkip(t, s, ws, "a.pdf"); !got.skippedAt.Equal(at) {
-		t.Errorf("repeat moved skipped_at to %v", got.skippedAt)
+	if got := readSkip(t, s, ws, "a.pdf"); got.stagedAt == nil || !got.stagedAt.Equal(at.Add(time.Hour)) {
+		t.Errorf("repeat left staged_at at %v, want the later stamp", got.stagedAt)
 	}
 
 	// A different class for the same bytes is a change.
-	changed, err = s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "extractor_error"}}, nil, at.Add(time.Hour))
+	changed, err = s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "extractor_error"}}, stagedA, at.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("reclass: %v", err)
 	}
 	if want := []string{"a.pdf"}; !slices.Equal(changed, want) {
 		t.Errorf("reclass changed = %v, want %v", changed, want)
 	}
-	if got := readSkip(t, s, ws, "a.pdf"); strOf(got.reason) != "extractor_error" || !got.skippedAt.Equal(at.Add(time.Hour)) {
-		t.Errorf("after reclass: reason=%s at=%v", strOf(got.reason), got.skippedAt)
+	if got := readSkip(t, s, ws, "a.pdf"); strOf(got.class) != "extractor_error" {
+		t.Errorf("after reclass: class=%s", strOf(got.class))
 	}
 
-	// A skip for bytes the row no longer holds (replaced mid-build) is a no-op.
-	changed, err = s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "b.pdf", SHA256: "stale", Class: "no_text"}}, nil, at)
+	// A skip for bytes the row no longer holds (replaced mid-build) is a
+	// no-op, and so is the stamp: the build never saw the bytes the row has.
+	changed, err = s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "b.pdf", SHA256: "stale", Class: "no_text"}},
+		map[string]string{"b.pdf": "stale"}, at)
 	if err != nil {
 		t.Fatalf("stale sha: %v", err)
 	}
 	if len(changed) != 0 {
 		t.Errorf("stale sha reported changed = %v", changed)
 	}
-	if got := readSkip(t, s, ws, "b.pdf"); got.reason != nil || got.sha != nil || got.skippedAt != nil {
-		t.Errorf("stale sha wrote a skip: %+v", got)
+	if got := readSkip(t, s, ws, "b.pdf"); got.class != nil || got.sha != nil || got.stagedAt != nil {
+		t.Errorf("stale sha wrote a skip or a stamp: %+v", got)
 	}
 
 	// An unknown path matches nothing and fails nothing.
-	if _, err := s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "gone.pdf", SHA256: "x", Class: "no_text"}}, nil, at); err != nil {
+	if _, err := s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "gone.pdf", SHA256: "x", Class: "no_text"}},
+		map[string]string{"gone.pdf": "x"}, at); err != nil {
 		t.Fatalf("unknown path: %v", err)
 	}
 	// Nothing to do is not a transaction.
@@ -169,19 +174,19 @@ func TestRecordFileSkipsClearsReadPathsOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The next build read a (and d, which was never skipped): only a clears.
-	changed, err := s.RecordFileSkips(ctx, ws, nil, []string{"a.pdf", "d.pdf"}, at)
+	// The next build staged and read a (and d, which has no row): only a clears.
+	changed, err := s.RecordFileSkips(ctx, ws, nil, map[string]string{"a.pdf": "a.pdf-sha", "d.pdf": "d"}, at)
 	if err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	if len(changed) != 0 {
 		t.Errorf("clearing reported changed = %v", changed)
 	}
-	if got := readSkip(t, s, ws, "a.pdf"); got.reason != nil || got.sha != nil || got.skippedAt != nil {
-		t.Errorf("a.pdf was read but keeps its skip: %+v", got)
+	if got := readSkip(t, s, ws, "a.pdf"); got.class != nil || got.sha != nil || got.stagedAt == nil {
+		t.Errorf("a.pdf was read but keeps its skip, or lost its stamp: %+v", got)
 	}
 	for _, p := range []string{"b.pdf", "c.pdf"} {
-		if got := readSkip(t, s, ws, p); strOf(got.reason) != "no_text" {
+		if got := readSkip(t, s, ws, p); strOf(got.class) != "no_text" {
 			t.Errorf("%s lost its skip without being read: %+v", p, got)
 		}
 	}
@@ -204,8 +209,9 @@ func mustListIngest(t *testing.T, s *WikiStore, ws string) []FileIngestRow {
 	return rows
 }
 
-// One class the allow-list should have caught must not fail the rows beside
-// it: left() truncates to the column's cap and the batch lands.
+// A class longer than the column takes (nothing produces one; this is the
+// backstop) must not fail the rows beside it: left() truncates to the cap and
+// the batch lands.
 func TestRecordFileSkipsLongClassDoesNotSinkBatch(t *testing.T) {
 	s, ws := jobStore(t)
 	ctx := context.Background()
@@ -226,19 +232,19 @@ func TestRecordFileSkipsLongClassDoesNotSinkBatch(t *testing.T) {
 	if want := []string{"bad.pdf", "huge.pdf", "ok.pdf"}; !slices.Equal(changed, want) {
 		t.Errorf("changed = %v, want %v (sorted, every row)", changed, want)
 	}
-	if got := readSkip(t, s, ws, "ok.pdf"); strOf(got.reason) != "no_text" {
+	if got := readSkip(t, s, ws, "ok.pdf"); strOf(got.class) != "no_text" {
 		t.Errorf("the good row did not land: %+v", got)
 	}
-	if got := readSkip(t, s, ws, "bad.pdf"); strOf(got.reason) != strings.Repeat("ü", 40) {
-		t.Errorf("long class stored as %q, want 40 runes", strOf(got.reason))
+	if got := readSkip(t, s, ws, "bad.pdf"); strOf(got.class) != strings.Repeat("ü", 40) {
+		t.Errorf("long class stored as %q, want 40 runes", strOf(got.class))
 	}
-	if got := readSkip(t, s, ws, "huge.pdf"); len(strOf(got.reason)) != 40 {
-		t.Errorf("1 MB class stored as %d bytes, want 40", len(strOf(got.reason)))
+	if got := readSkip(t, s, ws, "huge.pdf"); len(strOf(got.class)) != 40 {
+		t.Errorf("1 MB class stored as %d bytes, want 40", len(strOf(got.class)))
 	}
 	// The CHECK is still the backstop for anything that bypasses left().
-	if _, err := s.Pool().Exec(ctx, `UPDATE workspace_files SET skip_reason = $2 WHERE path = 'ok.pdf' AND workspace_id = $1`,
+	if _, err := s.Pool().Exec(ctx, `UPDATE workspace_files SET skip_class = $2 WHERE path = 'ok.pdf' AND workspace_id = $1`,
 		ws, strings.Repeat("a", 41)); err == nil {
-		t.Error("a 41-character skip_reason was accepted; the CHECK is missing")
+		t.Error("a 41-character skip_class was accepted; the CHECK is missing")
 	}
 }
 
@@ -261,8 +267,8 @@ func TestRecordFileSkipsSortsAndCollapsesBatch(t *testing.T) {
 	if want := []string{"a.pdf", "b.pdf", "c.pdf"}; !slices.Equal(changed, want) {
 		t.Errorf("changed = %v, want %v", changed, want)
 	}
-	if got := readSkip(t, s, ws, "a.pdf"); strOf(got.reason) != "extractor_error" {
-		t.Errorf("repeated path stored %q, want the last entry", strOf(got.reason))
+	if got := readSkip(t, s, ws, "a.pdf"); strOf(got.class) != "extractor_error" {
+		t.Errorf("repeated path stored %q, want the last entry", strOf(got.class))
 	}
 }
 
@@ -382,41 +388,110 @@ func TestListFilesWithIngestBenchFacts(t *testing.T) {
 		return b
 	}
 
-	if b := bench(); b.LastRun != nil || b.PendingRun {
+	if b := bench(); b.PendingRun {
 		t.Errorf("empty bench: %+v", b)
 	}
 
-	// Runs that never read a document do not count: research, failed,
-	// over-budget, never started, another bench.
+	// Finished runs, research, and another bench's queue are not an ingest
+	// about to read anything.
 	mustInsertRun(t, s, ws, "research", "succeeded", "2026-10-01T00:00:00Z")
 	mustInsertRun(t, s, ws, "manual", "failed", "2026-10-02T00:00:00Z")
 	mustInsertRun(t, s, ws, "manual", "over_budget", "2026-10-03T00:00:00Z")
-	mustInsertRun(t, s, ws, "manual", "succeeded", nil)
-	mustInsertRun(t, s, other, "manual", "succeeded", "2026-10-09T00:00:00Z")
-	if b := bench(); b.LastRun != nil || b.PendingRun {
-		t.Errorf("non-qualifying runs counted: %+v", b)
-	}
-
-	mustInsertRun(t, s, ws, "manual", "succeeded", "2026-10-04T00:00:00Z")
-	mustInsertRun(t, s, ws, "webhook", "no_changes", "2026-10-05T00:00:00Z")
 	mustInsertRun(t, s, ws, "webhook", "partial", "2026-10-06T00:00:00Z")
-	want := time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC)
-	if b := bench(); b.LastRun == nil || !b.LastRun.Equal(want) || b.PendingRun {
-		t.Errorf("last run = %+v, want %v and no pending run", b, want)
-	}
-
-	// A research run in flight is not an ingest about to read anything.
 	mustInsertRun(t, s, ws, "research", "running", "2026-10-07T00:00:00Z")
+	mustInsertRun(t, s, other, "manual", "queued", nil)
 	if b := bench(); b.PendingRun {
-		t.Error("a running research run reads as a pending ingest")
+		t.Errorf("non-qualifying runs read as pending: %+v", b)
 	}
 	if _, err := s.Pool().Exec(context.Background(), `DELETE FROM runs WHERE status = 'running'`); err != nil {
 		t.Fatal(err)
 	}
+
 	// A queued continuation makes an unread document waiting, not passed over.
 	mustInsertRun(t, s, ws, "manual", "queued", nil)
-	if b := bench(); !b.PendingRun || b.LastRun == nil || !b.LastRun.Equal(want) {
-		t.Errorf("queued run: %+v, want pending and the same last run", b)
+	if b := bench(); !b.PendingRun {
+		t.Errorf("queued run: %+v, want pending", b)
+	}
+	if _, err := s.Pool().Exec(context.Background(), `UPDATE runs SET status = 'running', started_at = now() WHERE status = 'queued'`); err != nil {
+		t.Fatal(err)
+	}
+	if b := bench(); !b.PendingRun {
+		t.Errorf("running build: %+v, want pending", b)
+	}
+	if _, err := s.Pool().Exec(context.Background(), `DELETE FROM runs WHERE status = 'running'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Any build counts, whatever connector it is pinned to: which uploads a
+	// run stages is recorded on the rows, not guessed from the run, so a
+	// pinned poll about to start is a pending ingest until it has shown
+	// otherwise by finishing without a stamp.
+	webID := mustCreateConnector(t, s, ws, "web")
+	mustInsertPinnedRun(t, s, ws, webID, "poll", "queued", nil)
+	if b := bench(); !b.PendingRun {
+		t.Errorf("a queued poll pinned to the web connector: %+v, want pending", b)
+	}
+}
+
+// The facts behind "not read" on the Ingest page are on the row, written by
+// the sink for the files a build staged: a document with a stamp at or after
+// its last change and no source row was passed over by a build that saw it.
+// What the runs table says about the bench (which connector, which trigger)
+// is not consulted, so a run that stages nothing leaves the row waiting.
+func TestListFilesWithIngestStagedAtIsTheOnlyRunFact(t *testing.T) {
+	s, ws := jobStore(t)
+	ctx := context.Background()
+	webID := mustCreateConnector(t, s, ws, "web")
+	uploadID := mustCreateConnector(t, s, ws, "upload")
+	mustCreateFile(t, s, ws, "a.pdf", "a1")
+	aged := ageContent(t, s, ws, "a.pdf")
+	row := func() FileIngestRow {
+		t.Helper()
+		return ingestRow(t, mustListIngest(t, s, ws), "a.pdf")
+	}
+	if r := row(); r.StagedAt != nil {
+		t.Fatalf("setup: a fresh upload carries a stamp: %+v", r)
+	}
+
+	// Runs that never staged the file, whatever their trigger and connector:
+	// the row has no stamp and reads waiting.
+	mustInsertPinnedRun(t, s, ws, webID, "poll", "no_changes", aged.Add(10*time.Minute))
+	mustInsertPinnedRun(t, s, ws, uploadID, "manual", "succeeded", aged.Add(20*time.Minute))
+	mustInsertRun(t, s, ws, "manual", "succeeded", aged.Add(30*time.Minute))
+	mustInsertRun(t, s, ws, "poll", "no_changes", aged.Add(40*time.Minute))
+	if r := row(); r.StagedAt != nil {
+		t.Errorf("runs that never staged the file stamped it: %+v", r)
+	}
+
+	// A build stages it and reads nothing from it: stamped after the change,
+	// no source, which the derivation reads as "not read".
+	stagedAt := aged.Add(time.Hour)
+	if _, err := s.RecordFileSkips(ctx, ws, nil, map[string]string{"a.pdf": "a1"}, stagedAt); err != nil {
+		t.Fatal(err)
+	}
+	if r := row(); r.StagedAt == nil || !r.StagedAt.Equal(stagedAt) || r.StagedAt.Before(r.ContentAt) || r.HasSource {
+		t.Errorf("after a build staged it: %+v, want staged_at %v after the change and no source", r, stagedAt)
+	}
+
+	// Replaced since: the stamp is older than the bytes, so it reads waiting
+	// again until a build stages the new bytes.
+	mustCreateFile(t, s, ws, "a.pdf", "a2")
+	if r := row(); r.StagedAt == nil || !r.StagedAt.Before(r.ContentAt) {
+		t.Errorf("after a replacement: staged %v content %v, want the stamp before the change", r.StagedAt, r.ContentAt)
+	}
+	// A build that staged the old bytes (replaced mid-build) does not stamp
+	// the new ones.
+	if _, err := s.RecordFileSkips(ctx, ws, nil, map[string]string{"a.pdf": "a1"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if r := row(); !r.StagedAt.Equal(stagedAt) {
+		t.Errorf("a stale-sha stage moved the stamp to %v", r.StagedAt)
+	}
+	if _, err := s.RecordFileSkips(ctx, ws, nil, map[string]string{"a.pdf": "a2"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if r := row(); r.StagedAt == nil || r.StagedAt.Before(r.ContentAt) {
+		t.Errorf("after staging the new bytes: staged %v content %v, want the stamp at or after the change", r.StagedAt, r.ContentAt)
 	}
 }
 
@@ -552,100 +627,6 @@ func mustInsertPinnedRun(t *testing.T, s *WikiStore, ws, connectorID, trigger, s
 	}
 }
 
-// A run pinned to the git or web connector builds from that connector alone,
-// so it never staged an upload: it is not the last ingest of the documents,
-// and while queued it is not the ingest about to read them.
-func TestListFilesWithIngestIgnoresRunsPinnedToOtherConnectors(t *testing.T) {
-	s, ws := jobStore(t)
-	uploadID := mustCreateConnector(t, s, ws, "upload")
-	webID := mustCreateConnector(t, s, ws, "web")
-	mustCreateFile(t, s, ws, "a.pdf", "a1")
-	aged := ageContent(t, s, ws, "a.pdf")
-	bench := func() FileIngestBench {
-		t.Helper()
-		_, b, err := s.ListFilesWithIngest(context.Background(), ws)
-		if err != nil {
-			t.Fatalf("ListFilesWithIngest: %v", err)
-		}
-		return b
-	}
-
-	// The red's reproduction: a poll of the web connector after the upload.
-	mustInsertPinnedRun(t, s, ws, webID, "poll", "no_changes", aged.Add(30*time.Minute))
-	if b := bench(); b.LastRun != nil {
-		t.Errorf("a poll pinned to the web connector counts as the last ingest: %+v", b)
-	}
-	mustInsertPinnedRun(t, s, ws, webID, "poll", "queued", nil)
-	if b := bench(); b.PendingRun {
-		t.Error("a queued poll of the web connector reads as a pending ingest")
-	}
-	if _, err := s.Pool().Exec(context.Background(), `DELETE FROM runs WHERE status = 'queued'`); err != nil {
-		t.Fatal(err)
-	}
-
-	// An upload connector with a path reads a worker-local folder, not the
-	// workspace's files, so a poll pinned to it stages no upload either.
-	folderID, err := s.CreateConnector(context.Background(), ConnectorRow{
-		WorkspaceID: ws, Kind: "upload", Name: "folder", Config: map[string]any{"path": "/srv/docs"}, Enabled: true,
-	})
-	if err != nil {
-		t.Fatalf("create path-mode upload connector: %v", err)
-	}
-	mustInsertPinnedRun(t, s, ws, folderID, "poll", "no_changes", aged.Add(35*time.Minute))
-	if b := bench(); b.LastRun != nil {
-		t.Errorf("a poll pinned to a path-mode upload connector counts as the last ingest: %+v", b)
-	}
-
-	// Pinned to the upload connector, or to none: these stage uploads.
-	want := aged.Add(45 * time.Minute)
-	mustInsertPinnedRun(t, s, ws, uploadID, "manual", "succeeded", want)
-	if b := bench(); b.LastRun == nil || !b.LastRun.Equal(want) {
-		t.Errorf("a run pinned to the upload connector was not counted: %+v", b)
-	}
-	want = aged.Add(time.Hour)
-	mustInsertRun(t, s, ws, "manual", "no_changes", want)
-	if b := bench(); b.LastRun == nil || !b.LastRun.Equal(want) {
-		t.Errorf("an unpinned run was not counted: %+v", b)
-	}
-	mustInsertPinnedRun(t, s, ws, uploadID, "manual", "queued", nil)
-	if b := bench(); !b.PendingRun {
-		t.Error("a queued run pinned to the upload connector is not a pending ingest")
-	}
-}
-
-// runs.connector_id is ON DELETE SET NULL, so deleting the web connector
-// turns its pinned poll runs into unpinned ones. They still never staged an
-// upload; the scheduler pins every poll, so an unpinned poll is not counted.
-// (Red QA's regression test, round 2.)
-func TestListFilesWithIngestIgnoresRunsOfDeletedConnectors(t *testing.T) {
-	s, ws := jobStore(t)
-	ctx := context.Background()
-	_ = mustCreateConnector(t, s, ws, "upload")
-	webID := mustCreateConnector(t, s, ws, "web")
-	mustCreateFile(t, s, ws, "a.pdf", "a1")
-	aged := ageContent(t, s, ws, "a.pdf")
-
-	mustInsertPinnedRun(t, s, ws, webID, "poll", "no_changes", aged.Add(30*time.Minute))
-	_, b, err := s.ListFilesWithIngest(ctx, ws)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.LastRun != nil {
-		t.Fatalf("setup: pinned poll counted: %+v", b)
-	}
-
-	if _, err := s.DeleteConnector(ctx, ws, webID); err != nil {
-		t.Fatalf("DeleteConnector: %v", err)
-	}
-	_, b, err = s.ListFilesWithIngest(ctx, ws)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.LastRun != nil {
-		t.Errorf("after the web connector was deleted its old poll run counts as the last ingest: %+v", b)
-	}
-}
-
 // BudgetPaused is a fact about the latest run, whatever its connector: the
 // budget is the bench's.
 func TestListFilesWithIngestBudgetPaused(t *testing.T) {
@@ -680,8 +661,8 @@ func TestListFilesWithIngestBudgetPaused(t *testing.T) {
 	if !b.BudgetPaused {
 		t.Error("the latest run is over_budget but the bench is not budget-paused")
 	}
-	if b.LastRun == nil || !b.LastRun.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) {
-		t.Errorf("an over_budget run moved LastRun: %+v", b)
+	if b.PendingRun {
+		t.Errorf("an over_budget run reads as pending: %+v", b)
 	}
 	// A research run after it says nothing about the budget; a later build does.
 	insert("research", "succeeded", "2026-10-03T00:00:00Z")
@@ -694,9 +675,9 @@ func TestListFilesWithIngestBudgetPaused(t *testing.T) {
 	}
 }
 
-// A path that was skipped and also listed as read (the store does not require
-// the lists to be disjoint) keeps its skip: the clear must not undo the write
-// that preceded it in the same transaction and report it changed anyway.
+// A skipped path is also a staged path (the sink stages before it reads), so
+// it keeps its skip: the clear must not undo the write that preceded it in
+// the same transaction and report it changed anyway.
 func TestRecordFileSkipsPathInBothListsKeepsItsSkip(t *testing.T) {
 	s, ws := jobStore(t)
 	mustCreateFile(t, s, ws, "a.pdf", "a1")
@@ -706,19 +687,19 @@ func TestRecordFileSkipsPathInBothListsKeepsItsSkip(t *testing.T) {
 	}
 
 	changed, err := s.RecordFileSkips(context.Background(), ws,
-		[]FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "no_text"}}, []string{"a.pdf", "b.pdf"}, time.Now())
+		[]FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "no_text"}}, map[string]string{"a.pdf": "a1", "b.pdf": "b1"}, time.Now())
 	if err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if want := []string{"a.pdf"}; !slices.Equal(changed, want) {
 		t.Errorf("changed = %v, want %v", changed, want)
 	}
-	if got := readSkip(t, s, ws, "a.pdf"); strOf(got.reason) != "no_text" {
-		t.Errorf("a.pdf skip after being listed as read too: %q, want no_text kept", strOf(got.reason))
+	if got := readSkip(t, s, ws, "a.pdf"); strOf(got.class) != "no_text" {
+		t.Errorf("a.pdf skip after being listed as read too: %q, want no_text kept", strOf(got.class))
 	}
-	// The read path that was not skipped clears as before.
-	if got := readSkip(t, s, ws, "b.pdf"); got.reason != nil {
-		t.Errorf("b.pdf skip not cleared: %q", strOf(got.reason))
+	// The staged path that was not skipped was read: its skip clears.
+	if got := readSkip(t, s, ws, "b.pdf"); got.class != nil {
+		t.Errorf("b.pdf skip not cleared: %q", strOf(got.class))
 	}
 }
 
@@ -774,9 +755,8 @@ func TestTouchSourcesStampsLiveRowsOnly(t *testing.T) {
 	}
 }
 
-// The red's second finding: a replacement whose bytes differ but whose text
-// does not never regenerates its unit, so only the gate's touch can keep it
-// read. The facts here are what deriveIngest (internal/api) reads: read when
+// A replacement whose bytes differ but whose text does not never regenerates
+// its unit, so only the gate's touch can keep it read. The facts here are what deriveIngest (internal/api) reads: read when
 // the source was fetched at or after the bytes changed.
 func TestReplacementWithUnchangedTextStaysReadOnceTouched(t *testing.T) {
 	s, ws := jobStore(t)

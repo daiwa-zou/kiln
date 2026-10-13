@@ -129,8 +129,8 @@ func (s *WikiStore) CreateFile(ctx context.Context, f FileRow) (id, replacedBlob
 // Resuming a file the wiki has never read marks its content as changed, so
 // the Ingest view says "waiting" rather than "not read by the last ingest":
 // the last ingest skipped it on purpose. A resumed file that has a live source
-// row keeps its stamp, because its pages are still current. The key literal
-// is the same one ListFilesWithIngest joins on (see uploadDocKeyPrefix).
+// row keeps its stamp, because its pages are still current. $4 is the upload
+// key prefix ListFilesWithIngest joins on (uploadDocKeyPrefix).
 func (s *WikiStore) SetFileEnabled(ctx context.Context, workspaceID, id string, enabled bool) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE workspace_files SET enabled = $3, updated_at = now(),
@@ -138,10 +138,10 @@ func (s *WikiStore) SetFileEnabled(ctx context.Context, workspaceID, id string, 
 		        WHEN $3::boolean AND NOT EXISTS (
 		            SELECT 1 FROM sources s
 		            WHERE s.workspace_id = workspace_files.workspace_id
-		              AND s.key = 'doc:upload:' || workspace_files.path
+		              AND s.key = $4::text || workspace_files.path
 		              AND s.deleted_at IS NULL)
 		        THEN now() ELSE content_changed_at END
-		WHERE workspace_id = $1 AND id = $2`, workspaceID, id, enabled)
+		WHERE workspace_id = $1 AND id = $2`, workspaceID, id, enabled, uploadDocKeyPrefix)
 	if err != nil {
 		return fmt.Errorf("store: set file enabled: %w", err)
 	}

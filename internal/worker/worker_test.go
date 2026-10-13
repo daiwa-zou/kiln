@@ -105,10 +105,13 @@ func (f *fakeStore) PollDueConnectors(context.Context, time.Duration) ([]store.C
 func (f *fakeStore) EnqueueRun(context.Context, string, string, string) (string, bool, error) {
 	return "", false, nil
 }
+func (f *fakeStore) EnqueueRunOpts(context.Context, string, string, string, store.EnqueueOptions) (string, bool, error) {
+	return "", false, nil
+}
 func (f *fakeStore) ListFiles(context.Context, string) ([]store.FileRow, error) {
 	return f.files, nil
 }
-func (f *fakeStore) RecordFileSkips(context.Context, string, []store.FileSkip, []string, time.Time) ([]string, error) {
+func (f *fakeStore) RecordFileSkips(context.Context, string, []store.FileSkip, map[string]string, time.Time) ([]string, error) {
 	return nil, nil
 }
 func (f *fakeStore) QueueDepth(context.Context) (map[string]int, error) {

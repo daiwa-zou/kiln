@@ -73,22 +73,21 @@ func getRaw(t *testing.T, srv *httptest.Server, path, token string) string {
 func TestFilesListJSONShape(t *testing.T) {
 	uploaded := time.Date(2026, 10, 10, 9, 30, 0, 0, time.FixedZone("CEST", 2*3600))
 	readAt := time.Date(2026, 10, 11, 7, 0, 0, 0, time.FixedZone("CEST", 2*3600))
-	lastRun := readAt.Add(time.Minute)
+	stagedAt := readAt.Add(time.Minute)
 	pages := 6
 	class := "no_text"
 
 	read := store.FileIngestRow{HasSource: true, Pages: &pages, ReadAt: &readAt, ContentAt: uploaded}
 	read.FileRow = store.FileRow{ID: "f1", Path: "docs/a.pdf", DisplayName: "A", SizeBytes: 1234,
 		SHA256: "aa", ContentType: "application/pdf", Enabled: true, CreatedAt: uploaded, UpdatedAt: uploaded}
-	waiting := store.FileIngestRow{ContentAt: lastRun.Add(time.Hour)}
+	waiting := store.FileIngestRow{ContentAt: stagedAt.Add(time.Hour), StagedAt: &stagedAt}
 	waiting.FileRow = store.FileRow{ID: "f2", Path: "docs/b.xlsx", SizeBytes: 5, SHA256: "bb", Enabled: true,
-		CreatedAt: lastRun.Add(time.Hour), UpdatedAt: lastRun.Add(time.Hour)}
-	skipped := store.FileIngestRow{SkipClass: &class, SkipLive: true, ContentAt: uploaded}
+		CreatedAt: stagedAt.Add(time.Hour), UpdatedAt: stagedAt.Add(time.Hour)}
+	skipped := store.FileIngestRow{SkipClass: &class, SkipLive: true, ContentAt: uploaded, StagedAt: &stagedAt}
 	skipped.FileRow = store.FileRow{ID: "f3", Path: "scan.pdf", DisplayName: "Scan", SizeBytes: 7, SHA256: "cc",
 		Enabled: true, CreatedAt: uploaded, UpdatedAt: uploaded}
 
-	files := &ingestFakeFiles{rows: []store.FileIngestRow{read, waiting, skipped},
-		bench: store.FileIngestBench{LastRun: &lastRun}}
+	files := &ingestFakeFiles{rows: []store.FileIngestRow{read, waiting, skipped}}
 	srv := ingestServer(files)
 	defer srv.Close()
 
@@ -151,7 +150,7 @@ func TestFilesListJSONShape(t *testing.T) {
 	want := map[string]string{
 		"f1": `{"status":"read","pages":6,"readAt":"2026-10-11T05:00:00Z","reason":null,"class":null}`,
 		"f2": `{"status":"waiting","pages":null,"readAt":null,"reason":null,"class":null}`,
-		"f3": `{"status":"skipped","pages":null,"readAt":null,"reason":"No text found, probably a scan. Upload a text version.","class":"no_text"}`,
+		"f3": `{"status":"skipped","pages":null,"readAt":null,"reason":"No text found, probably a scan. Upload a text version in its place, or delete this one.","class":"no_text"}`,
 	}
 	for _, r := range rows {
 		id := strings.Trim(string(r["id"]), `"`)

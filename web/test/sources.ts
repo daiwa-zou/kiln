@@ -1,7 +1,8 @@
 // Loads the legacy internal/api/ui/sources.js into the test's jsdom window and
 // hands back the pure ingest-status helpers, so the Ingest page's rules (the
-// Documents summary, the row chips, the reason line, the attention line and
-// the connector bar) are checked against the code that runs in production.
+// Documents summary, the row chips, the reason line, the attention line, the
+// connector bar and the in-place refresh after a run) are checked against the
+// code that runs in production.
 //
 // sources.js is a classic script that only declares functions and constants
 // and resolves app.js's helpers (esc, relTime, api, …) at call time, so it is
@@ -35,6 +36,10 @@ export interface Connector {
   lastSynced?: string;
 }
 
+export interface Run {
+  status: string;
+}
+
 export interface Health {
   pct: number;
   cls: string;
@@ -48,6 +53,14 @@ export interface Summary {
   paused: number;
 }
 
+// What the view hands patchIngestStatus: the queue state, the upload
+// connector when the caller can see one, and the row renderer it owns.
+export interface PatchContext {
+  buildActive: boolean;
+  upload?: Connector;
+  rows: (files: FileRow[]) => string;
+}
+
 export interface Sources {
   plural(n: number, word: string): string;
   ingestSummary(files: FileRow[]): Summary;
@@ -57,6 +70,10 @@ export interface Sources {
   ingestReason(f: FileRow): string;
   attentionLine(files: FileRow[]): string;
   connectorHealth(c: Connector, unread?: number): Health;
+  runsActive(runs: Run[]): boolean;
+  docsNoteHTML(files: FileRow[], buildActive: boolean): string;
+  docsGlossHTML(files: FileRow[], uploadPaused: boolean): string;
+  patchIngestStatus(root: ParentNode, files: FileRow[], ctx: PatchContext): void;
 }
 
 // The app.js helpers the exported functions call.
@@ -66,7 +83,8 @@ export interface Helpers {
 }
 
 const EXPORTS = ["plural", "ingestSummary", "ingestSummaryText", "unreadCount", "ingestChip",
-  "ingestReason", "attentionLine", "connectorHealth"] as const;
+  "ingestReason", "attentionLine", "connectorHealth", "runsActive", "docsNoteHTML", "docsGlossHTML",
+  "patchIngestStatus"] as const;
 
 // esc as app.js defines it (app.js:587), copied rather than evaluated out of
 // app.js: the loader in legacy.ts returns the characterized functions only,

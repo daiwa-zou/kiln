@@ -6,34 +6,22 @@ import (
 	"testing"
 )
 
-// Source-level pins for the per-document ingest status on the Ingest view
-// (ST-U-2). Behaviour is a browser check; these catch the rules a reviewer
-// would otherwise have to remember: the helpers exist, the connector bar can
-// no longer say "Read cleanly" unconditionally, and the skip reason (text
-// about a member's file) never reaches the DOM except through esc().
+// Source-level pins for the per-document ingest status on the Ingest view.
+// What the helpers do is proven by web/test/ingest-status.test.ts, which runs
+// sources.js; these hold only what that cannot see: that the helpers are
+// called from the view, that the connector bar can no longer say "Read
+// cleanly" unconditionally, that the skip reason (text about a member's
+// file) never reaches the DOM except through esc(), and the help copy, which
+// lives in app.js where the vitest loader does not reach.
 
-// TestUIIngestStatusHelpersExist pins the pure helpers the row, the stat and
-// the Documents header share, so ROADMAP item 11 can build on the same names.
-func TestUIIngestStatusHelpersExist(t *testing.T) {
-	src := uiSource(t, "sources.js")
-	for _, want := range []string{
-		"function ingestSummary(",
-		"function unreadCount(",
-		"function ingestChip(",
-		"function ingestReason(",
-		"function attentionLine(",
-		"function connectorHealth(",
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("sources.js: missing %q", want)
-		}
-	}
-	// The helpers are used, not merely defined: each call site has to appear
-	// on a line that is not a function declaration, so `function ingestChip(f,
-	// …) {` does not stand in for the row that renders the chip. The `${`
-	// prefixes pin the template positions; unreadCount feeds the bar and the
-	// Ingest now link through unreadDocs.
-	calls := withoutDeclarations(src)
+// TestUIIngestStatusHelpersUsed pins the call sites: each helper has to
+// appear on a line that is not a function declaration, so `function
+// ingestChip(f, …) {` does not stand in for the row that renders the chip. The
+// `${` prefixes pin the template positions; unreadCount feeds the bar and the
+// Ingest now link through unreadDocs; patchIngestStatus is what a settled run
+// reaches the page through.
+func TestUIIngestStatusHelpersUsed(t *testing.T) {
+	calls := withoutDeclarations(uiSource(t, "sources.js"))
 	for _, want := range []string{
 		"ingestSummary(files)",
 		"${ingestChip(f",
@@ -41,6 +29,8 @@ func TestUIIngestStatusHelpersExist(t *testing.T) {
 		"${attentionLine(files)",
 		"connectorHealth(c,",
 		"unreadCount(summary)",
+		"patchIngestStatus(document,",
+		"onSettle: refreshDocuments",
 	} {
 		if !strings.Contains(calls, want) {
 			t.Errorf("sources.js: %q is never called", want)
@@ -87,8 +77,8 @@ func stripComments(src string) string {
 // the return that carries it must be preceded by the unread guard as a live
 // statement: comments are stripped first, and the guard has to start its own
 // line, so neither `// if (unread > 0) …` nor a `/* … */` block around it,
-// on one line or several, counts.
-// The behaviour itself is proven by web/test/ingest-status.test.ts.
+// on one line or several, counts. The bar's call site has to hand the unread
+// count over, or the guard is never reached.
 func TestUIConnectorBarGuardsReadCleanly(t *testing.T) {
 	src := stripComments(uiSource(t, "sources.js"))
 	const literal = `"Read cleanly"`
@@ -102,7 +92,7 @@ func TestUIConnectorBarGuardsReadCleanly(t *testing.T) {
 		t.Errorf("sources.js: %q is not guarded by a live unread check within the preceding 400 chars:\n%s", literal, before)
 	}
 	for _, want := range []string{
-		`"Some documents are unread; see below."`,
+		`"Some documents were not read; see below."`,
 		`connectorHealth(c, c.kind === "upload" ? unreadDocs : 0)`,
 	} {
 		if !strings.Contains(src, want) {
@@ -139,47 +129,25 @@ func TestUIIngestReasonIsEscaped(t *testing.T) {
 	if reason == 0 || class == 0 {
 		t.Errorf("sources.js: want both the reason and the class rendered; got reason=%d class=%d", reason, class)
 	}
-	// The reason is a visible line, not a hover: it sits in its own element
-	// with the class token as a data attribute, never only in a title.
-	if !strings.Contains(src, `data-class="${esc(f.ingest?.class)}"`) {
-		t.Error("sources.js: the reason line does not carry data-class")
-	}
-	if strings.Contains(src, `title="${esc(f.ingest?.reason)}"`) {
-		t.Error("sources.js: the reason is hover-only")
+}
+
+// TestUIIngestHelpExplainsStates pins the one sentence a member reads about
+// the three states, in the Ingest help popover (app.js) and the Getting
+// started panel (sources.js). Markup and line wrapping are taken out before
+// the match, so the pin is the words, not the layout.
+func TestUIIngestHelpExplainsStates(t *testing.T) {
+	const want = "Each uploaded document shows one of three states: read (and how many pages it produced), " +
+		"waiting for the next ingest, or not read, with the reason on its row. Paused documents are left out."
+	for _, name := range []string{"app.js", "sources.js"} {
+		if !strings.Contains(prose(uiSource(t, name)), want) {
+			t.Errorf("%s: the help copy does not say %q", name, want)
+		}
 	}
 }
 
-// TestUIIngestCopy pins the words a member reads, so a rewording is a
-// deliberate change to the story's done-when rather than drift.
-func TestUIIngestCopy(t *testing.T) {
-	src := uiSource(t, "sources.js")
-	for _, want := range []string{
-		"Waiting for the next ingest",
-		`>Not read</span>`,
-		`plural(ing.pages, "page")`,
-		"ingest in progress",
-		`data-ingest-now>Ingest now</button>`,
-		`${n.notRead} not read`,
-		`${n.paused} paused`,
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("sources.js: missing %q", want)
-		}
-	}
-	// The attention line's two forms.
-	if !strings.Contains(src, `${n === 1 ? "was" : "were"} not read`) {
-		t.Error("sources.js: the attention line does not say 'was not read' / 'were not read'")
-	}
-	// The Documents note's Ingest now presses the existing button rather than
-	// enqueueing on its own.
-	if !strings.Contains(src, `[data-ingest-now]`) || !strings.Contains(src, "buildBtn?.click()") {
-		t.Error("sources.js: the note's Ingest now is not wired to the header button")
-	}
-	// The help popover says what the three words mean.
-	app := uiSource(t, "app.js")
-	for _, want := range []string{"<em>read</em>", "<em>waiting</em>", "<em>not read</em>"} {
-		if !strings.Contains(app, want) {
-			t.Errorf("app.js: the Ingest help does not explain %q", want)
-		}
-	}
+// prose flattens a UI source for a copy match: tags gone, whitespace runs
+// collapsed to one space.
+func prose(src string) string {
+	src = regexp.MustCompile(`</?[a-z]+>`).ReplaceAllString(src, "")
+	return strings.Join(strings.Fields(src), " ")
 }

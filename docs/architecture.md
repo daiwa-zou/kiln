@@ -451,58 +451,50 @@ Failing the whole run would stop the repository, the web pages, and every
 healthy document from ingesting — turning a storage incident into an outage.
 
 **Per-document ingest status.** A document that extraction could not read — an
-image-only PDF, a type no extractor on this server handles — is also skipped
-and the build continues, but it files no review item: there is nothing for a
-human to decide, only something for the uploader to know. The Ingest view
-therefore shows one status per uploaded document, derived at read time from the
-file row, its source record and the bench's runs:
+image-only PDF, a type no extractor on this server handles, a file hidden by
+name — is also skipped and the build continues, but it files no review item:
+there is nothing for a human to decide, only something for the uploader to
+know. The Ingest view shows one status per uploaded document, derived at read
+time from facts on the file row and its source record:
 
 | Status | Means |
 | --- | --- |
-| read, with its page count | A source record exists and was read since the bytes last changed. The count unions the document's own pages with those of its section units. |
-| waiting for the next ingest | Uploaded or replaced after the last build that could have read it, or a build that could read it is queued or running. A run that stages no uploads counts as neither: a poll (also once its connector is deleted, which unpins its old runs), or a run pinned to any connector but the files-mode upload one (git, web, an upload connector reading a folder). |
-| not read, with a plain-language reason | The worker recorded a skip for exactly these bytes. |
+| read, with its page count | A source record exists and was read (`fetched_at`) since the bytes last changed (`content_changed_at`). The count unions the document's own pages with those of its section units. |
+| waiting for the next ingest | No build has staged these bytes yet (`staged_at` is null or older than the change), or a build is queued or running. |
+| not read, with a reason | A skip is recorded for exactly these bytes (`skip_class`, live while `skip_sha256 = sha256`), or a build staged these bytes and left neither a source nor a skip. |
 | paused | `enabled = false` and no source record; a paused document that has one stays read. |
 
-A server build records a skip through the worker; `kiln build` prints it, as
-it always has. What the worker stores on `workspace_files` is a short
-**class token** (`no_text`, `extractor_missing`, `unsupported_type`,
-`timed_out`, `extractor_error`), never the extractor's own text about the file;
-the API maps the token to a fixed sentence, and the raw text — sanitized and
-capped — goes to the operator log only, with the run and the workspace. The skip
-is tied to the **sha256 of the skipped bytes**: it is live only while the row's
-hash still matches, so a replacement voids it with no clearing logic, and
-re-uploading the identical bytes keeps it, because they are still unreadable.
-Web-source skips (a 404, a refused host) take the same path through the sink but
-are **logged only**; nothing on the connector row records them. Skips are
+The worker's skip sink writes the facts after the sync and before any unit
+runs: it stamps `staged_at` on every file it materialized and records a
+**class token** on the skipped ones (`no_text`, `extractor_missing`,
+`unsupported_type`, `timed_out`, `extractor_error`, `hidden_path`), never the
+extractor's own text about the file. Both writes are guarded by the sha256 of
+the bytes that were staged, so a file replaced while the build ran is left
+alone and reads as waiting. The API maps the token to a fixed sentence; the raw
+text — sanitized and capped by the sink, the one owner of that — goes to the
+operator log only. Because the stamp is written by the build that staged the
+file, nothing about the run (its trigger, the connector it was pinned to) is
+consulted: a poll of a git connector or a run over a folder never stamps an
+upload, so an upload they pass over stays waiting; a bench with no upload
+connector in files mode never stages and its documents stay waiting. Web-source
+skips take the same path through the sink but are logged only. Skips are
 counted on `kiln_documents_skipped_total{kind,class}` the first time they are
-seen: for an upload in files mode that is when the row's skip changes, and for
-a web page or a path-mode folder the worker remembers what it has already
-logged, so a rebuild repeats a known skip at Debug and uncounted.
+seen: for an upload in files mode when the row's skip changes, otherwise by
+the worker's memory of what it has logged, so a rebuild repeats a known skip at
+Debug and uncounted.
 
-"Read" means the source was read since the bytes last changed. A build that
-finds a document's extracted text unchanged (a re-saved PDF with the same
-words) regenerates nothing, so the hash gate itself stamps those sources as
-read; without that a harmless replacement would read as never read again.
-
-"Not read" with no recorded reason is the fallback for a document the last
-build did not read and did not explain: an upload from before this version,
-whose skip was discarded at the time, or a unit that failed. A rebuild records
-the reason or reads the document. While the bench's latest run was refused
-over budget, that sentence instead says the bench has used its budget and asks
-for Ingest now once the window has reset: a refusal enqueues no continuation,
-so on a manual or webhook bench nothing reads the document on its own, and an
-ingest pressed before the reset would be refused too. A bench whose upload
-connector is **disabled or deleted** shows its documents as waiting or "not
-read" although no connector will stage them; a bench-level fact for that case
-is tracked as ST-E-7. Two caveats are deliberate. A **replaced** document
-keeps its old pages until the next ingest reads the new bytes, and reads as
-waiting meanwhile; the old pages are not removed or marked, because the source
-record that owns them is rewritten by the build, not by the upload. And a
-document replaced **while a build is running** shows "read" with the previous
-pages until the next ingest: the skip sink runs after the sync and before the
-units, so a replacement that lands later in the build is not seen until the
-next one.
+Three refinements follow from the facts. A build that finds a document's
+extracted text unchanged (a re-saved PDF with the same words) regenerates
+nothing, so the hash gate itself stamps that document's source as read. "Not
+read" with no recorded class is a build that staged the file and left no
+trace: a unit that failed, or a build interrupted after its sync; while the
+bench's latest run was refused over budget the sentence instead says the bench
+has used its budget and asks for Ingest now once the window has reset, because
+a refusal enqueues no continuation. And two windows are deliberate: a
+**replaced** document keeps its old pages until the next ingest reads the new
+bytes, reading as waiting meanwhile, and a document replaced **while a build is
+running** shows "read" with the previous pages until the next ingest, because
+the sink sees only what the sync staged.
 
 ---
 
@@ -1064,14 +1056,15 @@ Points worth knowing:
 - **`spend_ledger` is never swept.** Budget windows read it; run deletion nulls
   its `run_id` rather than cascading into it.
 - **`workspace_files` carries its ingest facts** (migration 021, all nullable,
-  no backfill): `skip_reason` is a class token of at most 40 characters, never
-  extractor text; `skip_sha256` is the hash of the bytes that were skipped, and
-  the skip counts only while it equals `sha256`; `skipped_at`; and
+  no backfill): `staged_at` is when a build last staged the current bytes,
+  written by the worker's sink; `skip_class` is a class token of at most 40
+  characters, never extractor text; `skip_sha256` is the hash of the bytes
+  that were skipped, and the skip counts only while it equals `sha256`; and
   `content_changed_at`, which moves only when the hash changes — `updated_at`
   moves on rename and pause and `created_at` never moves on a re-upload, so
   neither can say "changed since read". Readers fall back to `created_at`.
 
-**Run statuses:** `pending`, `running`, `succeeded`, `partial`, `failed`,
+**Run statuses:** `queued`, `running`, `succeeded`, `partial`, `failed`,
 `no_changes`, `over_budget`, `canceled`.
 
 ```mermaid

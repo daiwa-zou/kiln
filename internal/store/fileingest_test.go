@@ -2,18 +2,17 @@ package store
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/daiwa-zou/kiln/internal/diff"
 )
 
-// The SQL joins sources on 'doc:upload:' || path, a literal Postgres builds;
-// every producer builds the same key through diff.DocKey(diff.UploadOrigin).
-// If the two ever drift the join matches nothing and every document reads as
-// unread, so the literal is pinned here against the Go side for the path
-// shapes an upload can take.
-func TestUploadDocKeyParity(t *testing.T) {
+// The SQL joins sources on uploadDocKeyPrefix || path, so it assumes the key
+// of an uploaded document is its path appended to a fixed prefix. diff owns
+// the key; if it ever did more than append (escaped a character, say) the
+// join would match nothing and every document would read as unread, so the
+// assumption is pinned for the path shapes an upload can take.
+func TestUploadDocKeyIsPrefixPlusPath(t *testing.T) {
 	paths := []string{
 		"plan.md",
 		"notes/plan.md",
@@ -27,19 +26,14 @@ func TestUploadDocKeyParity(t *testing.T) {
 	for _, p := range paths {
 		want := string(diff.DocKey(diff.UploadOrigin(p)))
 		if got := uploadDocKeyPrefix + p; got != want {
-			t.Errorf("%q: SQL literal gives %q, diff gives %q", p, got, want)
+			t.Errorf("%q: prefix || path gives %q, diff gives %q", p, got, want)
 		}
-	}
-
-	// The constant is only a promise if the SQL actually spells it.
-	literal := "'" + uploadDocKeyPrefix + "' || f.path"
-	if !strings.Contains(listFilesWithIngestSQL, literal) {
-		t.Errorf("listFilesWithIngestSQL does not join on %s", literal)
 	}
 }
 
-// sortFileSkips fixes the lock order and collapses a path given twice, so the
-// update never visits one target row from two source rows.
+// sortFileSkips collapses a path given twice and orders the batch, so the
+// update never visits one target row from two source rows and the changed
+// list is deterministic.
 func TestSortFileSkips(t *testing.T) {
 	in := []FileSkip{
 		{Path: "b.pdf", SHA256: "b1", Class: "no_text"},

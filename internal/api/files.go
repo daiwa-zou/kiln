@@ -42,7 +42,6 @@ import (
 
 // FileStore is the workspace-file surface; *store.WikiStore implements it.
 type FileStore interface {
-	ListFiles(ctx context.Context, workspaceID string) ([]store.FileRow, error)
 	ListFilesWithIngest(ctx context.Context, workspaceID string) ([]store.FileIngestRow, store.FileIngestBench, error)
 	CreateFile(ctx context.Context, f store.FileRow) (id, replacedBlobKey string, err error)
 	SetFileEnabled(ctx context.Context, workspaceID, id string, enabled bool) error
@@ -65,10 +64,12 @@ const (
 	errNoBlobStore = "uploads are unavailable: object storage is not configured (set storage.* and restart)"
 )
 
-// fileResponse is one row of GET .../files. A struct rather than a map so the
-// key set is a compile-time contract the UI and the tests can pin; the nine
-// original keys keep their names and values, ingest is the addition.
-type fileResponse struct {
+// FileJSON is one row of GET .../files. A struct rather than a map so the key
+// set is a compile-time contract the UI and the tests can pin; the nine
+// original keys keep their names and values, ingest is the addition. Exported
+// like the other response types (RunSummaryJSON, PageSummary), which is what
+// the generated API types are read from.
+type FileJSON struct {
 	ID          string     `json:"id"`
 	Path        string     `json:"path"`
 	Name        string     `json:"name"`
@@ -78,11 +79,11 @@ type fileResponse struct {
 	Enabled     bool       `json:"enabled"`
 	Uploaded    string     `json:"uploaded"`
 	Updated     string     `json:"updated"`
-	Ingest      ingestJSON `json:"ingest"`
+	Ingest      IngestJSON `json:"ingest"`
 }
 
 // fileJSON shapes one file row and its ingest facts for responses.
-func fileJSON(f store.FileIngestRow, bench store.FileIngestBench) fileResponse {
+func fileJSON(f store.FileIngestRow, bench store.FileIngestBench) FileJSON {
 	// Rows uploaded before display names existed carry an empty one. Deriving
 	// it here rather than backfilling keeps the migration a pure schema change:
 	// the derivation reads the filename and nothing else, so it answers the
@@ -91,7 +92,7 @@ func fileJSON(f store.FileIngestRow, bench store.FileIngestBench) fileResponse {
 	if name == "" {
 		name = naming.FromFilename(f.Path)
 	}
-	return fileResponse{
+	return FileJSON{
 		ID: f.ID, Path: f.Path, Name: name,
 		Size: f.SizeBytes, SHA256: f.SHA256,
 		ContentType: f.ContentType,
@@ -137,7 +138,7 @@ func (s *Server) handleFilesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// make, not a nil slice: an empty bench must answer [] rather than null.
-	out := make([]fileResponse, 0, len(rows))
+	out := make([]FileJSON, 0, len(rows))
 	for _, f := range rows {
 		out = append(out, fileJSON(f, bench))
 	}

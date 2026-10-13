@@ -101,14 +101,14 @@ func TestServerBuildRecordsAndLogsASkippedUploadWithoutAReview(t *testing.T) {
 	if len(st.failed) != 0 {
 		t.Fatalf("a skipped document failed the run: %v", st.failed)
 	}
-	// Recorded against the staged sha, with the document that read listed so
-	// a stale skip on it clears.
+	// Recorded against the staged sha, with every staged document listed so
+	// the rows are stamped and a stale skip on the one that read clears.
 	if len(st.skipCalls) != 1 {
 		t.Fatalf("RecordFileSkips called %d times, want once", len(st.skipCalls))
 	}
 	want := recordedSkips{
-		skips:     []store.FileSkip{{Path: "bad.pdf", SHA256: "sha-bad.pdf", Class: upload.SkipNoText}},
-		readPaths: []string{"ok.md"},
+		skips:  []store.FileSkip{{Path: "bad.pdf", SHA256: "sha-bad.pdf", Class: upload.SkipNoText}},
+		staged: map[string]string{"bad.pdf": "sha-bad.pdf", "ok.md": "sha-ok.md"},
 	}
 	if !reflect.DeepEqual(st.skipCalls[0], want) {
 		t.Errorf("RecordFileSkips(%+v), want %+v", st.skipCalls[0], want)
@@ -273,7 +273,7 @@ func TestRepeatsSpendNoLogCapAtTheDefaultLevel(t *testing.T) {
 		t.Errorf("a rebuild of stable scans raised a summary: %v", more)
 	}
 
-	// The red's reproduction: one new scan behind the repeats.
+	// One new scan behind the repeats must still be named.
 	addFile(t, w, st, "bad99-new.pdf", blankPDF)
 	buf.Reset()
 	w.process(context.Background(), filesRun("r3"))
@@ -408,10 +408,10 @@ func TestWebSkipsAreLoggedWithTheHostAndNeverPersisted(t *testing.T) {
 			t.Errorf("web line lacks %s: %s", attr, lines[0])
 		}
 	}
-	// The one write clears the read upload's stale skip and records nothing
-	// for the page: there is no row to record it on.
-	if len(st.skipCalls) != 1 || len(st.skipCalls[0].skips) != 0 || !reflect.DeepEqual(st.skipCalls[0].readPaths, []string{"ok.md"}) {
-		t.Errorf("RecordFileSkips calls = %+v, want one with no skips and ok.md read", st.skipCalls)
+	// The one write stamps the staged upload (clearing any stale skip on it)
+	// and records nothing for the page: there is no row to record it on.
+	if len(st.skipCalls) != 1 || len(st.skipCalls[0].skips) != 0 || !reflect.DeepEqual(st.skipCalls[0].staged, staged) {
+		t.Errorf("RecordFileSkips calls = %+v, want one with no skips and ok.md staged", st.skipCalls)
 	}
 	if body := scrapeMetrics(t, w); !strings.Contains(body, `kiln_documents_skipped_total{class="extractor_error",kind="web"} 1`) {
 		t.Errorf("web skip not counted:\n%s", body)

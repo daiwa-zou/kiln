@@ -55,14 +55,28 @@ type SkipReason struct {
 
 // The skip classes. A sink keys its persistence, its log and its metric labels
 // on these and nothing else, so an unknown class is folded into
-// SkipExtractorError rather than given a label of its own.
+// SkipExtractorError rather than given a label of its own. The set is closed
+// by construction: skipClass and Sync are the only producers.
 const (
 	SkipNoText           = "no_text"
 	SkipExtractorMissing = "extractor_missing"
 	SkipUnsupportedType  = "unsupported_type"
 	SkipTimedOut         = "timed_out"
 	SkipExtractorError   = "extractor_error"
+	// SkipHiddenPath is a file the walk leaves out by name: dot-prefixed, or
+	// under a folder nothing should read (.git, node_modules, ...). Reported
+	// rather than dropped, because a server upload of one is otherwise staged
+	// and silently never read.
+	SkipHiddenPath = "hidden_path"
 )
+
+// SkipClasses lists every class a Skip may carry, for the consumers that key
+// on the set (the API's sentence table, the metric's label list) to check
+// themselves against: a class added here and nowhere else would otherwise
+// fold into SkipExtractorError on both without a test failing.
+var SkipClasses = []string{
+	SkipNoText, SkipExtractorMissing, SkipUnsupportedType, SkipTimedOut, SkipExtractorError, SkipHiddenPath,
+}
 
 // Sync extracts every supported document under the configured path.
 //
@@ -100,7 +114,7 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		figures = extract.FigureOptions{}
 	}
 
-	files, err := listDocuments(abs)
+	files, hidden, err := listDocuments(abs)
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +124,9 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		docs  []docmap.Doc
 		skips []SkipReason
 	)
+	for _, rel := range hidden {
+		skips = append(skips, SkipReason{Path: rel, Reason: "hidden file or folder", Class: SkipHiddenPath})
+	}
 
 	for _, rel := range files {
 		full := filepath.Join(abs, filepath.FromSlash(rel))
@@ -217,18 +234,21 @@ func skipClass(err error) string {
 	}
 }
 
-// excludedDirs are never descended into.
+// excludedDirs are never read from.
 var excludedDirs = map[string]bool{
 	".git": true, "node_modules": true, ".cache": true,
 	"__MACOSX": true, ".obsidian": true,
 }
 
 // listDocuments walks a folder for candidate files, in sorted order so a sync
-// is reproducible.
-func listDocuments(root string) ([]string, error) {
-	var out []string
-
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+// is reproducible. files are the ones to read; hidden are the ones left out
+// by name -- dot-prefixed, or anywhere under an excluded folder -- that would
+// otherwise have been candidates. They are returned rather than dropped so
+// Sync can report them: a server upload of one is staged like any other, and
+// without a skip it would read as never ingested with no reason given. A file
+// of a format nothing reads is not a candidate anywhere and stays unreported.
+func listDocuments(root string) (files, hidden []string, err error) {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// An unreadable subtree should not abort the walk; the rest of the
 			// folder is still worth ingesting.
@@ -238,31 +258,41 @@ func listDocuments(root string) ([]string, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if excludedDirs[d.Name()] {
-				return fs.SkipDir
-			}
 			return nil
 		}
-		if !d.Type().IsRegular() || strings.HasPrefix(d.Name(), ".") {
+		if !d.Type().IsRegular() || extract.DetectFormat(path) == extract.FormatUnknown {
 			return nil
 		}
-		if extract.DetectFormat(path) == extract.FormatUnknown {
-			return nil
-		}
-
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil {
 			return nil
 		}
-		out = append(out, filepath.ToSlash(rel))
+		if isHiddenPath(rel) {
+			hidden = append(hidden, filepath.ToSlash(rel))
+			return nil
+		}
+		files = append(files, filepath.ToSlash(rel))
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("connector/upload: walk: %w", err)
+		return nil, nil, fmt.Errorf("connector/upload: walk: %w", err)
 	}
 
-	sort.Strings(out)
-	return out, nil
+	sort.Strings(files)
+	sort.Strings(hidden)
+	return files, hidden, nil
+}
+
+// isHiddenPath says whether a relative path is left out by name: a
+// dot-prefixed file, or any entry of its path that is dot-prefixed or an
+// excluded folder.
+func isHiddenPath(rel string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		if strings.HasPrefix(part, ".") || excludedDirs[part] {
+			return true
+		}
+	}
+	return false
 }
 
 // stage writes extracted text beside the staging root as markdown.

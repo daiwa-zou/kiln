@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,56 @@ func TestSyncSkipsUnextractableFilesWithoutFailing(t *testing.T) {
 	// The skip must say a tool is missing, not that the document is broken.
 	if !strings.Contains(payload.Skipped[0].Reason, "not installed") {
 		t.Errorf("skip reason = %q, want it to name the missing tool", payload.Skipped[0].Reason)
+	}
+}
+
+// A file the walk leaves out by name is reported, not dropped. On a server
+// the upload API accepts any supported extension under any relative path, so
+// a ._report.pdf or a vault/.obsidian/x.md is staged like the rest; without a
+// skip it would read as never ingested with nothing to say why. A hidden file
+// of a format nothing reads is not a candidate anywhere and stays silent.
+func TestSyncReportsHiddenPathsAsSkips(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"good.md":                   "# Fine\n\nReadable.\n",
+		"._x.md":                    "# AppleDouble shadow\n",
+		"vault/.obsidian/notes.md":  "# Vault config\n",
+		"node_modules/a/readme.md":  "# A package\n",
+		".DS_Store":                 "binary",
+		"vault/.git/config":         "[core]",
+		"vault/__MACOSX/._stale.md": "# Stale\n",
+	})
+
+	set, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(set.Items) != 1 || set.Items[0].Key != "doc:upload:good.md" {
+		t.Errorf("items = %v, want only good.md", itemKeys(set))
+	}
+	var got []string
+	for _, sk := range PayloadOf(set).Skipped {
+		if sk.Class != SkipHiddenPath || sk.Partial {
+			t.Errorf("%s: skip = %+v, want class %s", sk.Path, sk, SkipHiddenPath)
+		}
+		got = append(got, sk.Path)
+	}
+	want := []string{"._x.md", "node_modules/a/readme.md", "vault/.obsidian/notes.md", "vault/__MACOSX/._stale.md"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("hidden skips = %v, want %v (sorted, readable formats only)", got, want)
+	}
+}
+
+// SkipClasses is what the API's sentence table and the metric's label list
+// check themselves against, so it must name every class a Skip can carry.
+func TestSkipClassesNamesEveryClass(t *testing.T) {
+	want := []string{SkipNoText, SkipExtractorMissing, SkipUnsupportedType, SkipTimedOut, SkipExtractorError, SkipHiddenPath}
+	if strings.Join(SkipClasses, ",") != strings.Join(want, ",") {
+		t.Errorf("SkipClasses = %v, want %v", SkipClasses, want)
+	}
+	for _, err := range []error{extract.ErrToolMissing, extract.ErrNoExtractor, extract.ErrTimedOut, errors.New("other")} {
+		if class := skipClass(err); !slices.Contains(SkipClasses, class) {
+			t.Errorf("skipClass(%v) = %q, which SkipClasses does not list", err, class)
+		}
 	}
 }
 
