@@ -105,8 +105,14 @@ func (f *fakeStore) PollDueConnectors(context.Context, time.Duration) ([]store.C
 func (f *fakeStore) EnqueueRun(context.Context, string, string, string) (string, bool, error) {
 	return "", false, nil
 }
+func (f *fakeStore) EnqueueRunOpts(context.Context, string, string, string, store.EnqueueOptions) (string, bool, error) {
+	return "", false, nil
+}
 func (f *fakeStore) ListFiles(context.Context, string) ([]store.FileRow, error) {
 	return f.files, nil
+}
+func (f *fakeStore) RecordFileSkips(context.Context, string, []store.FileSkip, map[string]string, time.Time) ([]string, error) {
+	return nil, nil
 }
 func (f *fakeStore) QueueDepth(context.Context) (map[string]int, error) {
 	return map[string]int{"queued": 0, "running": 0}, nil
@@ -163,7 +169,7 @@ func TestSourceSpecResolvesGitAndUpload(t *testing.T) {
 		PermittedSourceRoots: []string{repo, docs},
 	}
 
-	spec, ids, _, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, ids, _, _, err := w.sourceSpec(context.Background(), run("ws1"))
 	if err != nil {
 		t.Fatalf("sourceSpec: %v", err)
 	}
@@ -223,7 +229,7 @@ func TestSourceSpecFilesModeStagesBlobs(t *testing.T) {
 		Blobs: blobs,
 	}
 
-	spec, ids, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, ids, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -270,7 +276,7 @@ func TestSourceSpecFilesModeSkipsPausedFiles(t *testing.T) {
 		Blobs: blobs,
 	}
 
-	spec, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, _, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -308,13 +314,13 @@ func TestSourceSpecFilesModeSurvivesUnreadableBlob(t *testing.T) {
 			{ID: "c2", Kind: "upload", Name: "documents", Config: map[string]any{}},
 		},
 		files: []store.FileRow{
-			{ID: "f1", Path: "present.md", BlobKey: "ws/ws1/uploads/ok", Enabled: true},
-			{ID: "f2", Path: "vanished.md", BlobKey: "ws/ws1/uploads/gone", Enabled: true},
+			{ID: "f1", Path: "present.md", BlobKey: "ws/ws1/uploads/ok", SHA256: "sha-ok", Enabled: true},
+			{ID: "f2", Path: "vanished.md", BlobKey: "ws/ws1/uploads/gone", SHA256: "sha-gone", Enabled: true},
 		},
 	}
 	w := &Worker{Store: st, Blobs: blobs}
 
-	spec, ids, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, ids, staged, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -345,6 +351,12 @@ func TestSourceSpecFilesModeSurvivesUnreadableBlob(t *testing.T) {
 	}
 	if _, ok := spec.BlobKeys[string(want)]; ok {
 		t.Error("unreadable document was attributed to the sync")
+	}
+	// Yet the sink stamps it: the build saw the row and could not read it,
+	// which the Ingest page shows as "not read" rather than as a wait that no
+	// build ends, since every build fails it the same way.
+	if got := staged.SHAs; got["vanished.md"] != "sha-gone" || got["present.md"] != "sha-ok" {
+		t.Errorf("staged SHAs = %v, want both rows, the unreadable one included", got)
 	}
 
 	// And it is surfaced where a human looks, rather than swallowed.
@@ -403,7 +415,7 @@ func TestSourceSpecFilesModeDiscardsATruncatedBlob(t *testing.T) {
 	}
 	w := &Worker{Store: st, Blobs: blobs}
 
-	spec, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, _, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -447,7 +459,7 @@ func TestSourceSpecFilesModeWithZeroFilesIsEmptySync(t *testing.T) {
 		}},
 		Blobs: memBlobs{},
 	}
-	spec, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, _, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -466,7 +478,7 @@ func TestSourceSpecFilesModeWithoutBlobStoreFails(t *testing.T) {
 			{ID: "c2", Kind: "upload", Name: "documents", Config: map[string]any{}},
 		}},
 	}
-	_, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	_, _, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -527,7 +539,7 @@ func TestSourceSpecFailsClosed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &Worker{Store: tc.store, PermittedSourceRoots: tc.roots}
-			_, _, _, err := w.sourceSpec(context.Background(), run("ws1"))
+			_, _, _, _, err := w.sourceSpec(context.Background(), run("ws1"))
 			if err == nil {
 				t.Fatal("sourceSpec succeeded; want failure")
 			}
@@ -553,7 +565,7 @@ func TestSourceSpecPinnedConnector(t *testing.T) {
 
 	r := run("ws1")
 	r.ConnectorID = "pin"
-	spec, ids, _, err := w.sourceSpec(context.Background(), r)
+	spec, ids, _, _, err := w.sourceSpec(context.Background(), r)
 	if err != nil {
 		t.Fatalf("pinned sourceSpec: %v", err)
 	}
@@ -570,7 +582,7 @@ func TestSourceSpecAllowsUploadOnlyWorkspace(t *testing.T) {
 		}},
 		PermittedSourceRoots: []string{docs},
 	}
-	spec, ids, _, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, ids, _, _, err := w.sourceSpec(context.Background(), run("ws1"))
 	if err != nil {
 		t.Fatalf("upload-only sourceSpec: %v", err)
 	}

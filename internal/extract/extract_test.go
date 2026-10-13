@@ -280,6 +280,42 @@ func TestToolTimeoutBoundsWallClockWhenAGrandchildHoldsStdout(t *testing.T) {
 	}
 }
 
+// A converter that hangs is reported as ErrTimedOut, through the dispatch's
+// wrapping too: the upload connector classifies the skip with errors.Is, and
+// matching the message instead would turn every timeout into a plain
+// extractor error the day the message is reworded.
+func TestToolTimeoutIsTheSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script")
+	}
+	hanging := filepath.Join(t.TempDir(), "hanging-converter")
+	if err := os.WriteFile(hanging, []byte("#!/bin/sh\nexec sleep 20\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runTool(context.Background(), hanging, 100*time.Millisecond)
+	if !errors.Is(err, ErrTimedOut) {
+		t.Fatalf("runTool err = %v, want ErrTimedOut", err)
+	}
+	if !strings.Contains(err.Error(), "timed out after 100ms") {
+		t.Errorf("the message lost the tool and the timeout: %v", err)
+	}
+
+	es := Extractors{&PDFExtractor{Binary: hanging, Timeout: 100 * time.Millisecond}}
+	if _, err := es.Extract(context.Background(), writeFile(t, "doc.pdf", "%PDF")); !errors.Is(err, ErrTimedOut) {
+		t.Errorf("Extractors.Extract err = %v, want it to wrap ErrTimedOut", err)
+	}
+
+	// A converter that fails for its own reasons is not a timeout.
+	failing := filepath.Join(t.TempDir(), "failing-converter")
+	if err := os.WriteFile(failing, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runTool(context.Background(), failing, time.Minute); err == nil || errors.Is(err, ErrTimedOut) {
+		t.Errorf("a failing converter reads as a timeout: %v", err)
+	}
+}
+
 // A small compressed PDF can expand to gigabytes of text. The converter must
 // be stopped at the cap, not allowed to fill memory and then checked.
 func TestToolOutputOverTheCapIsRefusedAndTheToolStopped(t *testing.T) {

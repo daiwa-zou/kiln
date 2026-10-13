@@ -782,6 +782,10 @@
     font-family: var(--sans);
   }
   .linkish:hover { color: var(--oxide); }
+  /* In a stat's note the link is one thumb's target on a phone, so it gets
+     the height of one; no left padding, so a wrapped line of the note starts
+     flush with the line above. */
+  .stat-note .linkish { min-height: 24px; padding-left: 0; }
   /* Icon-only row controls: glyphs draw in the button's own color, and the
      two-step delete confirm swaps them for explicit text while armed. */
   .icon-btn { line-height: 0; padding: 5px 8px; }
@@ -1140,6 +1144,25 @@
   #file-drop { border-radius: 12px; transition: box-shadow var(--dur); }
   #file-drop.over { box-shadow: 0 0 0 2px var(--ember); }
   .src-row.file-paused .src-where, .src-row.file-paused .src-name strong { color: var(--ink-faint); }
+  /* A document the last ingest passed over: the chip is oxide like a failed
+     run, and the reason is a line under the path that wraps -- a phone reader
+     has no hover to find it with. */
+  .chip.not-read { border-color: var(--oxide); color: var(--oxide); }
+  .src-reason { font-size: 12px; margin-top: 3px; white-space: normal; }
+  /* The attention line above the list names the skipped files. The lede
+     carries weight so the line is not one more grey hint; each name is a link
+     to its row and keeps the hint's color, underlined so it reads as one. A
+     name is inline-block so it can ellipsize at 375px rather than widen the
+     page. */
+  .ingest-attention { margin: 0 0 10px; }
+  .ingest-attention strong { font-weight: 600; }
+  .ingest-attention ul { margin: 4px 0 0; padding-left: 18px; }
+  .ingest-attention .att-name, .ingest-attention li {
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ingest-attention .att-name { display: inline-block; vertical-align: bottom; }
+  .ingest-attention a.att-name { color: inherit; text-decoration: underline; }
+  .ingest-attention a.att-name:hover { color: var(--oxide); }
 
   /* The run timeline. The two-segment bar makes the content-hash gate --
      kiln's core economic claim -- legible at a glance: how much was written

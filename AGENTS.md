@@ -16,7 +16,7 @@ CI runs five checks. Each one below fails PRs that were green locally.
 | Tidy | `go mod tidy && git diff --exit-code go.mod go.sum` | CI fails on any diff. |
 | Hermetic tests | `make test` | No network, no database, no cost. |
 | Integration + coverage | `make cover` | The **78.0%** floor is measured with `-coverpkg=./...`, so a plain `go test` passes while coverage is under it. A new package, or a cobra wrapper under `cmd/kiln` that no test calls, drags the total down. |
-| UI | `make ui-check` | Needs Node at exactly the version in `.nvmrc` (both `make` targets refuse any other). The trap is the committed build: after any change under `web/` (the HTML shell lives there now, as `web/index.html`, and is built into `internal/api/ui/dist/index.html`), or a rebase onto another UI change, run `make ui` and commit `internal/api/ui/dist` and `web/modules.txt`. Changing what a characterized legacy function returns (`renderMarkdown`, `liftDeck`, `flattenDeck`, `parseCites`, `findCites`, `nearestPages`, `freshnessOf`) fails the fixtures in `web/test`: run `npm run fixtures` in `web/` and review the JSON diff, which is the behaviour change. Other edits to `app.js`, `sources.js` and `style.css`, `go build`, and `make test` need no Node. |
+| UI | `make ui-check` | Needs Node at exactly the version in `.nvmrc` (both `make` targets refuse any other). The trap is the committed build: after any change under `web/` (the HTML shell lives there now, as `web/index.html`, and is built into `internal/api/ui/dist/index.html`), or a rebase onto another UI change, run `make ui` and commit `internal/api/ui/dist` and `web/modules.txt`. Changing what a characterized legacy function returns (`renderMarkdown`, `liftDeck`, `flattenDeck`, `parseCites`, `findCites`, `nearestPages`, `freshnessOf`) fails the fixtures in `web/test`: run `npm run fixtures` in `web/` and review the JSON diff, which is the behaviour change. `web/test` also evaluates `sources.js` and tests its Ingest helpers (`ingestSummary`, `ingestChip`, `ingestReason`, `attentionLine`, `connectorHealth`), so a change to those needs `make ui-check` too. Other edits to `app.js`, `sources.js` and `style.css`, `go build`, and `make test` need no Node. |
 
 Lint rules that bite most often: `errorlint` (use `errors.Is`/`errors.As`,
 never `==` against `pgx.ErrNoRows` or a sentinel), `errcheck` (write
@@ -33,6 +33,9 @@ never `==` against `pgx.ErrNoRows` or a sentinel), `errcheck` (write
   database.** `internal/api` and `internal/store` each drop and recreate the
   schema on the shared database, so parallel package runs cause failures
   that are not real.
+- `make cover` and `make test-integration` take `TEST_DB_URL` from the
+  environment, so a session that must not touch the shared `kiln` database
+  points them at its own (`TEST_DB_URL=postgres://kiln:kiln@localhost:55432/kiln_mine?sslmode=disable make cover`).
 - Dev state lives in a separate `kiln_dev` database on the same container
   (`make dev-db`), so test runs cannot wipe it.
 

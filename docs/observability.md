@@ -66,6 +66,7 @@ is bucketed by class (`2xx`, `4xx`, `5xx`) for the same reason.
 | `kiln_run_cost_usd_total` | counter | — |
 | `kiln_runs_stale_requeued_total` | counter | — |
 | `kiln_pages_total` | counter | `action` |
+| `kiln_documents_skipped_total` | counter | `kind`, `class` |
 | `kiln_active_runs` | gauge | — |
 | `kiln_queue_depth` | gauge | `status` |
 
@@ -90,6 +91,15 @@ now belongs to the worker that took it.
 `no_changes` is the content-hash gate working: the run found nothing to
 regenerate and cost nothing. A healthy incremental deployment shows many of
 them.
+
+`kiln_documents_skipped_total` counts documents a sync could not read: `kind`
+is `upload` or `web`, and `class` is one of `no_text`, `extractor_missing`,
+`unsupported_type`, `timed_out`, `extractor_error` and `hidden_path`, drawn
+from an allow-list so the label set stays bounded. A steady `no_text` rate is users
+uploading scans; `extractor_missing` on a fresh deployment is an image missing
+a tool. The worker's log names each skipped file with its run, workspace and
+class, and for uploads the skip is also recorded on the file row, which is what
+the Ingest view shows as "not read".
 
 `kiln_queue_depth` and `kiln_runs_stale_requeued_total` come from whichever
 process runs the scheduler duties: the scheduler pod when one is deployed (the

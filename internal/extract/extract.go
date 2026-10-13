@@ -45,6 +45,13 @@ var ErrNoExtractor = errors.New("extract: no extractor for format")
 // poppler" rather than "this PDF is corrupt".
 var ErrToolMissing = errors.New("extract: required tool is not installed")
 
+// ErrTimedOut means the converter ran past its timeout and was stopped.
+//
+// A sentinel rather than prose so a caller classifying the failure (the
+// upload connector's skip class) checks it with errors.Is instead of matching
+// the message, which a rewording would silently break.
+var ErrTimedOut = errors.New("extract: converter timed out")
+
 // Result is extracted content plus how it was produced.
 type Result struct {
 	Text string
@@ -304,7 +311,7 @@ func runTool(ctx context.Context, binary string, timeout time.Duration, args ...
 	}
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("%s timed out after %s", binary, timeout)
+			return "", fmt.Errorf("%s: %w after %s", binary, ErrTimedOut, timeout)
 		}
 		return "", fmt.Errorf("%s: %w (%s)", binary, err, truncate(stderr.String(), 200))
 	}

@@ -125,6 +125,14 @@ type BuildRequest struct {
 	// pass over them and their section children.
 	SkippedKeys []diff.Key
 
+	// UploadsStaged counts the uploaded documents this run's sync listed, and
+	// UploadsSkipped the ones among them it could not read (a scan, a missing
+	// extractor). The overview reads "N of M uploaded documents" from them
+	// when something was skipped, so a reader who compares it with the Ingest
+	// list is told why the two differ. Both zero when the run synced no
+	// uploads.
+	UploadsStaged, UploadsSkipped int
+
 	// WorkspaceSlug names the bench for anything a human reads. WorkspaceID is
 	// a UUID, and putting it on the overview -- the first page anyone opens --
 	// labelled the wiki with a string that identifies nothing to its reader.
@@ -249,7 +257,23 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 	if req.Force {
 		log.Info("hash gate skipped; every routed unit regenerates", "units", len(dirty))
 	} else {
-		dirty = p.filterUnchanged(dirty, req.Map, sources)
+		var unchanged []diff.Key
+		dirty, unchanged = p.filterUnchanged(dirty, req.Map, sources)
+		// The gate is the only place that knows a unit was read and found
+		// unchanged. Recording that is what keeps a re-uploaded document whose
+		// text did not change counted as read; a dry run reads nothing of
+		// record, and research never reaches the gate (it has its own Run).
+		// Only an uploaded document's own key is stamped: the Ingest page is
+		// its one reader, and it joins on the document key, so stamping every
+		// module, page and section the gate dropped would rewrite rows on
+		// every poll for nobody.
+		if keys := uploadDocKeys(unchanged, req.Map); !req.DryRun && len(keys) > 0 {
+			if err := p.Store.TouchSources(ctx, req.WorkspaceID, keys, now); err != nil {
+				// Not fatal: the pages are current whether or not the stamp
+				// landed, and the Ingest page falls back to the last run.
+				log.Warn("could not stamp unchanged sources as read", "err", err, "units", len(keys))
+			}
+		}
 	}
 
 	cascade := diff.PlanCascade(sources, req.ApprovedDeletions)
@@ -392,6 +416,9 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		BuiltAt:   now.Format(wiki.StampFormat),
 		Narrative: findings,
 		Sources:   sourceTallies(req.Map, sources, cascade.DropSources, req.SyncedNamespaces),
+
+		UploadsStaged:  req.UploadsStaged,
+		UploadsSkipped: req.UploadsSkipped,
 	})
 
 	created, updated := countChanges(pages, written)
@@ -471,15 +498,16 @@ func (p *Pipeline) checkBudgetEnforceable() error {
 }
 
 // filterUnchanged drops units whose content hash matches what the last
-// successful run recorded. This is where a no-op run becomes free.
-func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sources []diff.SourceRecord) []diff.Key {
+// successful run recorded. This is where a no-op run becomes free. The
+// dropped keys come back too, so the caller can record that they were read.
+func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sources []diff.SourceRecord) (kept, unchanged []diff.Key) {
 	prior := make(map[diff.Key]string, len(sources))
 	for _, s := range sources {
 		prior[s.Key] = s.InputHash
 	}
 	units := unitsByKey(m)
 
-	out := make([]diff.Key, 0, len(dirty))
+	kept = make([]diff.Key, 0, len(dirty))
 	for _, k := range dirty {
 		var hash string
 		if k == diff.ArchOverview {
@@ -498,7 +526,26 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 		}
 		// No hash means no basis for skipping: regenerate.
 		if hash == "" || prior[k] != hash {
-			out = append(out, k)
+			kept = append(kept, k)
+		} else {
+			unchanged = append(unchanged, k)
+		}
+	}
+	return kept, unchanged
+}
+
+// uploadDocKeys keeps the keys of uploaded documents themselves: the upload
+// namespace, without the section units, whose parent is always among the keys
+// when they are. A section is told apart by its unit's kind, not by the '#'
+// that joins its key: a stored path may itself contain one ("C# notes.md"),
+// and dropping that document here would leave it reading as never read after
+// every same-text re-upload.
+func uploadDocKeys(keys []diff.Key, m *mapper.WorkspaceMap) []string {
+	units := unitsByKey(m)
+	var out []string
+	for _, k := range keys {
+		if diff.Namespace(k) == diff.NamespaceUpload && units[string(k)].Kind != "doc-section" {
+			out = append(out, string(k))
 		}
 	}
 	return out

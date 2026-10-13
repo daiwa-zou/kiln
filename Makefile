@@ -3,7 +3,9 @@ PKG     := github.com/daiwa-zou/kiln
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X '$(PKG)/internal/observability.Version=$(VERSION)'
 
-TEST_DB_URL := postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
+# ?= so a shell can point the database targets (test-integration, cover) at a
+# private database: TEST_DB_URL=postgres://...kiln_mine... make cover.
+TEST_DB_URL ?= postgres://kiln:kiln@localhost:55432/kiln?sslmode=disable
 
 # The PgBouncer image the compose stack, the chart, CI and `make test-pooled`
 # run. Pinned by digest; bump docker-compose.yml, deploy/helm/kiln/values.yaml

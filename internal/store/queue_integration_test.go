@@ -251,16 +251,23 @@ func TestEnqueueRunOptsSchedulingAndRanges(t *testing.T) {
 		t.Fatalf("claimed a not-yet-due run: %+v err=%v", run, err)
 	}
 
-	// A debounced push advances the waiting run's target head.
-	same, created, err := s.EnqueueRunOpts(ctx, ws, "webhook", "", EnqueueOptions{RefTo: "bbb222"})
+	// A debounced push advances the waiting run's target head; its own
+	// start time merges earliest-wins, so a later one leaves the hold alone.
+	same, created, err := s.EnqueueRunOpts(ctx, ws, "webhook", "", EnqueueOptions{
+		RefTo: "bbb222", NotBefore: time.Now().Add(2 * time.Hour),
+	})
 	if err != nil || created || same != runID {
 		t.Fatalf("debounce: id=%q created=%v err=%v", same, created, err)
 	}
+	if run, err := s.ClaimNextRun(ctx, "w1"); err != nil || run != nil {
+		t.Fatalf("a later start time made the held run claimable: %+v err=%v", run, err)
+	}
 
-	// Once due, the claim carries the newest head.
-	if _, err := pool.Exec(ctx,
-		`UPDATE runs SET not_before = now() - interval '1 second' WHERE id = $1`, runID); err != nil {
-		t.Fatal(err)
+	// A request with no start time is a person asking now: it clears the
+	// hold, and the claim carries the newest head.
+	same, created, err = s.EnqueueRun(ctx, ws, "manual", "")
+	if err != nil || created || same != runID {
+		t.Fatalf("manual merge: id=%q created=%v err=%v", same, created, err)
 	}
 	run, err := s.ClaimNextRun(ctx, "w1")
 	if err != nil || run == nil {

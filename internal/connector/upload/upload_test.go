@@ -2,10 +2,18 @@ package upload
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daiwa-zou/kiln/internal/connector"
 	"github.com/daiwa-zou/kiln/internal/extract"
@@ -97,6 +105,148 @@ func TestSyncSkipsUnextractableFilesWithoutFailing(t *testing.T) {
 	// The skip must say a tool is missing, not that the document is broken.
 	if !strings.Contains(payload.Skipped[0].Reason, "not installed") {
 		t.Errorf("skip reason = %q, want it to name the missing tool", payload.Skipped[0].Reason)
+	}
+}
+
+// A file the walk leaves out by name is reported, not dropped. On a server
+// the upload API accepts any supported extension under any relative path, so
+// a ._report.pdf or a vault/.obsidian/x.md is staged like the rest; without a
+// skip it would read as never ingested with nothing to say why. A hidden file
+// of a format nothing reads is not a candidate anywhere and stays silent.
+func TestSyncReportsHiddenPathsAsSkips(t *testing.T) {
+	files := map[string]string{
+		"good.md":                   "# Fine\n\nReadable.\n",
+		"._x.md":                    "# AppleDouble shadow\n",
+		"vault/.obsidian/notes.md":  "# Vault config\n",
+		"node_modules/a/readme.md":  "# A package\n",
+		".DS_Store":                 "binary",
+		"vault/.git/config":         "[core]",
+		"vault/__MACOSX/._stale.md": "# Stale\n",
+	}
+	hiddenSkips := func(t *testing.T, set *connector.SourceSet) []string {
+		t.Helper()
+		if len(set.Items) != 1 || set.Items[0].Key != "doc:upload:good.md" {
+			t.Errorf("items = %v, want only good.md", itemKeys(set))
+		}
+		var got []string
+		for _, sk := range PayloadOf(set).Skipped {
+			if sk.Class != SkipHiddenPath || sk.Partial {
+				t.Errorf("%s: skip = %+v, want class %s", sk.Path, sk, SkipHiddenPath)
+			}
+			got = append(got, sk.Path)
+		}
+		return got
+	}
+
+	// A local folder: the excluded folders are pruned unreported, as they
+	// always were (a vendored tree is nobody's upload); a dot-prefixed file is
+	// reported.
+	set, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": fixture(t, files)}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if got, want := hiddenSkips(t, set), []string{"._x.md"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("local folder hidden skips = %v, want %v", got, want)
+	}
+
+	// The bench's materialized uploads: every row is the member's, so the
+	// ones left out by name are reported, readable formats only.
+	set, err = (&Connector{}).Sync(context.Background(), connector.Config{"path": fixture(t, files), "materialized": true}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	want := []string{"._x.md", "node_modules/a/readme.md", "vault/.obsidian/notes.md", "vault/__MACOSX/._stale.md"}
+	if got := hiddenSkips(t, set); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("materialized hidden skips = %v, want %v (sorted, readable formats only)", got, want)
+	}
+}
+
+// Only a dot-prefixed file name hides a document, never a dot-prefixed folder:
+// benches keep documents in .notes/ or docs/.wip/, and hiding those would file
+// a deletion review for every page they produced.
+func TestSyncReadsDocumentsInDotFolders(t *testing.T) {
+	files := map[string]string{
+		"good.md":           "# Fine\n\nReadable.\n",
+		".notes/plan.md":    "# Plan\n\nKept in a dot-folder.\n",
+		"docs/.wip/idea.md": "# Idea\n\nNested under one.\n",
+	}
+	for _, materialized := range []bool{false, true} {
+		cfg := connector.Config{"path": fixture(t, files), "materialized": materialized}
+		set, err := (&Connector{}).Sync(context.Background(), cfg, t.TempDir())
+		if err != nil {
+			t.Fatalf("Sync(materialized=%v): %v", materialized, err)
+		}
+		want := []string{"doc:upload:.notes/plan.md", "doc:upload:docs/.wip/idea.md", "doc:upload:good.md"}
+		if got := itemKeys(set); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("materialized=%v: items = %v, want %v; skips = %+v", materialized, got, want, PayloadOf(set).Skipped)
+		}
+	}
+}
+
+// Every Skip* constant the package declares is in SkipClasses, so a class added
+// to the constants alone cannot fold into extractor_error on the API and the
+// metric without this failing. Read from the source, since Go offers no way to
+// enumerate a package's constants at run time.
+func TestSkipClassesListsEveryDeclaredConstant(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	var declared []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, e.Name(), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, sp := range gd.Specs {
+				vs := sp.(*ast.ValueSpec)
+				for i, name := range vs.Names {
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					if !strings.HasPrefix(name.Name, "Skip") || !ok || lit.Kind != token.STRING {
+						continue
+					}
+					value, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatalf("%s: %v", name.Name, err)
+					}
+					declared = append(declared, value)
+				}
+			}
+		}
+	}
+	if len(declared) == 0 {
+		t.Fatal("no Skip* string constants found; the parse is looking in the wrong place")
+	}
+	for _, class := range declared {
+		if !slices.Contains(SkipClasses, class) {
+			t.Errorf("class %q is declared but not in SkipClasses", class)
+		}
+	}
+	if len(declared) != len(SkipClasses) {
+		t.Errorf("SkipClasses has %d entries, the package declares %d", len(SkipClasses), len(declared))
+	}
+}
+
+// SkipClasses is what the API's sentence table and the metric's label list
+// check themselves against, so it must name every class a Skip can carry.
+func TestSkipClassesNamesEveryClass(t *testing.T) {
+	want := []string{SkipNoText, SkipExtractorMissing, SkipUnsupportedType, SkipTimedOut, SkipExtractorError, SkipHiddenPath}
+	if strings.Join(SkipClasses, ",") != strings.Join(want, ",") {
+		t.Errorf("SkipClasses = %v, want %v", SkipClasses, want)
+	}
+	for _, err := range []error{extract.ErrToolMissing, extract.ErrNoExtractor, extract.ErrTimedOut, errors.New("other")} {
+		if class := skipClass(err); !slices.Contains(SkipClasses, class) {
+			t.Errorf("skipClass(%v) = %q, which SkipClasses does not list", err, class)
+		}
 	}
 }
 
@@ -219,4 +369,84 @@ func itemKeys(set *connector.SourceSet) []string {
 		out = append(out, item.Key)
 	}
 	return out
+}
+
+func TestSkipClassIsDecidedByTheExtractSentinels(t *testing.T) {
+	// The class is what a server build persists, so it comes from errors.Is on
+	// the sentinels, not from the prose skipReason prints. The timeout row is
+	// the real error a hanging converter produces, not a hand-written copy of
+	// its message: the message is not the contract, the sentinel is.
+	hanging := filepath.Join(t.TempDir(), "hanging-pdftotext")
+	if err := os.WriteFile(hanging, []byte("#!/bin/sh\nexec sleep 20\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	es := extract.Extractors{&extract.PDFExtractor{Binary: hanging, Timeout: 100 * time.Millisecond}}
+	_, timedOut := es.Extract(context.Background(), filepath.Join(fixture(t, map[string]string{"a.pdf": "%PDF"}), "a.pdf"))
+	if timedOut == nil {
+		t.Fatal("a hanging converter did not fail")
+	}
+
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("extract: %w: pdf needs a tool that is not installed", extract.ErrToolMissing), SkipExtractorMissing},
+		{fmt.Errorf("%w: office", extract.ErrNoExtractor), SkipUnsupportedType},
+		{fmt.Errorf("extract: a.pdf: %w", context.DeadlineExceeded), SkipTimedOut},
+		{timedOut, SkipTimedOut},
+		{errors.New("extract: a.pdf (pdftotext): pdftotext timed out after 2m0s"), SkipExtractorError},
+		{errors.New("extract: a.pdf (pdftotext): pdftotext: exit status 1 (Syntax Error)"), SkipExtractorError},
+	} {
+		if got := skipClass(tc.err); got != tc.want {
+			t.Errorf("skipClass(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestSyncFlagsAFigureFailureAsPartial(t *testing.T) {
+	// echo stands in for pdftotext: it prints its arguments, which is text
+	// enough for a page. The figure tool is missing, so the figures fail and
+	// the document is reported partial: a page was written, pictures were lost.
+	root := fixture(t, map[string]string{"report.pdf": "%PDF-1.4 not really\n"})
+	c := &Connector{Extractors: extract.Extractors{
+		&extract.PDFExtractor{Binary: "/bin/echo", FigureBinary: "kiln-nonexistent-pdfimages"},
+	}}
+	set, err := c.Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set.Items) != 1 {
+		t.Fatalf("items = %v, want the report's page", itemKeys(set))
+	}
+	skips := PayloadOf(set).Skipped
+	if len(skips) != 1 || !skips[0].Partial || skips[0].Class != SkipExtractorError ||
+		!strings.HasPrefix(skips[0].Reason, "figures could not be read: ") {
+		t.Errorf("skips = %+v, want one partial extractor_error with the figures reason", skips)
+	}
+}
+
+func TestSyncClassifiesAndFlagsPartialSkips(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"empty.md": "   \n",
+		"bad.pdf":  "%PDF-1.4 not really\n",
+	})
+	c := &Connector{Extractors: extract.Extractors{
+		&extract.PassthroughExtractor{},
+		&extract.PDFExtractor{Binary: "kiln-nonexistent-pdftotext"},
+	}}
+	set, err := c.Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]SkipReason{}
+	for _, s := range PayloadOf(set).Skipped {
+		got[s.Path] = s
+	}
+	// The printed reasons are unchanged; the class rides beside them.
+	if s := got["empty.md"]; s.Reason != "extracted no text" || s.Class != SkipNoText || s.Partial {
+		t.Errorf("empty.md skip = %+v", s)
+	}
+	if s := got["bad.pdf"]; s.Reason != "required extraction tool is not installed" || s.Class != SkipExtractorMissing || s.Partial {
+		t.Errorf("bad.pdf skip = %+v", s)
+	}
 }

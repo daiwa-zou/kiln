@@ -394,6 +394,22 @@ alert rules, and scraping queue depth to autoscale workers.
 scheduler. Workers drain rather than abort, so a rolling update costs nothing
 in flight; the scheduler holds nothing that needs draining.
 
+**Rolling back a migration.** Every migration is additive, so the columns a
+newer version added can stay; what stops the older binary is `schema_migrations`
+holding a version it does not know, which it refuses at startup rather than run
+against a schema it did not ship. Migration 021 (per-document ingest status)
+is the current example: four nullable columns on `workspace_files`, no default,
+no backfill. To roll back on one node: stop the new binary, run
+`DELETE FROM schema_migrations WHERE version = 21`, start the old binary. On
+Kubernetes, `helm rollback` runs no migrate hook (it is a pre-upgrade hook), so
+delete the row before the old pods restart or they crash-loop on the schema
+check. Nothing else is needed: the old code names its columns explicitly and
+never reads the new ones. One thing to expect on rolling forward again: the old
+binary stamps neither `content_changed_at` nor `staged_at`, so a document
+replaced while it ran reads as "read" with its previous pages on the Ingest
+page, and one it skipped reads as waiting, until the next ingest looks at the
+bytes.
+
 **Backups.** Postgres holds every page, run, and credential; object storage
 holds uploaded documents. Back up both. A wiki can be rebuilt from its sources,
 but the review queue, corrections, and steering documents are original human

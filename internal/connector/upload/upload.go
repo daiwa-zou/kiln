@@ -41,9 +41,42 @@ func (c *Connector) Kind() string { return connector.KindUpload }
 
 // SkipReason records why a file was not ingested, so a folder with one
 // unreadable PDF still produces a wiki and says what it left out.
+//
+// Reason is the text the CLI prints; Class is the same fact as a fixed token,
+// for the server, which persists a token and never extractor text about a
+// user's file. Partial marks a document that was ingested with something
+// missing (its figures), as opposed to one that produced nothing.
 type SkipReason struct {
-	Path   string
-	Reason string
+	Path    string
+	Reason  string
+	Class   string
+	Partial bool
+}
+
+// The skip classes. A sink keys its persistence, its log and its metric labels
+// on these and nothing else, so an unknown class is folded into
+// SkipExtractorError rather than given a label of its own. The set is closed
+// by construction: skipClass and Sync are the only producers.
+const (
+	SkipNoText           = "no_text"
+	SkipExtractorMissing = "extractor_missing"
+	SkipUnsupportedType  = "unsupported_type"
+	SkipTimedOut         = "timed_out"
+	SkipExtractorError   = "extractor_error"
+	// SkipHiddenPath is a file the walk leaves out by name: dot-prefixed, or
+	// under a folder nothing should read (.git, node_modules, ...). Reported
+	// rather than dropped when the folder is a bench's materialized uploads,
+	// because a server upload of one is otherwise staged and silently never
+	// read.
+	SkipHiddenPath = "hidden_path"
+)
+
+// SkipClasses lists every class a Skip may carry, for the consumers that key
+// on the set (the API's sentence table, the metric's label list) to check
+// themselves against: a class added here and nowhere else would otherwise
+// fold into SkipExtractorError on both without a test failing.
+var SkipClasses = []string{
+	SkipNoText, SkipExtractorMissing, SkipUnsupportedType, SkipTimedOut, SkipExtractorError, SkipHiddenPath,
 }
 
 // Sync extracts every supported document under the configured path.
@@ -82,7 +115,11 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		figures = extract.FigureOptions{}
 	}
 
-	files, err := listDocuments(abs)
+	// A materialized folder is the bench's uploaded files staged from storage:
+	// every file in it is a row a member sees on the Ingest page, so the ones
+	// the walk leaves out by name are reported rather than pruned.
+	materialized, _ := cfg["materialized"].(bool)
+	files, hidden, err := listDocuments(abs, materialized)
 	if err != nil {
 		return nil, err
 	}
@@ -92,13 +129,16 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		docs  []docmap.Doc
 		skips []SkipReason
 	)
+	for _, rel := range hidden {
+		skips = append(skips, SkipReason{Path: rel, Reason: "hidden file or folder", Class: SkipHiddenPath})
+	}
 
 	for _, rel := range files {
 		full := filepath.Join(abs, filepath.FromSlash(rel))
 
 		res, err := extractors.ExtractWithFigures(ctx, full, figures)
 		if err != nil {
-			skips = append(skips, SkipReason{Path: rel, Reason: skipReason(err)})
+			skips = append(skips, SkipReason{Path: rel, Reason: skipReason(err), Class: skipClass(err)})
 			continue
 		}
 		// A document whose text read fine but whose pictures did not is
@@ -106,12 +146,13 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		// loss of figures is exactly the failure nobody would notice.
 		if res.FigureErr != nil {
 			skips = append(skips, SkipReason{
-				Path: rel, Reason: "figures could not be read: " + res.FigureErr.Error()})
+				Path: rel, Reason: "figures could not be read: " + res.FigureErr.Error(),
+				Class: SkipExtractorError, Partial: true})
 		}
 		if strings.TrimSpace(res.Text) == "" {
 			// An empty extraction is not material. Sending it on would spend a
 			// model call to write a page about nothing.
-			skips = append(skips, SkipReason{Path: rel, Reason: "extracted no text"})
+			skips = append(skips, SkipReason{Path: rel, Reason: "extracted no text", Class: SkipNoText})
 			continue
 		}
 
@@ -181,18 +222,45 @@ func skipReason(err error) string {
 	}
 }
 
-// excludedDirs are never descended into.
+// skipClass is skipReason's token form, for a sink that persists facts about a
+// file rather than extractor text.
+func skipClass(err error) string {
+	switch {
+	case errors.Is(err, extract.ErrToolMissing):
+		return SkipExtractorMissing
+	case errors.Is(err, extract.ErrNoExtractor):
+		return SkipUnsupportedType
+	// A converter that hung is runTool's sentinel; the caller's own deadline
+	// arriving mid-extraction is the context's.
+	case errors.Is(err, extract.ErrTimedOut), errors.Is(err, context.DeadlineExceeded):
+		return SkipTimedOut
+	default:
+		return SkipExtractorError
+	}
+}
+
+// excludedDirs are never read from.
 var excludedDirs = map[string]bool{
 	".git": true, "node_modules": true, ".cache": true,
 	"__MACOSX": true, ".obsidian": true,
 }
 
 // listDocuments walks a folder for candidate files, in sorted order so a sync
-// is reproducible.
-func listDocuments(root string) ([]string, error) {
-	var out []string
-
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+// is reproducible. files are the ones to read; hidden are the ones left out
+// by name -- a dot-prefixed file, or anything under an excluded folder -- that
+// would otherwise have been candidates. A dot-prefixed folder is not hidden:
+// benches have long kept documents in .notes/ or docs/.wip/, and hiding those
+// would file a deletion review for every page they produced. A file of a
+// format nothing reads is not a candidate anywhere and stays unreported.
+//
+// In a local folder the excluded folders are pruned unreported, as a vendored
+// node_modules can hold thousands of readable files that nobody uploaded and
+// no Ingest row describes. In a materialized folder every file is a row the
+// member can see, so the excluded folders are walked and their files reported:
+// without a skip such an upload would read as never ingested with no reason
+// given.
+func listDocuments(root string, materialized bool) (files, hidden []string, err error) {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// An unreadable subtree should not abort the walk; the rest of the
 			// folder is still worth ingesting.
@@ -202,31 +270,47 @@ func listDocuments(root string) ([]string, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if excludedDirs[d.Name()] {
+			if excludedDirs[d.Name()] && !materialized {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || strings.HasPrefix(d.Name(), ".") {
+		if !d.Type().IsRegular() || extract.DetectFormat(path) == extract.FormatUnknown {
 			return nil
 		}
-		if extract.DetectFormat(path) == extract.FormatUnknown {
-			return nil
-		}
-
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil {
 			return nil
 		}
-		out = append(out, filepath.ToSlash(rel))
+		if isHiddenPath(rel) {
+			hidden = append(hidden, filepath.ToSlash(rel))
+			return nil
+		}
+		files = append(files, filepath.ToSlash(rel))
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("connector/upload: walk: %w", err)
+		return nil, nil, fmt.Errorf("connector/upload: walk: %w", err)
 	}
 
-	sort.Strings(out)
-	return out, nil
+	sort.Strings(files)
+	sort.Strings(hidden)
+	return files, hidden, nil
+}
+
+// isHiddenPath says whether a relative path is left out by name: a
+// dot-prefixed file name, or an excluded folder anywhere in its path.
+func isHiddenPath(rel string) bool {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if strings.HasPrefix(parts[len(parts)-1], ".") {
+		return true
+	}
+	for _, part := range parts[:len(parts)-1] {
+		if excludedDirs[part] {
+			return true
+		}
+	}
+	return false
 }
 
 // stage writes extracted text beside the staging root as markdown.

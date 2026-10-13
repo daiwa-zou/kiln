@@ -42,7 +42,7 @@ import (
 
 // FileStore is the workspace-file surface; *store.WikiStore implements it.
 type FileStore interface {
-	ListFiles(ctx context.Context, workspaceID string) ([]store.FileRow, error)
+	ListFilesWithIngest(ctx context.Context, workspaceID string) ([]store.FileIngestRow, store.FileIngestBench, error)
 	CreateFile(ctx context.Context, f store.FileRow) (id, replacedBlobKey string, err error)
 	SetFileEnabled(ctx context.Context, workspaceID, id string, enabled bool) error
 	DeleteFile(ctx context.Context, workspaceID, id string) (blobKey string, c diff.Cascade, err error)
@@ -64,8 +64,26 @@ const (
 	errNoBlobStore = "uploads are unavailable: object storage is not configured (set storage.* and restart)"
 )
 
-// fileJSON shapes one file row for responses.
-func fileJSON(f store.FileRow) map[string]any {
+// FileJSON is one row of GET .../files. A struct rather than a map so the key
+// set is a compile-time contract the UI and the tests can pin; the nine
+// original keys keep their names and values, ingest is the addition. Exported
+// like the other response types (RunSummaryJSON, PageSummary), which is what
+// the generated API types are read from.
+type FileJSON struct {
+	ID          string     `json:"id"`
+	Path        string     `json:"path"`
+	Name        string     `json:"name"`
+	Size        int64      `json:"size"`
+	SHA256      string     `json:"sha256"`
+	ContentType string     `json:"contentType"`
+	Enabled     bool       `json:"enabled"`
+	Uploaded    string     `json:"uploaded"`
+	Updated     string     `json:"updated"`
+	Ingest      IngestJSON `json:"ingest"`
+}
+
+// fileJSON shapes one file row and its ingest facts for responses.
+func fileJSON(f store.FileIngestRow, bench store.FileIngestBench) FileJSON {
 	// Rows uploaded before display names existed carry an empty one. Deriving
 	// it here rather than backfilling keeps the migration a pure schema change:
 	// the derivation reads the filename and nothing else, so it answers the
@@ -74,13 +92,14 @@ func fileJSON(f store.FileRow) map[string]any {
 	if name == "" {
 		name = naming.FromFilename(f.Path)
 	}
-	return map[string]any{
-		"id": f.ID, "path": f.Path, "name": name,
-		"size": f.SizeBytes, "sha256": f.SHA256,
-		"contentType": f.ContentType,
-		"enabled":     f.Enabled,
-		"uploaded":    f.CreatedAt.UTC().Format(time.RFC3339),
-		"updated":     f.UpdatedAt.UTC().Format(time.RFC3339),
+	return FileJSON{
+		ID: f.ID, Path: f.Path, Name: name,
+		Size: f.SizeBytes, SHA256: f.SHA256,
+		ContentType: f.ContentType,
+		Enabled:     f.Enabled,
+		Uploaded:    f.CreatedAt.UTC().Format(time.RFC3339),
+		Updated:     f.UpdatedAt.UTC().Format(time.RFC3339),
+		Ingest:      deriveIngest(f, bench),
 	}
 }
 
@@ -113,14 +132,15 @@ func (s *Server) handleFilesList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rows, err := s.Files.ListFiles(r.Context(), ws.ID)
+	rows, bench, err := s.Files.ListFilesWithIngest(r.Context(), ws.ID)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	out := make([]map[string]any, 0, len(rows))
+	// make, not a nil slice: an empty bench must answer [] rather than null.
+	out := make([]FileJSON, 0, len(rows))
 	for _, f := range rows {
-		out = append(out, fileJSON(f))
+		out = append(out, fileJSON(f, bench))
 	}
 	writeJSON(w, http.StatusOK, out)
 }

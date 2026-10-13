@@ -30,6 +30,15 @@ type OverviewInput struct {
 	// about what went in and does not change when a source is added that has
 	// not yet produced a page.
 	Sources []SourceTally
+	// UploadsStaged counts the uploaded documents the build was handed, and
+	// UploadsSkipped the ones among them it could not read. When something
+	// was skipped the lede says "N of M uploaded documents" and that the rest
+	// could not be read, because the gap between this page's count and the
+	// Ingest list is then a skipped document, not a later upload, and the
+	// after-this-build clause alone would explain it wrongly. Zero when the
+	// build did not stage uploads (a run pinned to another connector, a
+	// repository-only CLI build), which keeps the plain tally.
+	UploadsStaged, UploadsSkipped int
 }
 
 // SourceTally is one kind of material and how much of it fed the build.
@@ -147,11 +156,25 @@ func writeOverviewLede(b *strings.Builder, pages []Page, in OverviewInput) {
 		name = "**" + in.Workspace + "**"
 	}
 
+	// The upload phrase comes from the build's own document counts when it
+	// skipped any: "N of M" is about documents, and the tally counts units (a
+	// long document is several), so only the counts can say how many of what
+	// was handed over went in. A bench whose every upload was skipped has no
+	// upload tally at all and still gets the phrase.
 	var parts []string
+	uploadsSaid := false
 	for _, t := range in.Sources {
+		if t.Kind == diff.NamespaceUpload && in.UploadsSkipped > 0 {
+			parts = append(parts, uploadsReadPhrase(in))
+			uploadsSaid = true
+			continue
+		}
 		if p := sourcePhrase(t); p != "" && t.Count > 0 {
 			parts = append(parts, p)
 		}
+	}
+	if in.UploadsSkipped > 0 && !uploadsSaid {
+		parts = append(parts, uploadsReadPhrase(in))
 	}
 
 	if len(parts) > 0 {
@@ -162,30 +185,88 @@ func writeOverviewLede(b *strings.Builder, pages []Page, in OverviewInput) {
 	if in.Ref != "" {
 		fmt.Fprintf(b, ", at `%s`", in.Ref)
 	}
+	if in.UploadsSkipped > 0 {
+		fmt.Fprintf(b, "; %d could not be read (see Ingest)", in.UploadsSkipped)
+	}
 	b.WriteString(".")
 
 	stamp := in.BuiltAt
 	if stamp == "" {
 		stamp = in.Date
 	}
+	// The document tally is what this build read, so it falls behind the Ingest
+	// list as soon as someone uploads again, and a reader who compares the two
+	// sees a contradiction. Saying what the count covers is true at all times;
+	// a bench with no uploads has nothing to reconcile and keeps the plain stop.
+	end := "."
+	if uploadCount(in) > 0 || in.UploadsStaged > 0 {
+		end = "; documents uploaded after this build are not counted."
+	}
 	if n := countedPages(pages); n > 0 && stamp != "" {
-		fmt.Fprintf(b, " %s, last built %s.", plural(n, "page"), stamp)
+		fmt.Fprintf(b, " %s, last built %s%s", plural(n, "page"), stamp, end)
 	} else if stamp != "" {
-		fmt.Fprintf(b, " Last built %s.", stamp)
+		fmt.Fprintf(b, " Last built %s%s", stamp, end)
 	}
 	b.WriteString("\n\n")
+}
+
+// uploadsReadPhrase is the lede's upload phrase when the build skipped some:
+// how many of the documents it was handed went in.
+func uploadsReadPhrase(in OverviewInput) string {
+	noun := "uploaded documents"
+	if in.UploadsStaged == 1 {
+		noun = "uploaded document"
+	}
+	return fmt.Sprintf("%d of %d %s", in.UploadsStaged-in.UploadsSkipped, in.UploadsStaged, noun)
+}
+
+// uploadsListPhrase is the "What this bench reads" line for uploads when the
+// build skipped some. It leads with the count that was read and keeps the
+// rest as one label, because the Overview page cuts each bullet into a tile
+// whose value is the leading number and whose label is everything after it:
+// the lede's "N of M" order would put "of M ..." in the label over a bare N.
+func uploadsListPhrase(in OverviewInput) string {
+	return fmt.Sprintf("%s read; %d of %d not read",
+		plural(in.UploadsStaged-in.UploadsSkipped, "uploaded document"), in.UploadsSkipped, in.UploadsStaged)
+}
+
+// uploadCount is how many uploaded units the build was compiled from, by the
+// tally.
+func uploadCount(in OverviewInput) int {
+	n := 0
+	for _, t := range in.Sources {
+		if t.Kind == diff.NamespaceUpload {
+			n += t.Count
+		}
+	}
+	return n
 }
 
 // writeOverviewSources lists the material behind the wiki. It is deliberately
 // separate from the page counts: a source that has been connected but has not
 // produced pages yet is invisible in a page count, and its absence there is
 // exactly the thing a reader would be confused by.
+//
+// The uploads line follows the lede: when the build skipped any, it gives the
+// document counts and says how many were not read, so the list cannot name a
+// larger number than the sentence above it (the tally counts a long
+// document's sections as units) and the UI's tile, which is cut from this
+// line, carries the same reconciliation.
 func writeOverviewSources(b *strings.Builder, in OverviewInput) {
 	var lines []string
+	uploadsSaid := false
 	for _, t := range in.Sources {
+		if t.Kind == diff.NamespaceUpload && in.UploadsSkipped > 0 {
+			lines = append(lines, uploadsListPhrase(in))
+			uploadsSaid = true
+			continue
+		}
 		if p := sourcePhrase(t); p != "" && t.Count > 0 {
 			lines = append(lines, p)
 		}
+	}
+	if in.UploadsSkipped > 0 && !uploadsSaid {
+		lines = append(lines, uploadsListPhrase(in))
 	}
 	if len(lines) == 0 {
 		return

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daiwa-zou/kiln/internal/agent"
 	"github.com/daiwa-zou/kiln/internal/diff"
@@ -69,6 +70,12 @@ func (s *pipelineStore) RecordRun(_ context.Context, run jobs.RunSummary) error 
 }
 func (s *pipelineStore) LoadSources(context.Context, string) ([]diff.SourceRecord, error) {
 	return nil, nil
+}
+func (s *pipelineStore) TouchSources(context.Context, string, []string, time.Time) error {
+	return nil
+}
+func (s *pipelineStore) CountUploads(context.Context, string) (int, int, error) {
+	return 0, 0, nil
 }
 func (s *pipelineStore) Import(context.Context, jobs.ImportRequest) error { return nil }
 

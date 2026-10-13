@@ -127,12 +127,15 @@ func TestBuildOverviewGolden(t *testing.T) {
 			"Five Go services behind a gateway, each owning a slice of the request path.",
 		},
 		// A mixed bench, so the golden covers both the lede's prose list and
-		// the source section, singular and plural.
+		// the source section, singular and plural, and a skipped upload, so
+		// it covers the "N of M" phrase and the could-not-be-read clause.
 		Sources: []SourceTally{
 			{Kind: "module", Count: 5},
 			{Kind: "doc:upload", Count: 1},
 			{Kind: "doc:web", Count: 3},
 		},
+		UploadsStaged:  2,
+		UploadsSkipped: 1,
 	})
 	assertGolden(t, "overview.md", got)
 }
