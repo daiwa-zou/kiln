@@ -132,6 +132,35 @@ func TestServerBuildRecordsAndLogsASkippedUploadWithoutAReview(t *testing.T) {
 	}
 }
 
+// In files mode every staged file is a row the member uploaded, so one that
+// the walk leaves out by name (here, under a folder nothing reads) is recorded
+// as hidden_path rather than pruned in silence: pruning would leave the row
+// waiting for an ingest that never comes. A local folder prunes the same path
+// unreported (the connector's own tests), since nothing uploaded it there.
+func TestServerBuildRecordsAnUploadUnderAnExcludedFolderAsHidden(t *testing.T) {
+	st := newLoopStore()
+	w, _ := filesWorker(t, st, map[string]string{
+		"node_modules/x.md": "# Vendored\n\nReadable, but under a folder nothing reads.\n",
+		"ok.md":             "# Fine\n\nReadable.\n",
+	})
+
+	w.process(context.Background(), filesRun("r1"))
+
+	if len(st.failed) != 0 {
+		t.Fatalf("a hidden document failed the run: %v", st.failed)
+	}
+	if len(st.skipCalls) != 1 {
+		t.Fatalf("RecordFileSkips called %d times, want once", len(st.skipCalls))
+	}
+	want := recordedSkips{
+		skips:  []store.FileSkip{{Path: "node_modules/x.md", SHA256: "sha-node_modules/x.md", Class: upload.SkipHiddenPath}},
+		staged: map[string]string{"node_modules/x.md": "sha-node_modules/x.md", "ok.md": "sha-ok.md"},
+	}
+	if !reflect.DeepEqual(st.skipCalls[0], want) {
+		t.Errorf("RecordFileSkips(%+v), want %+v", st.skipCalls[0], want)
+	}
+}
+
 func TestSkipSinkErrorIsLoggedAndDoesNotFailTheRun(t *testing.T) {
 	st := newLoopStore()
 	st.skipErr = errors.New("db down")

@@ -78,8 +78,16 @@ func TestDeriveIngest(t *testing.T) {
 		{name: "budget-paused bench names the budget, not another ingest", row: row(staged(after)), bench: budgetPaused,
 			want: IngestJSON{Status: ingestSkipped,
 				Reason: str("Not read yet. This bench has used its budget for now. Press Ingest now once the budget window has reset.")}},
-		{name: "budget-paused bench, never staged, still waiting", row: row(), bench: budgetPaused, want: waiting},
+		// A refusal stages nothing, so a fresh upload has no stamp; with
+		// nothing queued it would wait forever, and the budget sentence is
+		// the truth about it.
+		{name: "budget-paused bench, never staged: the budget sentence", row: row(), bench: budgetPaused,
+			want: IngestJSON{Status: ingestSkipped,
+				Reason: str("Not read yet. This bench has used its budget for now. Press Ingest now once the budget window has reset.")}},
+		{name: "budget-paused bench, never staged, a run queued: waiting", row: row(), bench: pendingBudgetPaused, want: waiting},
 		{name: "budget-paused bench with a queued run is waiting", row: row(staged(after)), bench: pendingBudgetPaused, want: waiting},
+		{name: "budget-paused bench leaves a paused file paused", row: row(paused), bench: budgetPaused, want: pausedJSON},
+		{name: "budget-paused bench leaves a paused file's stale source waiting", row: row(paused, source(before)), bench: budgetPaused, want: waiting},
 		{name: "budget-paused bench does not touch a read file", row: row(source(after), staged(after)), bench: budgetPaused, want: read},
 		{name: "budget-paused bench does not touch a recorded skip", row: row(skip("no_text", true), staged(after)), bench: budgetPaused, want: noText},
 
@@ -89,6 +97,11 @@ func TestDeriveIngest(t *testing.T) {
 			row: row(source(t0)), bench: idle,
 			want: IngestJSON{Status: ingestRead, Pages: &pages, ReadAt: str("2026-10-01T12:00:00Z")}},
 		{name: "replaced since read, not staged since: waiting", row: row(source(before), staged(before)), bench: idle, want: waiting},
+		// Replaced while the build that read it ran: the stamp is for the old
+		// bytes (the sink guards it by sha), the source was written after the
+		// change, and it describes bytes no longer on the row.
+		{name: "replaced during the build that read it: waiting", row: row(source(after), staged(before)), bench: idle, want: waiting},
+		{name: "replaced during the build, a run queued: waiting", row: row(source(after), staged(before)), bench: pending, want: waiting},
 		{name: "replaced since read, staged since, passed over", row: row(source(before), staged(after)), bench: idle, want: unrecorded},
 
 		// Rule 2: a live skip, and what outranks it.
@@ -165,7 +178,7 @@ func TestSkipSentencesCoverEveryClass(t *testing.T) {
 		"unsupported_type":  "This file type is not supported.",
 		"timed_out":         "Reading this file took too long and was stopped. Try a smaller file, or run another ingest.",
 		"extractor_error":   "This file could not be read. Check the Log for the error.",
-		"hidden_path":       "Hidden files and folders such as .git are not read. Rename or move it.",
+		"hidden_path":       "Hidden files and folders such as .git are not read. Delete this one and upload it under a plain name.",
 		"paused":            "Paused: skipped on ingest",
 	}
 	for class, sentence := range want {

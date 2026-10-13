@@ -65,11 +65,10 @@ export interface Sources {
   plural(n: number, word: string): string;
   ingestSummary(files: FileRow[]): Summary;
   ingestSummaryText(n: Summary): string;
-  unreadCount(n: Summary): number;
   ingestChip(f: FileRow, nextCheck?: string): string;
   ingestReason(f: FileRow): string;
   attentionLine(files: FileRow[]): string;
-  connectorHealth(c: Connector, unread?: number): Health;
+  connectorHealth(c: Connector, summary?: Summary | null): Health;
   runsActive(runs: Run[]): boolean;
   docsNoteHTML(files: FileRow[], buildActive: boolean): string;
   docsGlossHTML(files: FileRow[], uploadPaused: boolean): string;
@@ -82,7 +81,7 @@ export interface Helpers {
   relTime: (iso: string) => string;
 }
 
-const EXPORTS = ["plural", "ingestSummary", "ingestSummaryText", "unreadCount", "ingestChip",
+const EXPORTS = ["plural", "ingestSummary", "ingestSummaryText", "ingestChip",
   "ingestReason", "attentionLine", "connectorHealth", "runsActive", "docsNoteHTML", "docsGlossHTML",
   "patchIngestStatus"] as const;
 

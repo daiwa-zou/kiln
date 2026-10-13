@@ -34,6 +34,13 @@ type Store interface {
 	// never read again without this. Best-effort, like the progress calls.
 	TouchSources(ctx context.Context, workspaceID string, keys []string, at time.Time) error
 
+	// CountUploads is the bench's uploaded documents as its file rows hold
+	// them: staged counts the enabled rows, skipped those among them with a
+	// skip recorded against their current bytes. The overview reads these
+	// when a build synced no uploads, so a run pinned to another connector
+	// does not rewrite the page as if every document had been read.
+	CountUploads(ctx context.Context, workspaceID string) (staged, skipped int, err error)
+
 	// LoadPageMeta returns live pages without their bodies -- path, slug, type,
 	// title and frontmatter -- which is all that resolving wikilinks, keeping
 	// created dates and rebuilding the index and overview need. Page.Body is

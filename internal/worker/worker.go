@@ -770,9 +770,12 @@ type stagedFiles struct {
 	Skipped []diff.Key
 	// Unreadable lists the stored paths whose blob could not be read.
 	Unreadable []string
-	// SHAs is the sha256 of each file that was staged, by stored path: the
-	// sink stamps the row and records any skip against the bytes the build
-	// read, not against whatever the row holds by the time it runs.
+	// SHAs is the sha256 of each file the build was handed, by stored path:
+	// the sink stamps the row and records any skip against the bytes the
+	// build read, not against whatever the row holds by the time it runs.
+	// An unreadable file is listed too, with the sha its row carries: the
+	// build saw it and could not read it, which the stamp turns into "not
+	// read" on the Ingest page rather than a wait that never ends.
 	SHAs map[string]string
 	// Cleanup removes Dir; nil when none was made.
 	Cleanup func()
@@ -831,6 +834,7 @@ func (w *Worker) materializeFiles(ctx context.Context, workspaceID string) (stag
 			}
 			out.Unreadable = append(out.Unreadable, f.Path)
 			out.Skipped = append(out.Skipped, key)
+			out.SHAs[f.Path] = f.SHA256
 			continue
 		}
 		out.BlobKeys[string(key)] = append(out.BlobKeys[string(key)], f.BlobKey)

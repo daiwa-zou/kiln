@@ -15,20 +15,21 @@ import (
 // lives in app.js where the vitest loader does not reach.
 
 // TestUIIngestStatusHelpersUsed pins the call sites: each helper has to
-// appear on a line that is not a function declaration, so `function
-// ingestChip(f, …) {` does not stand in for the row that renders the chip. The
-// `${` prefixes pin the template positions; unreadCount feeds the bar and the
-// Ingest now link through unreadDocs; patchIngestStatus is what a settled run
-// reaches the page through.
+// appear on a live line that is not a function declaration, so `function
+// ingestChip(f, …) {` does not stand in for the row that renders the chip, and
+// a call that was commented out, with `//` or inside `/* … */`, does not stand
+// in for one that runs. The `${` prefixes pin the template positions; the
+// summary feeds the bar from both render paths; patchIngestStatus is what a
+// settled run reaches the page through.
 func TestUIIngestStatusHelpersUsed(t *testing.T) {
-	calls := withoutDeclarations(uiSource(t, "sources.js"))
+	calls := withoutDeclarations(stripComments(uiSource(t, "sources.js")))
 	for _, want := range []string{
 		"ingestSummary(files)",
 		"${ingestChip(f",
 		"${ingestReason(f)",
 		"${attentionLine(files)",
 		"connectorHealth(c,",
-		"unreadCount(summary)",
+		"connectorHealth(upload, summary)",
 		"patchIngestStatus(document,",
 		"onSettle: refreshDocuments",
 	} {
@@ -73,12 +74,15 @@ func stripComments(src string) string {
 }
 
 // TestUIConnectorBarGuardsReadCleanly: the upload source's bar says "Read
-// cleanly" only when no document is unread. The literal may appear once, and
-// the return that carries it must be preceded by the unread guard as a live
-// statement: comments are stripped first, and the guard has to start its own
-// line, so neither `// if (unread > 0) …` nor a `/* … */` block around it,
-// on one line or several, counts. The bar's call site has to hand the unread
-// count over, or the guard is never reached.
+// cleanly" only when no document is unread, and names which kind of unread
+// it found: a skip is "not read", a document the next ingest will pick up is
+// "waiting". The literal may appear once, and the return that carries it must
+// be preceded by both guards as live statements, the skip guard first (a
+// bench with one of each is told about the skip): comments are stripped
+// first, and each guard has to start its own line, so neither `// if
+// (summary?.notRead > 0) …` nor a `/* … */` block around it, on one line or
+// several, counts. The bar's call site has to hand the summary over, or the
+// guards are never reached.
 func TestUIConnectorBarGuardsReadCleanly(t *testing.T) {
 	src := stripComments(uiSource(t, "sources.js"))
 	const literal = `"Read cleanly"`
@@ -86,17 +90,60 @@ func TestUIConnectorBarGuardsReadCleanly(t *testing.T) {
 		t.Fatalf("sources.js: %q appears %d times, want exactly 1", literal, n)
 	}
 	at := strings.Index(src, literal)
-	before := src[max(0, at-400):at]
-	guard := regexp.MustCompile(`(?m)^\s*if \(unread > 0\) return`)
-	if !guard.MatchString(before) {
-		t.Errorf("sources.js: %q is not guarded by a live unread check within the preceding 400 chars:\n%s", literal, before)
+	before := src[max(0, at-600):at]
+	guards := []*regexp.Regexp{
+		regexp.MustCompile(`(?m)^\s*if \(summary\?\.notRead > 0\) return .*"Some documents were not read; see below\."`),
+		regexp.MustCompile(`(?m)^\s*if \(summary\?\.waiting > 0\) return .*"Some documents are waiting for the next ingest; see below\."`),
+	}
+	last := -1
+	for _, guard := range guards {
+		loc := guard.FindStringIndex(before)
+		if loc == nil {
+			t.Errorf("sources.js: %q is not guarded by a live %s within the preceding 600 chars:\n%s", literal, guard, before)
+			continue
+		}
+		if loc[0] < last {
+			t.Errorf("sources.js: the waiting guard runs before the not-read guard; a skip beside a waiting file would be told \"waiting\"")
+		}
+		last = loc[0]
 	}
 	for _, want := range []string{
-		`"Some documents were not read; see below."`,
-		`connectorHealth(c, c.kind === "upload" ? unreadDocs : 0)`,
+		`connectorHealth(c, c.kind === "upload" ? summary : null)`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("sources.js: missing %q", want)
+		}
+	}
+}
+
+// TestUIPatchIngestStatusIdsExist ties the settle refresh to the page it
+// patches: every `#id` patchIngestStatus looks up has to be an id the view
+// renders, as `id="…"` in its markup or `id: "…"` handed to the stat helper.
+// The vitest cases build their own skeleton with these ids, so renaming one in
+// the view would pass them while that part of the page silently stopped
+// updating after a run settles. The function body is the text between its
+// declaration and the first line that is a lone `}`; the ids are looked for
+// everywhere else in the file.
+func TestUIPatchIngestStatusIdsExist(t *testing.T) {
+	src := stripComments(uiSource(t, "sources.js"))
+	start := strings.Index(src, "\nfunction patchIngestStatus(")
+	if start < 0 {
+		t.Fatal("sources.js: patchIngestStatus is not declared")
+	}
+	end := strings.Index(src[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("sources.js: patchIngestStatus has no closing brace on its own line")
+	}
+	body := src[start : start+end]
+	rest := src[:start] + src[start+end:]
+	ids := regexp.MustCompile(`querySelector\("#([\w-]+)"\)`).FindAllStringSubmatch(body, -1)
+	if len(ids) == 0 {
+		t.Fatal("sources.js: patchIngestStatus queries no #id; the pin is out of date")
+	}
+	for _, m := range ids {
+		id := m[1]
+		if !strings.Contains(rest, `id="`+id+`"`) && !strings.Contains(rest, `id: "`+id+`"`) {
+			t.Errorf("sources.js: patchIngestStatus patches #%s, which the view never renders", id)
 		}
 	}
 }

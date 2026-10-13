@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -110,7 +114,7 @@ func TestSyncSkipsUnextractableFilesWithoutFailing(t *testing.T) {
 // skip it would read as never ingested with nothing to say why. A hidden file
 // of a format nothing reads is not a candidate anywhere and stays silent.
 func TestSyncReportsHiddenPathsAsSkips(t *testing.T) {
-	root := fixture(t, map[string]string{
+	files := map[string]string{
 		"good.md":                   "# Fine\n\nReadable.\n",
 		"._x.md":                    "# AppleDouble shadow\n",
 		"vault/.obsidian/notes.md":  "# Vault config\n",
@@ -118,25 +122,117 @@ func TestSyncReportsHiddenPathsAsSkips(t *testing.T) {
 		".DS_Store":                 "binary",
 		"vault/.git/config":         "[core]",
 		"vault/__MACOSX/._stale.md": "# Stale\n",
-	})
+	}
+	hiddenSkips := func(t *testing.T, set *connector.SourceSet) []string {
+		t.Helper()
+		if len(set.Items) != 1 || set.Items[0].Key != "doc:upload:good.md" {
+			t.Errorf("items = %v, want only good.md", itemKeys(set))
+		}
+		var got []string
+		for _, sk := range PayloadOf(set).Skipped {
+			if sk.Class != SkipHiddenPath || sk.Partial {
+				t.Errorf("%s: skip = %+v, want class %s", sk.Path, sk, SkipHiddenPath)
+			}
+			got = append(got, sk.Path)
+		}
+		return got
+	}
 
-	set, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": root}, t.TempDir())
+	// A local folder: the excluded folders are pruned unreported, as they
+	// always were (a vendored tree is nobody's upload); a dot-prefixed file is
+	// reported.
+	set, err := (&Connector{}).Sync(context.Background(), connector.Config{"path": fixture(t, files)}, t.TempDir())
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	if len(set.Items) != 1 || set.Items[0].Key != "doc:upload:good.md" {
-		t.Errorf("items = %v, want only good.md", itemKeys(set))
+	if got, want := hiddenSkips(t, set), []string{"._x.md"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("local folder hidden skips = %v, want %v", got, want)
 	}
-	var got []string
-	for _, sk := range PayloadOf(set).Skipped {
-		if sk.Class != SkipHiddenPath || sk.Partial {
-			t.Errorf("%s: skip = %+v, want class %s", sk.Path, sk, SkipHiddenPath)
-		}
-		got = append(got, sk.Path)
+
+	// The bench's materialized uploads: every row is the member's, so the
+	// ones left out by name are reported, readable formats only.
+	set, err = (&Connector{}).Sync(context.Background(), connector.Config{"path": fixture(t, files), "materialized": true}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
 	}
 	want := []string{"._x.md", "node_modules/a/readme.md", "vault/.obsidian/notes.md", "vault/__MACOSX/._stale.md"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("hidden skips = %v, want %v (sorted, readable formats only)", got, want)
+	if got := hiddenSkips(t, set); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("materialized hidden skips = %v, want %v (sorted, readable formats only)", got, want)
+	}
+}
+
+// Only a dot-prefixed file name hides a document, never a dot-prefixed folder:
+// benches keep documents in .notes/ or docs/.wip/, and hiding those would file
+// a deletion review for every page they produced.
+func TestSyncReadsDocumentsInDotFolders(t *testing.T) {
+	files := map[string]string{
+		"good.md":           "# Fine\n\nReadable.\n",
+		".notes/plan.md":    "# Plan\n\nKept in a dot-folder.\n",
+		"docs/.wip/idea.md": "# Idea\n\nNested under one.\n",
+	}
+	for _, materialized := range []bool{false, true} {
+		cfg := connector.Config{"path": fixture(t, files), "materialized": materialized}
+		set, err := (&Connector{}).Sync(context.Background(), cfg, t.TempDir())
+		if err != nil {
+			t.Fatalf("Sync(materialized=%v): %v", materialized, err)
+		}
+		want := []string{"doc:upload:.notes/plan.md", "doc:upload:docs/.wip/idea.md", "doc:upload:good.md"}
+		if got := itemKeys(set); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("materialized=%v: items = %v, want %v; skips = %+v", materialized, got, want, PayloadOf(set).Skipped)
+		}
+	}
+}
+
+// Every Skip* constant the package declares is in SkipClasses, so a class added
+// to the constants alone cannot fold into extractor_error on the API and the
+// metric without this failing. Read from the source, since Go offers no way to
+// enumerate a package's constants at run time.
+func TestSkipClassesListsEveryDeclaredConstant(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	var declared []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, e.Name(), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, sp := range gd.Specs {
+				vs := sp.(*ast.ValueSpec)
+				for i, name := range vs.Names {
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					if !strings.HasPrefix(name.Name, "Skip") || !ok || lit.Kind != token.STRING {
+						continue
+					}
+					value, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatalf("%s: %v", name.Name, err)
+					}
+					declared = append(declared, value)
+				}
+			}
+		}
+	}
+	if len(declared) == 0 {
+		t.Fatal("no Skip* string constants found; the parse is looking in the wrong place")
+	}
+	for _, class := range declared {
+		if !slices.Contains(SkipClasses, class) {
+			t.Errorf("class %q is declared but not in SkipClasses", class)
+		}
+	}
+	if len(declared) != len(SkipClasses) {
+		t.Errorf("SkipClasses has %d entries, the package declares %d", len(SkipClasses), len(declared))
 	}
 }
 

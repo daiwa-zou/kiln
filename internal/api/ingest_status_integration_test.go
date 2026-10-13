@@ -14,6 +14,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -289,5 +290,103 @@ func TestIngestStatusEndToEnd(t *testing.T) {
 	if len(lines) != 5 || !strings.Contains(lines[3], "class=hidden_path") || !strings.Contains(lines[3], "level=WARN") ||
 		!strings.Contains(lines[4], "level=DEBUG") {
 		t.Errorf("the hidden upload should log one fresh Warn before the repeat; lines = %v", lines)
+	}
+}
+
+// hookRunner runs a function once, just before the first model call of a
+// build: the moment a member can upload while the build is in flight.
+type hookRunner struct {
+	agent.Runner
+	once sync.Once
+	hook func()
+}
+
+func (h *hookRunner) Run(ctx context.Context, req agent.Request) (*agent.Result, error) {
+	h.once.Do(h.hook)
+	return h.Runner.Run(ctx, req)
+}
+
+// A document replaced while a build that had already staged its old bytes
+// runs. The build's import stamps the source fetched_at = now(), later than
+// the replacement's content_changed_at, so the source alone would say "read"
+// about bytes no build has seen; the stage stamp, guarded by the bytes the
+// build staged, is what tells the derivation to say waiting instead.
+func TestReplacedDuringABuildReadsAsWaiting(t *testing.T) {
+	srv, js, wsID := testServer(t)
+	blobs := lastMemBlobs
+	ctx := context.Background()
+	connID, err := js.CreateConnector(ctx, store.ConnectorRow{
+		WorkspaceID: wsID, Kind: "upload", Name: "documents", Config: map[string]any{}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr := &hookRunner{Runner: agent.NewFakeRunner(agent.FakeOptions{}), hook: func() {}}
+	w := &worker.Worker{
+		Store: js, ID: "w-midbuild", Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Blobs: blobs,
+		Pipeline: &jobs.Pipeline{Store: js, Runner: hr, Model: "fake",
+			Budget: jobs.Budget{AnalyzeUSD: 0.4, PageUSD: 1, RunUSD: 4}},
+		SkipSchedulerDuties: true,
+	}
+	build := func() {
+		t.Helper()
+		if _, _, err := js.EnqueueRun(ctx, wsID, "manual", connID); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := w.RunOnce(ctx); err != nil || n != 1 {
+			t.Fatalf("RunOnce = %d, %v", n, err)
+		}
+	}
+	status := func(path string) string {
+		t.Helper()
+		var rows []struct {
+			Path   string                  `json:"path"`
+			Ingest struct{ Status string } `json:"ingest"`
+		}
+		if err := json.Unmarshal([]byte(getRaw(t, srv, "/api/v1/workspaces/demo/files", "")), &rows); err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			if r.Path == path {
+				return r.Ingest.Status
+			}
+		}
+		return "(absent)"
+	}
+	put := func(content string) {
+		t.Helper()
+		if code, body := upload(t, srv, "demo", "", "", "notes.md", []byte(content)); code != 201 {
+			t.Fatalf("upload = %d (%v)", code, body)
+		}
+	}
+
+	put("# Kiln notes\n\nThe kiln fires at cone 6, version one.\n")
+	build()
+	if got := status("notes.md"); got != "read" {
+		t.Fatalf("after build 1: %s, want read", got)
+	}
+
+	// Version two is uploaded, and while the build that stages it runs the
+	// member uploads version three.
+	put("# Kiln notes\n\nThe kiln fires at cone 6, version two, rewritten.\n")
+	hr.once = sync.Once{}
+	fired := false
+	hr.hook = func() {
+		fired = true
+		put("# Kiln notes\n\nThe kiln fires at cone 10, version three, never seen by this build.\n")
+	}
+	build()
+	if !fired {
+		t.Fatal("the mid-build upload never happened; the test proves nothing")
+	}
+	if got := status("notes.md"); got != "waiting" {
+		t.Errorf("after a build that read version two while version three arrived: notes.md = %q, want waiting", got)
+	}
+	// The next build reads version three.
+	hr.hook = func() {}
+	hr.once = sync.Once{}
+	build()
+	if got := status("notes.md"); got != "read" {
+		t.Errorf("after the build that read version three: %s, want read", got)
 	}
 }

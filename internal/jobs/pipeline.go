@@ -267,7 +267,7 @@ func (p *Pipeline) Build(ctx context.Context, req BuildRequest) (*BuildResult, e
 		// its one reader, and it joins on the document key, so stamping every
 		// module, page and section the gate dropped would rewrite rows on
 		// every poll for nobody.
-		if keys := uploadDocKeys(unchanged); !req.DryRun && len(keys) > 0 {
+		if keys := uploadDocKeys(unchanged, req.Map); !req.DryRun && len(keys) > 0 {
 			if err := p.Store.TouchSources(ctx, req.WorkspaceID, keys, now); err != nil {
 				// Not fatal: the pages are current whether or not the stamp
 				// landed, and the Ingest page falls back to the last run.
@@ -535,12 +535,16 @@ func (p *Pipeline) filterUnchanged(dirty []diff.Key, m *mapper.WorkspaceMap, sou
 }
 
 // uploadDocKeys keeps the keys of uploaded documents themselves: the upload
-// namespace, without the section units ('doc:upload:<path>#<section>'), whose
-// parent is always among the keys when they are.
-func uploadDocKeys(keys []diff.Key) []string {
+// namespace, without the section units, whose parent is always among the keys
+// when they are. A section is told apart by its unit's kind, not by the '#'
+// that joins its key: a stored path may itself contain one ("C# notes.md"),
+// and dropping that document here would leave it reading as never read after
+// every same-text re-upload.
+func uploadDocKeys(keys []diff.Key, m *mapper.WorkspaceMap) []string {
+	units := unitsByKey(m)
 	var out []string
 	for _, k := range keys {
-		if diff.Namespace(k) == diff.NamespaceUpload && !strings.Contains(string(k), "#") {
+		if diff.Namespace(k) == diff.NamespaceUpload && units[string(k)].Kind != "doc-section" {
 			out = append(out, string(k))
 		}
 	}

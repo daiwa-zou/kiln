@@ -65,8 +65,9 @@ const (
 	SkipExtractorError   = "extractor_error"
 	// SkipHiddenPath is a file the walk leaves out by name: dot-prefixed, or
 	// under a folder nothing should read (.git, node_modules, ...). Reported
-	// rather than dropped, because a server upload of one is otherwise staged
-	// and silently never read.
+	// rather than dropped when the folder is a bench's materialized uploads,
+	// because a server upload of one is otherwise staged and silently never
+	// read.
 	SkipHiddenPath = "hidden_path"
 )
 
@@ -114,7 +115,11 @@ func (c *Connector) Sync(ctx context.Context, cfg connector.Config, dst string) 
 		figures = extract.FigureOptions{}
 	}
 
-	files, hidden, err := listDocuments(abs)
+	// A materialized folder is the bench's uploaded files staged from storage:
+	// every file in it is a row a member sees on the Ingest page, so the ones
+	// the walk leaves out by name are reported rather than pruned.
+	materialized, _ := cfg["materialized"].(bool)
+	files, hidden, err := listDocuments(abs, materialized)
 	if err != nil {
 		return nil, err
 	}
@@ -242,12 +247,19 @@ var excludedDirs = map[string]bool{
 
 // listDocuments walks a folder for candidate files, in sorted order so a sync
 // is reproducible. files are the ones to read; hidden are the ones left out
-// by name -- dot-prefixed, or anywhere under an excluded folder -- that would
-// otherwise have been candidates. They are returned rather than dropped so
-// Sync can report them: a server upload of one is staged like any other, and
-// without a skip it would read as never ingested with no reason given. A file
-// of a format nothing reads is not a candidate anywhere and stays unreported.
-func listDocuments(root string) (files, hidden []string, err error) {
+// by name -- a dot-prefixed file, or anything under an excluded folder -- that
+// would otherwise have been candidates. A dot-prefixed folder is not hidden:
+// benches have long kept documents in .notes/ or docs/.wip/, and hiding those
+// would file a deletion review for every page they produced. A file of a
+// format nothing reads is not a candidate anywhere and stays unreported.
+//
+// In a local folder the excluded folders are pruned unreported, as a vendored
+// node_modules can hold thousands of readable files that nobody uploaded and
+// no Ingest row describes. In a materialized folder every file is a row the
+// member can see, so the excluded folders are walked and their files reported:
+// without a skip such an upload would read as never ingested with no reason
+// given.
+func listDocuments(root string, materialized bool) (files, hidden []string, err error) {
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// An unreadable subtree should not abort the walk; the rest of the
@@ -258,6 +270,9 @@ func listDocuments(root string) (files, hidden []string, err error) {
 			return nil
 		}
 		if d.IsDir() {
+			if excludedDirs[d.Name()] && !materialized {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if !d.Type().IsRegular() || extract.DetectFormat(path) == extract.FormatUnknown {
@@ -284,11 +299,14 @@ func listDocuments(root string) (files, hidden []string, err error) {
 }
 
 // isHiddenPath says whether a relative path is left out by name: a
-// dot-prefixed file, or any entry of its path that is dot-prefixed or an
-// excluded folder.
+// dot-prefixed file name, or an excluded folder anywhere in its path.
 func isHiddenPath(rel string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
-		if strings.HasPrefix(part, ".") || excludedDirs[part] {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if strings.HasPrefix(parts[len(parts)-1], ".") {
+		return true
+	}
+	for _, part := range parts[:len(parts)-1] {
+		if excludedDirs[part] {
 			return true
 		}
 	}

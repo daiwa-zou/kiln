@@ -86,7 +86,9 @@ func TestRecordFileSkipsSetsRepeatsAndGuardsSHA(t *testing.T) {
 	mustCreateFile(t, s, ws, "a.pdf", "a1")
 	mustCreateFile(t, s, ws, "b.pdf", "b1")
 	before := readSkip(t, s, ws, "a.pdf")
-	at := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	// The worker stamps with its clock, after the upload; a fixed past date
+	// would read as a stamp older than the bytes.
+	at := time.Now().UTC().Truncate(time.Microsecond)
 	stagedA := map[string]string{"a.pdf": "a1"}
 
 	changed, err := s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "no_text"}}, stagedA, at)
@@ -104,8 +106,9 @@ func TestRecordFileSkipsSetsRepeatsAndGuardsSHA(t *testing.T) {
 		t.Errorf("recording a skip moved updated_at %v -> %v; the Ingest list sorts on it", before.updatedAt, got.updatedAt)
 	}
 
-	// The same skip again is a no-op for the skip: nothing reported. The
-	// staged stamp moves, because the build did stage the file again.
+	// The same skip again is a no-op: nothing reported, and the stamp stays
+	// where it was. The row was already staged since its bytes changed, which
+	// is all the derivation asks, so an unchanged bench rewrites no rows.
 	changed, err = s.RecordFileSkips(ctx, ws, []FileSkip{{Path: "a.pdf", SHA256: "a1", Class: "no_text"}}, stagedA, at.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("repeat: %v", err)
@@ -113,8 +116,8 @@ func TestRecordFileSkipsSetsRepeatsAndGuardsSHA(t *testing.T) {
 	if len(changed) != 0 {
 		t.Errorf("repeat reported changed = %v, want nothing", changed)
 	}
-	if got := readSkip(t, s, ws, "a.pdf"); got.stagedAt == nil || !got.stagedAt.Equal(at.Add(time.Hour)) {
-		t.Errorf("repeat left staged_at at %v, want the later stamp", got.stagedAt)
+	if got := readSkip(t, s, ws, "a.pdf"); got.stagedAt == nil || !got.stagedAt.Equal(at) {
+		t.Errorf("repeat moved staged_at to %v, want it left at %v", got.stagedAt, at)
 	}
 
 	// A different class for the same bytes is a change.
@@ -151,6 +154,17 @@ func TestRecordFileSkipsSetsRepeatsAndGuardsSHA(t *testing.T) {
 	// Nothing to do is not a transaction.
 	if changed, err := s.RecordFileSkips(ctx, ws, nil, nil, at); err != nil || changed != nil {
 		t.Fatalf("empty call = %v, %v", changed, err)
+	}
+
+	// A replacement moves the bytes past the stamp, so staging the new bytes
+	// moves the stamp.
+	mustCreateFile(t, s, ws, "a.pdf", "a2")
+	restaged := at.Add(2 * time.Hour)
+	if _, err := s.RecordFileSkips(ctx, ws, nil, map[string]string{"a.pdf": "a2"}, restaged); err != nil {
+		t.Fatalf("restage: %v", err)
+	}
+	if got := readSkip(t, s, ws, "a.pdf"); got.stagedAt == nil || !got.stagedAt.Equal(restaged) {
+		t.Errorf("staging the replacement left staged_at at %v, want %v", got.stagedAt, restaged)
 	}
 }
 

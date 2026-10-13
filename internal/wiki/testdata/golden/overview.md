@@ -14,7 +14,7 @@ Five Go services behind a gateway, each owning a slice of the request path.
 ## What this bench reads
 
 - 5 code modules
-- 1 uploaded document
+- 1 of 2 uploaded documents; 1 not read
 - 3 fetched web pages
 
 ## Contents

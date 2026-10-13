@@ -30,7 +30,7 @@ func twoModuleRequest(t *testing.T, store *memStore, runner *scriptedRunner) Bui
 		mapper.Unit{Key: "module:ripple", Slug: "ripple", Hash: "hash-v1"},
 		mapper.Unit{Key: "module:eddy", Slug: "eddy", Hash: "hash-v2"},
 		mapper.Unit{Key: string(notesKey), Slug: "notes", Hash: "hash-v1"},
-		mapper.Unit{Key: string(notesKey) + "#intro", Slug: "notes-intro", Hash: "hash-v1"},
+		mapper.Unit{Key: string(notesKey) + "#intro", Kind: "doc-section", Slug: "notes-intro", Hash: "hash-v1"},
 	)
 	req := testRequest(t, m, diff.ChangeSet{Changes: []diff.Change{
 		{Path: "apps/ripple/main.go", Kind: diff.Modified},
@@ -67,6 +67,36 @@ func TestBuildStampsUnitsTheGateDroppedAsRead(t *testing.T) {
 	// The regenerated unit's source is written by the import, as before.
 	if imp := store.lastImport(); imp == nil || len(imp.UpsertSources) != 1 || imp.UpsertSources[0].Key != diff.ModuleKey("eddy") {
 		t.Errorf("imported sources = %+v, want eddy alone", store.lastImport())
+	}
+}
+
+// A section is told apart by its unit kind, not by the '#' in its key: a
+// stored path may carry one itself, and such a document, dropped by the gate
+// as unchanged, must be stamped like any other or it reads as never read after
+// every same-text re-upload.
+func TestBuildStampsAnUploadWhosePathContainsAHash(t *testing.T) {
+	store := newMemStore()
+	runner := newScriptedRunner()
+	key := diff.DocKey(diff.UploadOrigin("C# notes.md"))
+	store.sources[key] = diff.SourceRecord{Key: key, InputHash: "hash-v1", FilesWritten: []string{"sources/c-notes.md"}}
+	store.sources[diff.ModuleKey("eddy")] = diff.SourceRecord{Key: diff.ModuleKey("eddy"), InputHash: "hash-v1"}
+	runner.filesByAttempt[0] = map[string]string{"entities/eddy.md": validPage("entity", "Eddy")}
+	m := testMap(
+		mapper.Unit{Key: "module:eddy", Slug: "eddy", Hash: "hash-v2"},
+		mapper.Unit{Key: string(key), Kind: "doc", Slug: "c-notes", Hash: "hash-v1"},
+	)
+	req := testRequest(t, m, diff.ChangeSet{Changes: []diff.Change{
+		{Path: "apps/eddy/main.go", Kind: diff.Modified},
+		{Path: diff.UploadOrigin("C# notes.md"), Kind: diff.Modified},
+	}})
+	req.Router.ModuleDirs["apps/eddy"] = diff.ModuleKey("eddy")
+	req.Router.DocPaths = map[string]diff.Key{diff.UploadOrigin("C# notes.md"): key}
+
+	if _, err := testPipeline(store, runner).Build(context.Background(), req); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if want := [][]string{{string(key)}}; !reflect.DeepEqual(store.touched, want) {
+		t.Errorf("TouchSources calls = %v, want %v", store.touched, want)
 	}
 }
 

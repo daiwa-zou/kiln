@@ -220,6 +220,12 @@ func uploadsReadPhrase(in OverviewInput) string {
 	return fmt.Sprintf("%d of %d %s", in.UploadsStaged-in.UploadsSkipped, in.UploadsStaged, noun)
 }
 
+// uploadsListPhrase is the "What this bench reads" line for uploads when the
+// build skipped some: the lede's phrase plus how many were not read.
+func uploadsListPhrase(in OverviewInput) string {
+	return fmt.Sprintf("%s; %d not read", uploadsReadPhrase(in), in.UploadsSkipped)
+}
+
 // uploadCount is how many uploaded units the build was compiled from, by the
 // tally.
 func uploadCount(in OverviewInput) int {
@@ -236,12 +242,27 @@ func uploadCount(in OverviewInput) int {
 // separate from the page counts: a source that has been connected but has not
 // produced pages yet is invisible in a page count, and its absence there is
 // exactly the thing a reader would be confused by.
+//
+// The uploads line follows the lede: when the build skipped any, it gives the
+// document counts and says how many were not read, so the list cannot name a
+// larger number than the sentence above it (the tally counts a long
+// document's sections as units) and the UI's tile, which is cut from this
+// line, carries the same reconciliation.
 func writeOverviewSources(b *strings.Builder, in OverviewInput) {
 	var lines []string
+	uploadsSaid := false
 	for _, t := range in.Sources {
+		if t.Kind == diff.NamespaceUpload && in.UploadsSkipped > 0 {
+			lines = append(lines, uploadsListPhrase(in))
+			uploadsSaid = true
+			continue
+		}
 		if p := sourcePhrase(t); p != "" && t.Count > 0 {
 			lines = append(lines, p)
 		}
+	}
+	if in.UploadsSkipped > 0 && !uploadsSaid {
+		lines = append(lines, uploadsListPhrase(in))
 	}
 	if len(lines) == 0 {
 		return

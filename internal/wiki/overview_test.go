@@ -131,6 +131,52 @@ func TestOverviewLedeSaysWhatCouldNotBeRead(t *testing.T) {
 	}
 }
 
+// The reads list says the same thing about uploads as the lede, so a reader
+// who checks one against the other finds no second number to reconcile.
+func TestOverviewReadsListReconcilesSkippedUploads(t *testing.T) {
+	skipped := BuildOverview(samplePages(), OverviewInput{
+		Workspace: "w", Date: "2026-07-25",
+		Sources:        []SourceTally{{Kind: "module", Count: 2}, {Kind: "doc:upload", Count: 27}},
+		UploadsStaged:  28,
+		UploadsSkipped: 1,
+	})
+	if !strings.Contains(skipped, "## What this bench reads\n\n- 2 code modules\n- 27 of 28 uploaded documents; 1 not read\n") {
+		t.Errorf("reads list does not account for the skipped document:\n%s", skipped)
+	}
+
+	// Documents, not units: the tally counts a long document's sections.
+	sectioned := BuildOverview(samplePages(), OverviewInput{
+		Workspace: "w", Date: "2026-07-25",
+		Sources:        []SourceTally{{Kind: "doc:upload", Count: 31}},
+		UploadsStaged:  28,
+		UploadsSkipped: 2,
+	})
+	if !strings.Contains(sectioned, "- 26 of 28 uploaded documents; 2 not read\n") || strings.Contains(sectioned, "31 uploaded") {
+		t.Errorf("reads list counts units rather than documents:\n%s", sectioned)
+	}
+
+	// A bench whose only upload was skipped has no upload tally, and the list
+	// still says what happened to it, as the lede does.
+	allSkipped := BuildOverview(samplePages(), OverviewInput{
+		Workspace: "w", Date: "2026-07-25",
+		UploadsStaged:  1,
+		UploadsSkipped: 1,
+	})
+	if !strings.Contains(allSkipped, "## What this bench reads\n\n- 0 of 1 uploaded document; 1 not read\n") {
+		t.Errorf("reads list is silent about a bench whose one upload was skipped:\n%s", allSkipped)
+	}
+
+	// Nothing skipped: the plain tally, as before.
+	plain := BuildOverview(samplePages(), OverviewInput{
+		Workspace: "w", Date: "2026-07-25",
+		Sources:       []SourceTally{{Kind: "doc:upload", Count: 27}},
+		UploadsStaged: 27,
+	})
+	if !strings.Contains(plain, "- 27 uploaded documents\n") || strings.Contains(plain, "not read") {
+		t.Errorf("a build that skipped nothing changed the reads list:\n%s", plain)
+	}
+}
+
 func TestOverviewLedeReportsBuildTimeToTheMinute(t *testing.T) {
 	// A bench rebuilt three times in a morning said "last built" the same way
 	// all three times, which is the one question the line exists to answer.

@@ -314,13 +314,13 @@ func TestSourceSpecFilesModeSurvivesUnreadableBlob(t *testing.T) {
 			{ID: "c2", Kind: "upload", Name: "documents", Config: map[string]any{}},
 		},
 		files: []store.FileRow{
-			{ID: "f1", Path: "present.md", BlobKey: "ws/ws1/uploads/ok", Enabled: true},
-			{ID: "f2", Path: "vanished.md", BlobKey: "ws/ws1/uploads/gone", Enabled: true},
+			{ID: "f1", Path: "present.md", BlobKey: "ws/ws1/uploads/ok", SHA256: "sha-ok", Enabled: true},
+			{ID: "f2", Path: "vanished.md", BlobKey: "ws/ws1/uploads/gone", SHA256: "sha-gone", Enabled: true},
 		},
 	}
 	w := &Worker{Store: st, Blobs: blobs}
 
-	spec, ids, _, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
+	spec, ids, staged, cleanup, err := w.sourceSpec(context.Background(), run("ws1"))
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -351,6 +351,12 @@ func TestSourceSpecFilesModeSurvivesUnreadableBlob(t *testing.T) {
 	}
 	if _, ok := spec.BlobKeys[string(want)]; ok {
 		t.Error("unreadable document was attributed to the sync")
+	}
+	// Yet the sink stamps it: the build saw the row and could not read it,
+	// which the Ingest page shows as "not read" rather than as a wait that no
+	// build ends, since every build fails it the same way.
+	if got := staged.SHAs; got["vanished.md"] != "sha-gone" || got["present.md"] != "sha-ok" {
+		t.Errorf("staged SHAs = %v, want both rows, the unreadable one included", got)
 	}
 
 	// And it is surfaced where a human looks, rather than swallowed.

@@ -6,9 +6,14 @@
 // when a run settles. The Go pins in internal/api/ui_ingest_status_test.go
 // hold the source shape; these hold what the functions do.
 import { describe, expect, test } from "vitest";
-import { loadSources, type FileRow } from "./sources";
+import { loadSources, type FileRow, type Summary } from "./sources";
 
 const S = loadSources();
+
+// The API's sentence for a scan (internal/api/fileingest.go). The UI prints
+// it verbatim, so the assertions check that it arrives whole and escaped, not
+// the words, which the API owns.
+const NO_TEXT = "No text found, probably a scan. Upload a text version in its place, or delete this one.";
 
 // parse renders one helper's HTML into jsdom so the assertions can read what
 // a person would see (textContent) rather than only the markup.
@@ -24,7 +29,7 @@ const waiting = (name: string, extra: Partial<FileRow> = {}): FileRow =>
   ({ name, path: `uploads/${name}`, ingest: { status: "waiting" }, ...extra });
 const skipped = (name: string, extra: Partial<FileRow> = {}): FileRow => ({
   name, path: `uploads/${name}`,
-  ingest: { status: "skipped", class: "no_text", reason: "No text found, probably a scan. Upload a text version." },
+  ingest: { status: "skipped", class: "no_text", reason: NO_TEXT },
   ...extra,
 });
 
@@ -43,9 +48,6 @@ describe("ingestSummary", () => {
     expect(n).toEqual({ read: 1, waiting: 0, notRead: 1, paused: 3 });
     expect(n.read + n.waiting + n.notRead + n.paused).toBe(files.length);
     expect(S.ingestSummaryText(n)).toBe("1 read · 1 not read · 3 paused");
-    // The unread count the bar and the Ingest now link act on: a paused file
-    // is never read and must not trigger either.
-    expect(S.unreadCount(n)).toBe(1);
   });
 
   test("a bench with 25 read, one waiting, one not read", () => {
@@ -68,67 +70,77 @@ describe("ingestSummary", () => {
   });
 });
 
-describe("unreadCount", () => {
-  test("a waiting document is unread", () => {
-    // One upload waiting for the next ingest must stop the bar from saying
-    // Read cleanly, so waiting counts as unread on its own.
-    expect(S.unreadCount(S.ingestSummary([read("a.md", 3), waiting("7 Questions.pdf")]))).toBe(1);
-    expect(S.unreadCount({ read: 25, waiting: 1, notRead: 0, paused: 0 })).toBe(1);
-  });
+describe("connectorHealth", () => {
+  const clean = { enabled: true, lastSynced: "2026-10-09T10:00:00Z" };
+  const tally = (over: Partial<Summary>): Summary => ({ read: 25, waiting: 0, notRead: 0, paused: 0, ...over });
+  const soft = (note: string) => ({ pct: 100, cls: "fill-soft", note });
 
-  test("a skipped document is unread", () => {
-    expect(S.unreadCount(S.ingestSummary([read("a.md", 3), skipped("scan.pdf")]))).toBe(1);
-    expect(S.unreadCount({ read: 25, waiting: 0, notRead: 1, paused: 0 })).toBe(1);
-  });
-
-  test("waiting and not read add; read and paused do not count", () => {
-    expect(S.unreadCount({ read: 25, waiting: 1, notRead: 1, paused: 0 })).toBe(2);
-    expect(S.unreadCount({ read: 25, waiting: 0, notRead: 0, paused: 0 })).toBe(0);
-    expect(S.unreadCount(S.ingestSummary([
+  test("says Read cleanly only with nothing unread", () => {
+    expect(S.connectorHealth(clean, tally({}))).toEqual({ pct: 100, cls: "fill-ember", note: "Read cleanly" });
+    // Paused files are not unread: nothing will read them until the member says so.
+    expect(S.connectorHealth(clean, tally({ paused: 3 }))).toEqual({ pct: 100, cls: "fill-ember", note: "Read cleanly" });
+    expect(S.connectorHealth(clean, S.ingestSummary([
       read("a.md", 3),
       waiting("c.pdf", { enabled: false }),
       skipped("old-scan.pdf", { enabled: false }),
-    ]))).toBe(0);
-    expect(S.unreadCount({ read: 0, waiting: 0, notRead: 0, paused: 3 })).toBe(0);
-  });
-});
-
-describe("connectorHealth", () => {
-  const clean = { enabled: true, lastSynced: "2026-10-09T10:00:00Z" };
-
-  test("says Read cleanly only with nothing unread", () => {
-    expect(S.connectorHealth(clean, 0)).toEqual({ pct: 100, cls: "fill-ember", note: "Read cleanly" });
+    ]))).toEqual({ pct: 100, cls: "fill-ember", note: "Read cleanly" });
+    // A git or web source hands no summary in and has nothing unread.
     expect(S.connectorHealth(clean)).toEqual({ pct: 100, cls: "fill-ember", note: "Read cleanly" });
+    expect(S.connectorHealth(clean, null)).toEqual({ pct: 100, cls: "fill-ember", note: "Read cleanly" });
   });
 
-  test("never says Read cleanly while a document is unread, and softens the fill", () => {
+  test("a skipped document: not read, and the fill softens", () => {
     // "not read", the words the chips and the header use; the bar used to say
     // "unread", a fourth term for the one state.
-    for (const unread of [1, 2, 26]) {
-      const h = S.connectorHealth(clean, unread);
+    for (const notRead of [1, 2, 26]) {
+      const h = S.connectorHealth(clean, tally({ notRead }));
       expect(h.note).not.toContain("Read cleanly");
-      expect(h).toEqual({ pct: 100, cls: "fill-soft", note: "Some documents were not read; see below." });
+      expect(h).toEqual(soft("Some documents were not read; see below."));
     }
+    expect(S.connectorHealth(clean, S.ingestSummary([read("a.md", 3), skipped("scan.pdf")])))
+      .toEqual(soft("Some documents were not read; see below."));
   });
 
-  test("paused, failed and never-read sources keep their own notes whatever the count", () => {
-    expect(S.connectorHealth({ enabled: false, lastSynced: clean.lastSynced }, 3).note).toBe("Paused — skipped on ingest");
-    expect(S.connectorHealth({ ...clean, lastError: "boom" }, 3)).toEqual({ pct: 100, cls: "fill-err", note: "Last read failed" });
-    expect(S.connectorHealth({ enabled: true }, 3)).toEqual({ pct: 0, cls: "fill-soft", note: "Not read yet" });
+  test("only waiting documents: waiting, not \"not read\", and the fill softens", () => {
+    // Told "not read", a reader goes looking for a refused file that does not
+    // exist; a document the next ingest will pick up is said to be waiting.
+    for (const waitingN of [1, 2, 26]) {
+      const h = S.connectorHealth(clean, tally({ waiting: waitingN }));
+      expect(h.note).not.toContain("Read cleanly");
+      expect(h.note).not.toContain("not read");
+      expect(h).toEqual(soft("Some documents are waiting for the next ingest; see below."));
+    }
+    expect(S.connectorHealth(clean, S.ingestSummary([read("a.md", 3), waiting("7 Questions.pdf")])))
+      .toEqual(soft("Some documents are waiting for the next ingest; see below."));
+  });
+
+  test("a skip beside a waiting file is told about the skip", () => {
+    expect(S.connectorHealth(clean, tally({ waiting: 1, notRead: 1 })))
+      .toEqual(soft("Some documents were not read; see below."));
+    expect(S.connectorHealth(clean, S.ingestSummary([waiting("w.pdf"), skipped("scan.pdf")])))
+      .toEqual(soft("Some documents were not read; see below."));
+  });
+
+  test("paused, failed and never-read sources keep their own notes whatever the summary", () => {
+    const unread = tally({ waiting: 1, notRead: 2 });
+    expect(S.connectorHealth({ enabled: false, lastSynced: clean.lastSynced }, unread).note).toBe("Paused — skipped on ingest");
+    expect(S.connectorHealth({ ...clean, lastError: "boom" }, unread)).toEqual({ pct: 100, cls: "fill-err", note: "Last read failed" });
+    expect(S.connectorHealth({ enabled: true }, unread)).toEqual({ pct: 0, cls: "fill-soft", note: "Not read yet" });
   });
 });
 
 describe("ingestChip", () => {
-  test("read: the word, then the page count; the last check in the title", () => {
-    // Beside the size chip a bare "6 pages" reads as the PDF's own page
-    // count, so the chip leads with the state. readAt is stamped by every
-    // ingest that checks the file, not only the one that first read it.
+  test("read: the word, then the wiki page count; the last check in the title", () => {
+    // Beside the size chip "6 pages", and "read · 6 pages" too, read as the
+    // PDF's own length, so the chip leads with the state and names the wiki.
+    // readAt is stamped by every ingest that checks the file, not only the
+    // one that first read it.
     const six = parse(S.ingestChip(read("a.pdf", 6))).firstElementChild;
     expect(six?.className).toBe("chip");
-    expect(six?.textContent).toBe("read · 6 pages");
+    expect(six?.textContent).toBe("read · 6 wiki pages");
     expect(six?.getAttribute("title")).toBe("Checked rel(2026-10-09T10:00:00Z)");
-    expect(parse(S.ingestChip(read("b.pdf", 1))).textContent).toBe("read · 1 page");
-    // No count is still read, without inventing "0 pages".
+    expect(parse(S.ingestChip(read("b.pdf", 1))).textContent).toBe("read · 1 wiki page");
+    // No count is still read, without inventing "0 wiki pages".
     expect(parse(S.ingestChip(read("c.pdf", 0))).textContent).toBe("read");
     const noStamp = parse(S.ingestChip({ name: "d.md", path: "uploads/d.md", ingest: { status: "read", pages: 2 } }));
     expect(noStamp.firstElementChild?.hasAttribute("title")).toBe(false);
@@ -163,7 +175,7 @@ describe("ingestReason", () => {
     const el = parse(S.ingestReason(skipped("scan.pdf"))).firstElementChild;
     expect(el?.classList.contains("src-reason")).toBe(true);
     expect(el?.getAttribute("data-class")).toBe("no_text");
-    expect(el?.textContent).toBe("No text found, probably a scan. Upload a text version.");
+    expect(el?.textContent).toBe(NO_TEXT);
     expect(el?.hasAttribute("title")).toBe(false);
   });
 
@@ -297,13 +309,14 @@ describe("docsGlossHTML", () => {
 describe("patchIngestStatus", () => {
   // The Ingest view's skeleton: the parts the settle refresh patches, with
   // the ids the view renders them under, filled as the page would be with
-  // one upload waiting for the next ingest.
+  // one upload waiting for the next ingest. The Go pin
+  // TestUIPatchIngestStatusIdsExist holds these ids to the view's markup.
   const upload = { enabled: true, lastSynced: "2026-10-09T10:00:00Z" };
   const rows = (files: FileRow[]) =>
     files.map((f) => `<div class="src-row" id="file-${f.id ?? ""}">${S.ingestChip(f)}${S.ingestReason(f)}</div>`).join("");
   const before = [read("a.pdf", 6, { id: "a" }), waiting("7 Questions.pdf", { id: "q" })];
   const page = (): HTMLElement => {
-    const h = S.connectorHealth(upload, S.unreadCount(S.ingestSummary(before)));
+    const h = S.connectorHealth(upload, S.ingestSummary(before));
     return parse(`
       <div class="stat" id="stat-documents">
         <div class="stat-value">${String(before.length)}</div>
@@ -323,7 +336,9 @@ describe("patchIngestStatus", () => {
   test("after the run that read the waiting file, every part says so without a reload", () => {
     const root = page();
     expect(text(root, ".stat-note")).toBe("1 read · 1 waiting · Ingest now");
-    expect(text(root, ".bar-note")).toBe("Some documents were not read; see below.");
+    // Only waiting: the bar says so, and does not send the reader after a skip.
+    expect(fillOf(root)).toBe("fill-soft");
+    expect(text(root, ".bar-note")).toBe("Some documents are waiting for the next ingest; see below.");
     expect(text(root, "#file-q")).toBe("Waiting for the next ingest");
 
     const after = [read("a.pdf", 6, { id: "a" }), read("7 Questions.pdf", 4, { id: "q" })];
@@ -334,7 +349,7 @@ describe("patchIngestStatus", () => {
     expect(root.querySelector("[data-ingest-now]")).toBeNull();
     expect(text(root, "#docs-gloss")).toBe("2 · 2 read — uploaded straight from this browser");
     expect(root.querySelector("#ingest-attention")?.innerHTML).toBe("");
-    expect(text(root, "#file-q")).toBe("read · 4 pages");
+    expect(text(root, "#file-q")).toBe("read · 4 wiki pages");
     const fill = root.querySelector("#upload-health .bar span");
     expect(fill?.className).toBe("fill-ember");
     expect(fill?.getAttribute("data-w")).toBe("100");
@@ -350,7 +365,7 @@ describe("patchIngestStatus", () => {
     expect(text(root, "#ingest-attention")).toBe("1 document was not read: 7 Questions.pdf");
     expect(root.querySelector("#ingest-attention a")?.getAttribute("href")).toBe("#file-q");
     expect(root.querySelector("#file-q .chip.not-read")?.textContent).toBe("Not read");
-    expect(text(root, "#file-q .src-reason")).toBe("No text found, probably a scan. Upload a text version.");
+    expect(text(root, "#file-q .src-reason")).toBe(NO_TEXT);
     expect(fillOf(root)).toBe("fill-soft");
     expect(text(root, ".bar-note")).toBe("Some documents were not read; see below.");
   });
@@ -360,9 +375,11 @@ describe("patchIngestStatus", () => {
     S.patchIngestStatus(root, before, { buildActive: true, upload, rows });
     expect(text(root, ".stat-note")).toBe("1 read · 1 waiting · ingest in progress");
     expect(root.querySelector("[data-ingest-now]")).toBeNull();
-    // And the link comes back when the queue empties without the file read.
+    // And the link comes back when the queue empties without the file read;
+    // the bar still says waiting, not "not read".
     S.patchIngestStatus(root, before, { buildActive: false, upload, rows });
     expect(root.querySelector("[data-ingest-now]")?.textContent).toBe("Ingest now");
+    expect(text(root, ".bar-note")).toBe("Some documents are waiting for the next ingest; see below.");
   });
 
   test("a member's page has no bar, and the rest is still patched", () => {
@@ -371,7 +388,7 @@ describe("patchIngestStatus", () => {
     const after = [read("a.pdf", 6, { id: "a" }), read("7 Questions.pdf", 4, { id: "q" })];
     S.patchIngestStatus(root, after, { buildActive: false, rows });
     expect(text(root, ".stat-note")).toBe("2 read");
-    expect(text(root, "#file-q")).toBe("read · 4 pages");
+    expect(text(root, "#file-q")).toBe("read · 4 wiki pages");
   });
 });
 

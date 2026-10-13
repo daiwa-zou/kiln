@@ -126,9 +126,11 @@ func (s *WikiStore) EnqueueRunOpts(ctx context.Context, workspaceID, trigger, co
 //   - No active run: a new queued run is created.
 //   - A queued build is waiting: the request merges into it. It advances the
 //     build's ref_to to the newest head, so a push storm's final state is what
-//     gets built, and widens a build pinned to one connector to every connector
+//     gets built, widens a build pinned to one connector to every connector
 //     when the request names a different one (or none), so no connector's change
-//     is left out of the build that was supposed to include it.
+//     is left out of the build that was supposed to include it, and brings the
+//     build's start time forward to the request's (a request with none makes
+//     it claimable at once).
 //   - Anything else (a queued research run, or a build already running): the
 //     request is recorded in build_requests and promoted to a queued build when
 //     the workspace is next free. Merging into research would drop the request
@@ -164,16 +166,22 @@ func (s *WikiStore) EnqueueBuild(ctx context.Context, workspaceID, trigger, conn
 		// Conflict path. First try to merge into a waiting build. The status
 		// guard is re-evaluated under the row lock, so a worker that claims the
 		// build between the insert above and this update is not merged into.
+		// The start time merges as recordBuildRequest's does: the earliest
+		// wins, and a request with none clears it, so a person pressing Ingest
+		// now is not made to wait out a held continuation's delay.
 		// ('research' below is jobs.TriggerResearch, kept as a SQL literal.)
 		var mergedTrigger string
 		err = s.pool.QueryRow(ctx, `
 			UPDATE runs SET
 			    ref_to = coalesce($2, ref_to),
 			    connector_id = CASE WHEN connector_id IS NOT DISTINCT FROM $3::uuid
-			                        THEN connector_id ELSE NULL END
+			                        THEN connector_id ELSE NULL END,
+			    not_before = CASE WHEN not_before IS NULL OR $4::timestamptz IS NULL
+			                      THEN NULL
+			                      ELSE least(not_before, $4::timestamptz) END
 			WHERE workspace_id = $1 AND status = 'queued' AND trigger <> 'research'
 			RETURNING id, trigger`,
-			workspaceID, nullable(opts.RefTo), nullable(connectorID)).Scan(&runID, &mergedTrigger)
+			workspaceID, nullable(opts.RefTo), nullable(connectorID), notBefore).Scan(&runID, &mergedTrigger)
 		if err == nil {
 			return EnqueueResult{RunID: runID, Outcome: EnqueueMerged, ActiveTrigger: mergedTrigger}, nil
 		}

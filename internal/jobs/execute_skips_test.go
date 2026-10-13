@@ -3,6 +3,8 @@ package jobs
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daiwa-zou/kiln/internal/agent"
 	"github.com/daiwa-zou/kiln/internal/connector"
 	"github.com/daiwa-zou/kiln/internal/connector/upload"
 	webconn "github.com/daiwa-zou/kiln/internal/connector/web"
@@ -229,6 +232,111 @@ func TestBuildOverviewAccountsForSkippedUploads(t *testing.T) {
 	}
 	if !strings.Contains(imp.Overview, "compiled from 1 code module and 2 of 3 uploaded documents, at `abc1234`; 1 could not be read (see Ingest).") {
 		t.Errorf("overview does not account for the skipped upload:\n%s", imp.Overview)
+	}
+}
+
+// Execute is the one entry point the worker and the CLI share, and the hop
+// that hands materialize's upload counts to the build request. The tests on
+// either side of it (materialize counts; Build renders what it is handed) do
+// not run the hop, so this one does.
+func TestExecuteHandsTheUploadCountsToTheOverview(t *testing.T) {
+	popplerShims(t, false)
+	// The scripted runner writes its pages relative to the working directory.
+	t.Chdir(t.TempDir())
+	docs := t.TempDir()
+	writeTree(t, docs, map[string]string{"bad.pdf": blankPDF, "ok.md": "# Fine\n\nReadable.\n"})
+
+	store := newMemStore()
+	runner := newScriptedRunner()
+	runner.filesByAttempt[0] = map[string]string{"sources/ok.md": validPage("source", "Ok")}
+	if _, err := testPipeline(store, runner).Execute(context.Background(), ExecuteRequest{
+		RunID: "run-x", WorkspaceID: "ws-1", Trigger: "manual",
+		Source:   SourceSpec{DocsDir: docs, Slug: "bench"},
+		Progress: io.Discard,
+	}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	imp := store.lastImport()
+	if imp == nil {
+		t.Fatal("nothing was imported; the runner's page script is wrong")
+	}
+	if !strings.Contains(imp.Overview, "compiled from 1 of 2 uploaded documents; 1 could not be read (see Ingest).") {
+		t.Errorf("Execute did not hand the skipped upload to the overview:\n%s", imp.Overview)
+	}
+}
+
+// A run that synced no uploads (pinned to a repository) still rewrites the
+// overview, so it takes the upload counts from the bench's file rows rather
+// than saying every document was read. A count that fails keeps the plain
+// tally and costs the build nothing.
+func TestExecuteCountsUploadsFromTheRowsWhenTheRunSyncedNone(t *testing.T) {
+	repo := archGateRepo(t)
+	build := func(t *testing.T, store *memStore) string {
+		t.Helper()
+		// A page for every unit the repository maps to, so the build imports.
+		mat, err := materialize(context.Background(), io.Discard, SourceSpec{Path: repo, Slug: "bench"})
+		if err != nil {
+			t.Fatalf("materialize: %v", err)
+		}
+		mat.Close()
+		runner := &structuredRunner{byUnit: map[string][]agent.GeneratedPage{}}
+		for i, u := range mat.Map.Units {
+			title := fmt.Sprintf("Unit %d", i)
+			runner.byUnit[u.Key] = []agent.GeneratedPage{{
+				Path: fmt.Sprintf("entities/unit-%d.md", i), Type: "entity", Title: title,
+				Body: "# " + title + "\n\nThis module coordinates work across the services, dispatching tasks " +
+					"to workers and collecting their results for downstream consumers.\n",
+			}}
+		}
+		if _, err := testPipeline(store, runner).Execute(context.Background(), ExecuteRequest{
+			RunID: "run-repo", WorkspaceID: "ws-1", Trigger: "poll",
+			Source: SourceSpec{Path: repo, Slug: "bench"},
+		}); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		imp := store.lastImport()
+		if imp == nil {
+			t.Fatal("nothing was imported")
+		}
+		return imp.Overview
+	}
+
+	store := newMemStore()
+	store.uploadsStaged, store.uploadsSkipped = 3, 1
+	if got := build(t, store); !strings.Contains(got, "compiled from 2 code modules and 2 of 3 uploaded documents; 1 could not be read (see Ingest).") {
+		t.Errorf("overview forgot the rows' upload counts:\n%s", got)
+	}
+
+	store = newMemStore()
+	store.failCount = errors.New("db down")
+	if got := build(t, store); strings.Contains(got, "uploaded document") {
+		t.Errorf("a failed count invented an upload phrase:\n%s", got)
+	}
+}
+
+// A local documents folder (kiln build --docs, or an upload connector with a
+// path) that holds a vendored tree: nothing uploaded those files and no Ingest
+// row describes them, so the walk prunes the folder rather than narrating and
+// counting thousands of skips.
+func TestMaterializePrunesExcludedFoldersInALocalFolder(t *testing.T) {
+	docs := t.TempDir()
+	files := map[string]string{"guide.md": "# Guide\n\nReadable.\n", "notes.md": "# Notes\n\nReadable.\n"}
+	for i := 0; i < 30; i++ {
+		files[fmt.Sprintf("node_modules/pkg%d/README.md", i)] = "# pkg\n"
+	}
+	writeTree(t, docs, files)
+
+	var progress strings.Builder
+	mat, err := materialize(context.Background(), &progress, SourceSpec{DocsDir: docs, Slug: "bench"})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	defer mat.Close()
+	if mat.UploadsStaged != 2 || mat.UploadsSkipped != 0 {
+		t.Errorf("uploads staged/skipped = %d/%d, want 2/0: vendored files were never documents", mat.UploadsStaged, mat.UploadsSkipped)
+	}
+	if strings.Contains(progress.String(), "skipped node_modules/") {
+		t.Errorf("the vendored tree was narrated:\n%s", progress.String())
 	}
 }
 

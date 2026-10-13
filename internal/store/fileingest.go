@@ -55,7 +55,10 @@ func sortFileSkips(skips []FileSkip) []FileSkip {
 //
 //   - staged_at = at on every staged row whose sha256 still matches, so a
 //     file replaced while the build ran is left alone (the stamp would claim a
-//     build saw bytes it never had; it reads as waiting instead);
+//     build saw bytes it never had; it reads as waiting instead). Only a row
+//     not yet stamped since its bytes changed is written: the derivation asks
+//     "staged since the change" and nothing more, so moving the stamp on
+//     every ingest would rewrite every row of an unchanged bench for nobody;
 //   - the skip on the skipped rows, sha-guarded the same way;
 //   - the skip cleared on the staged rows that were not skipped: the sync read
 //     them, so a skip an earlier build recorded is stale. Nothing else is
@@ -98,7 +101,8 @@ func (s *WikiStore) RecordFileSkips(ctx context.Context, workspaceID string, ski
 			UPDATE workspace_files f
 			SET staged_at = $4
 			FROM unnest($2::text[], $3::text[]) AS v(path, sha)
-			WHERE f.workspace_id = $1 AND f.path = v.path AND f.sha256 = v.sha`,
+			WHERE f.workspace_id = $1 AND f.path = v.path AND f.sha256 = v.sha
+			  AND (f.staged_at IS NULL OR f.staged_at < coalesce(f.content_changed_at, f.created_at))`,
 			workspaceID, stagedPaths, stagedSHAs, at); err != nil {
 			return nil, fmt.Errorf("store: stamp staged files: %w", err)
 		}
@@ -150,6 +154,22 @@ func (s *WikiStore) RecordFileSkips(ctx context.Context, workspaceID string, ski
 	}
 	sort.Strings(changed)
 	return changed, nil
+}
+
+// CountUploads is the bench's upload tally as the file rows hold it: staged is
+// the enabled rows, skipped those among them with a skip recorded against
+// their current bytes. It is what the overview says about uploads when a build
+// synced none of them (a run pinned to another connector), so the page does
+// not forget what the last upload sync found and fall back to a tally that
+// says every document was read.
+func (s *WikiStore) CountUploads(ctx context.Context, workspaceID string) (staged, skipped int, err error) {
+	if err := s.pool.QueryRow(ctx, `
+		SELECT count(*), count(*) FILTER (WHERE skip_class IS NOT NULL AND skip_sha256 = sha256)
+		FROM workspace_files WHERE workspace_id = $1 AND enabled`,
+		workspaceID).Scan(&staged, &skipped); err != nil {
+		return 0, 0, fmt.Errorf("store: count uploads: %w", err)
+	}
+	return staged, skipped, nil
 }
 
 // FileIngestRow is a FileRow plus the facts the ingest status is derived from.

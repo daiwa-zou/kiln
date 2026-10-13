@@ -287,7 +287,7 @@ func materialize(ctx context.Context, out io.Writer, src SourceSpec) (*material,
 	// documents produce one wiki whose pages can link across the boundary
 	// rather than two wikis that cannot see each other.
 	if src.DocsDir != "" {
-		doc, err := syncDocs(ctx, out, src.DocsDir)
+		doc, err := syncDocs(ctx, out, src.DocsDir, src.BlobKeys != nil)
 		if doc.Staging != "" {
 			m.staging = append(m.staging, doc.Staging)
 		}
@@ -428,6 +428,21 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		syncedNS = append(syncedNS, diff.NamespaceWeb)
 	}
 
+	// A run that synced no uploads learned nothing about them, but it still
+	// rewrites the overview, and the lede would say every document was read.
+	// The file rows remember what the last upload sync found; a build with no
+	// workspace (nothing to count on) and a count that fails keep the plain
+	// tally, which is what the page said before the counts existed.
+	uploadsStaged, uploadsSkipped := mat.UploadsStaged, mat.UploadsSkipped
+	if req.Source.DocsDir == "" && req.WorkspaceID != "" {
+		staged, skipped, err := p.Store.CountUploads(ctx, req.WorkspaceID)
+		if err != nil {
+			fmt.Fprintf(out, "  upload counts unavailable; the overview keeps the plain tally: %v\n", err)
+		} else {
+			uploadsStaged, uploadsSkipped = staged, skipped
+		}
+	}
+
 	breq := BuildRequest{
 		RunID:            req.RunID,
 		WorkspaceID:      req.WorkspaceID,
@@ -439,8 +454,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*BuildResul
 		SourceDir:        req.Source.Path,
 		BlobKeys:         req.Source.BlobKeys,
 		SkippedKeys:      req.Source.SkippedKeys,
-		UploadsStaged:    mat.UploadsStaged,
-		UploadsSkipped:   mat.UploadsSkipped,
+		UploadsStaged:    uploadsStaged,
+		UploadsSkipped:   uploadsSkipped,
 		Map:              wm,
 		DocumentNames:    mat.DocNames,
 		Figures:          mat.Figures,
@@ -579,7 +594,11 @@ func syncDocSource(ctx context.Context, out io.Writer, src docSource) (res docSy
 }
 
 // syncDocs ingests a documents directory through the upload connector.
-func syncDocs(ctx context.Context, out io.Writer, dir string) (docSync, error) {
+// materialized says the directory is a bench's uploaded files staged from
+// storage (SourceSpec.BlobKeys is set), so the connector reports the files it
+// leaves out by name instead of pruning them: each is a row on the Ingest
+// page, and a local --docs folder has no rows to report on.
+func syncDocs(ctx context.Context, out io.Writer, dir string, materialized bool) (docSync, error) {
 	absDocs, err := filepath.Abs(dir)
 	if err != nil {
 		return docSync{}, err
@@ -589,7 +608,7 @@ func syncDocs(ctx context.Context, out io.Writer, dir string) (docSync, error) {
 		subject: absDocs,
 		prefix:  "kiln-docs-",
 		noun:    "document(s)",
-		config:  connector.Config{"path": absDocs},
+		config:  connector.Config{"path": absDocs, "materialized": materialized},
 		renames: true,
 		origin:  diff.UploadOrigin,
 		payload: uploadPayload,

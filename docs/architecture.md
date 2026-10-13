@@ -323,6 +323,9 @@ failed hooks.
 
 **Cooldown.** `github.webhook_cooldown` (default 1 minute) sets `not_before` on
 enqueue, so however hard someone pushes, a bench rebuilds at most once a minute.
+A request that merges into a queued run brings its start time forward (the
+earliest wins), and one with no start time clears it: a person pressing Ingest
+now is not made to wait out a cooldown or a held continuation.
 
 **Claim.** One statement does the claim and the state change together, so two
 workers racing on the same row is impossible: `SKIP LOCKED` makes the loser move
@@ -459,18 +462,26 @@ time from facts on the file row and its source record:
 
 | Status | Means |
 | --- | --- |
-| read, with its page count | A source record exists and was read (`fetched_at`) since the bytes last changed (`content_changed_at`). The count unions the document's own pages with those of its section units. |
+| read, with its page count | A source record exists and was read (`fetched_at`) since the bytes last changed (`content_changed_at`), and no stamp says otherwise: a `staged_at` older than the change means the bytes were replaced while that build ran, and the row is waiting instead. The count unions the document's own pages with those of its section units. |
 | waiting for the next ingest | No build has staged these bytes yet (`staged_at` is null or older than the change), or a build is queued or running. |
 | not read, with a reason | A skip is recorded for exactly these bytes (`skip_class`, live while `skip_sha256 = sha256`), or a build staged these bytes and left neither a source nor a skip. |
 | paused | `enabled = false` and no source record; a paused document that has one stays read. |
 
 The worker's skip sink writes the facts after the sync and before any unit
-runs: it stamps `staged_at` on every file it materialized and records a
-**class token** on the skipped ones (`no_text`, `extractor_missing`,
-`unsupported_type`, `timed_out`, `extractor_error`, `hidden_path`), never the
-extractor's own text about the file. Both writes are guarded by the sha256 of
-the bytes that were staged, so a file replaced while the build ran is left
-alone and reads as waiting. The API maps the token to a fixed sentence; the raw
+runs: it stamps `staged_at` on every file it was handed (the ones whose bytes
+storage could not deliver included, so they read as not read rather than
+waiting forever) and records a **class token** on the skipped ones (`no_text`,
+`extractor_missing`, `unsupported_type`, `timed_out`, `extractor_error`,
+`hidden_path`), never the extractor's own text about the file. Both writes are
+guarded by the sha256 of the bytes that were staged, so a file replaced while
+the build ran is left alone and reads as waiting, and the stamp is written only
+on a row not yet stamped since its bytes changed, so an unchanged bench
+rewrites no rows. `hidden_path` covers a dot-prefixed file name and anything
+under `.git`, `node_modules`, `.cache`, `__MACOSX` or `.obsidian`; a
+dot-prefixed folder is read as it always was. Those folders are pruned
+unreported from a local `--docs` folder, where nothing uploaded them, and
+walked and reported from a bench's materialized uploads, where every file is a
+row a member can see. The API maps the token to a fixed sentence; the raw
 text — sanitized and capped by the sink, the one owner of that — goes to the
 operator log only. Because the stamp is written by the build that staged the
 file, nothing about the run (its trigger, the connector it was pinned to) is
@@ -485,16 +496,27 @@ Debug and uncounted.
 
 Three refinements follow from the facts. A build that finds a document's
 extracted text unchanged (a re-saved PDF with the same words) regenerates
-nothing, so the hash gate itself stamps that document's source as read. "Not
-read" with no recorded class is a build that staged the file and left no
-trace: a unit that failed, or a build interrupted after its sync; while the
-bench's latest run was refused over budget the sentence instead says the bench
-has used its budget and asks for Ingest now once the window has reset, because
-a refusal enqueues no continuation. And two windows are deliberate: a
-**replaced** document keeps its old pages until the next ingest reads the new
-bytes, reading as waiting meanwhile, and a document replaced **while a build is
-running** shows "read" with the previous pages until the next ingest, because
-the sink sees only what the sync staged.
+nothing, so the hash gate itself stamps that document's source as read; a
+section unit is told apart by its kind, so a path that itself contains `#` is
+stamped like any other. "Not read" with no recorded class is a build that
+staged the file and left no trace: a unit that failed, or a build interrupted
+after its sync; while the bench's latest run was refused over budget and
+nothing is queued, the sentence instead says the bench has used its budget and
+asks for Ingest now once the window has reset — for a file the refused run
+never staged too, since a refusal stages nothing and enqueues no continuation.
+And two windows are deliberate: a **replaced** document keeps its old pages
+until the next ingest reads the new bytes, reading as waiting meanwhile (a
+replacement that lands **while a build is running** reads the same way, since
+the stamp is for the bytes that build staged and the derivation does not call a
+newer source read); and between a page-capped run finishing and its
+continuation being queued, a sub-second gap because one run per bench is active
+at a time, a deferred document reads as not read until the page next refreshes.
+
+The overview's upload counts come from the sync that staged them; a run that
+synced no uploads (a poll pinned to a git connector on a mixed bench) takes
+them from the file rows instead — enabled rows, and the skips live against
+their current bytes — so rebuilding the page does not forget what the last
+upload sync found.
 
 ---
 

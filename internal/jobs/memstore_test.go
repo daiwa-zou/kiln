@@ -73,6 +73,13 @@ type memStore struct {
 	touched [][]string
 	// failTouch makes TouchSources fail, to prove the stamp is best-effort.
 	failTouch error
+
+	// uploadsStaged and uploadsSkipped are what CountUploads reports: the
+	// bench's file rows as a build that synced no uploads would find them.
+	uploadsStaged, uploadsSkipped int
+	// failCount makes CountUploads fail, to prove the overview falls back to
+	// the plain tally rather than failing the build.
+	failCount error
 }
 
 func newMemStore() *memStore {
@@ -134,6 +141,15 @@ func (m *memStore) TouchSources(_ context.Context, _ string, keys []string, _ ti
 	}
 	m.touched = append(m.touched, keys)
 	return nil
+}
+
+func (m *memStore) CountUploads(context.Context, string) (int, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failCount != nil {
+		return 0, 0, m.failCount
+	}
+	return m.uploadsStaged, m.uploadsSkipped, nil
 }
 
 func (m *memStore) LoadSources(context.Context, string) ([]diff.SourceRecord, error) {

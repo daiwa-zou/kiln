@@ -66,7 +66,8 @@ function plural(n, word) {
 // a paused file is counted as paused and nowhere else, whatever its status,
 // because the member chose that and nothing will read it -- a paused skip is
 // not "not read", and a paused file is not "waiting" for anything. The
-// unread count the bar and the Ingest now link act on is unreadCount below.
+// upload source's bar and the Documents note's Ingest now link both decide
+// from these buckets, so the two cannot drift apart.
 // Computed here, from rows a member can already read, so the Documents stat
 // and header reconcile against Overview's count without a new endpoint. The
 // API's status word is `skipped`; the bucket is `notRead` because that is the
@@ -94,31 +95,22 @@ function ingestSummaryText(n) {
   return parts.join(" · ");
 }
 
-// unreadCount is the number the upload source's bar and the Documents note's
-// Ingest now link act on: the documents the wiki has not read, whether they
-// are waiting for the next ingest or were skipped by the last one. Paused
-// files are not in it, because nothing will read them until the member says
-// so. One place, so the bar and the link cannot drift apart.
-function unreadCount(summary) {
-  return summary.waiting + summary.notRead;
-}
-
 // ingestChip is the status a document row carries beside its size: that it
-// was read and how many pages that produced (quiet -- it is the expected
+// was read and how many wiki pages that produced (quiet -- it is the expected
 // case), that it is waiting for the next ingest, or that it was not read, in
-// oxide. The read chip leads with the word: beside a size chip, a bare "6
-// pages" reads as the PDF's own page count. A paused file keeps its paused
-// chip and gets nothing here; the reason for a skip is a line of its own under
-// the path, not a hover. nextCheck, when given, is the schedule line already
-// on the page and becomes the waiting chip's title. readAt is the last time
-// an ingest checked the file, not only the time it first read it, so the
-// title says "Checked".
+// oxide. The read chip leads with the word and names the wiki: beside a size
+// chip, "read · 6 pages" still reads as the PDF's own length, so it says
+// "read · 6 wiki pages". A paused file keeps its paused chip and gets nothing
+// here; the reason for a skip is a line of its own under the path, not a
+// hover. nextCheck, when given, is the schedule line already on the page and
+// becomes the waiting chip's title. readAt is the last time an ingest checked
+// the file, not only the time it first read it, so the title says "Checked".
 function ingestChip(f, nextCheck = "") {
   if (f.enabled === false) return "";
   const ing = f.ingest || {};
   switch (ing.status) {
     case "read": {
-      const label = ing.pages ? `read · ${plural(ing.pages, "page")}` : "read";
+      const label = ing.pages ? `read · ${plural(ing.pages, "wiki page")}` : "read";
       const title = ing.readAt ? ` title="${esc(`Checked ${relTime(ing.readAt)}`)}"` : "";
       return `<span class="chip"${title}>${esc(label)}</span>`;
     }
@@ -171,14 +163,18 @@ function attentionLine(files) {
 // happened. There is no per-source unit count on the API, so the bar carries
 // state rather than a proportion: full when a source is reading cleanly,
 // empty when it is paused, oxide when the last read failed. The upload source
-// also knows how many of its documents are unread (waiting or skipped), and a
-// run that finished without error has still not "read cleanly" while one is.
-// Pure, so the rule is testable away from the page.
-function connectorHealth(c, unread = 0) {
+// also hands in its documents' ingestSummary, and a run that finished without
+// error has still not "read cleanly" while one of them is unread. The note
+// names which kind: a reader told "not read" goes looking for a refused file,
+// so that sentence is kept for a skip, and a bench whose only unread
+// documents are waiting hears that instead. Other sources pass nothing. Pure,
+// so the rule is testable away from the page.
+function connectorHealth(c, summary = null) {
   if (!c.enabled) return { pct: 0, cls: "fill-soft", note: "Paused — skipped on ingest" };
   if (c.lastError) return { pct: 100, cls: "fill-err", note: "Last read failed" };
   if (!c.lastSynced) return { pct: 0, cls: "fill-soft", note: "Not read yet" };
-  if (unread > 0) return { pct: 100, cls: "fill-soft", note: "Some documents were not read; see below." };
+  if (summary?.notRead > 0) return { pct: 100, cls: "fill-soft", note: "Some documents were not read; see below." };
+  if (summary?.waiting > 0) return { pct: 100, cls: "fill-soft", note: "Some documents are waiting for the next ingest; see below." };
   return { pct: 100, cls: "fill-ember", note: "Read cleanly" };
 }
 
@@ -240,7 +236,7 @@ function patchIngestStatus(root, files, { buildActive, upload, rows }) {
   if (list) list.innerHTML = rows(files);
   const health = upload ? root.querySelector("#upload-health") : null;
   if (health) {
-    const h = connectorHealth(upload, unreadCount(summary));
+    const h = connectorHealth(upload, summary);
     const fill = health.querySelector(".bar span");
     fill.className = h.cls;
     fill.dataset.w = String(h.pct);
@@ -1254,11 +1250,10 @@ async function showSources() {
     // the stat, the Documents header and the attention line tally it
     // themselves, so the settle refresh can render each from the list alone.
     const summary = ingestSummary(files);
-    const unreadDocs = unreadCount(summary);
     const nextBuild = nextBuildLine(runs, connectors, state.sourcePollIntervalSeconds || 0);
 
     const connectorRow = (c) => {
-      const h = connectorHealth(c, c.kind === "upload" ? unreadDocs : 0);
+      const h = connectorHealth(c, c.kind === "upload" ? summary : null);
       return `
       <div class="src-row" data-connector-row="${esc(c.id)}">
         <span class="src-icon kind-${esc(c.kind)}">${SRC_ICONS[c.kind] || iconDoc}</span>

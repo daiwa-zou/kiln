@@ -74,6 +74,9 @@ func (s *pipelineStore) LoadSources(context.Context, string) ([]diff.SourceRecor
 func (s *pipelineStore) TouchSources(context.Context, string, []string, time.Time) error {
 	return nil
 }
+func (s *pipelineStore) CountUploads(context.Context, string) (int, int, error) {
+	return 0, 0, nil
+}
 func (s *pipelineStore) Import(context.Context, jobs.ImportRequest) error { return nil }
 
 func (s *pipelineStore) RenameDocuments(context.Context, string, map[string]string) error {

@@ -36,7 +36,7 @@ var skipSentences = map[string]string{
 	uploadconn.SkipUnsupportedType:  "This file type is not supported.",
 	uploadconn.SkipTimedOut:         "Reading this file took too long and was stopped. Try a smaller file, or run another ingest.",
 	uploadconn.SkipExtractorError:   "This file could not be read. Check the Log for the error.",
-	uploadconn.SkipHiddenPath:       "Hidden files and folders such as .git are not read. Rename or move it.",
+	uploadconn.SkipHiddenPath:       "Hidden files and folders such as .git are not read. Delete this one and upload it under a plain name.",
 	skipClassPaused:                 "Paused: skipped on ingest",
 }
 
@@ -46,12 +46,13 @@ var skipSentences = map[string]string{
 // bytes change nothing.
 const skipSentenceUnrecorded = "Not read by the last ingest. Press Ingest now to try again, or check the Log."
 
-// skipSentenceBudgetPaused replaces skipSentenceUnrecorded while the bench's
-// latest run was refused over budget: the continuation that would have read
-// the file was refused, and so would an "Ingest now" pressed before the window
-// resets. It asks for the press rather than promising a read, because a
-// refusal enqueues nothing (worker.refuseOverBudget): only a poll connector
-// comes back on its own, and a manual or webhook bench waits for a person.
+// skipSentenceBudgetPaused is the reason while the bench's latest run was
+// refused over budget and nothing is queued: the run that would have read the
+// file was refused (before it staged anything, so a fresh upload has no stamp
+// either), and so would an "Ingest now" pressed before the window resets. It
+// asks for the press rather than promising a read, because a refusal enqueues
+// nothing (worker.refuseOverBudget): only a poll connector comes back on its
+// own, and a manual or webhook bench waits for a person.
 const skipSentenceBudgetPaused = "Not read yet. This bench has used its budget for now. Press Ingest now once the budget window has reset."
 
 // IngestJSON is the ingest member of a file row. Pointers are deliberate: a
@@ -72,14 +73,20 @@ type IngestJSON struct {
 //
 //  1. paused and nothing live was read -> skipped, "paused";
 //  2. a skip recorded against the current bytes -> skipped, its class;
-//  3. a source row read at or after the bytes changed -> read;
+//  3. a source row read at or after the bytes changed, and no stamp older
+//     than the change -> read (a stamp older than the change means the bytes
+//     were replaced while the build that read them ran: its source describes
+//     the old bytes, however fresh its fetched_at, so the file is waiting);
 //  4. a build staged the current bytes and no build is queued or running ->
 //     skipped, class null (the build saw the file and neither read it nor
 //     said why; when the bench's latest run was refused over budget, the
 //     sentence says so instead of asking for another ingest that would be
 //     refused too);
 //  5. otherwise waiting: no build has staged these bytes yet, or one is about
-//     to.
+//     to. Except on a bench whose latest run was refused over budget with
+//     nothing queued: a refusal stages nothing, so an enabled file nothing
+//     has read gets the budget sentence rather than a wait that nothing will
+//     end.
 //
 // A skip outranks a source row because a replacement that is now image-only
 // still has the old source until the cascade removes it. Rule 1 asks for no
@@ -95,7 +102,8 @@ func deriveIngest(row store.FileIngestRow, bench store.FileIngestBench) IngestJS
 		return skippedJSON(skipClassPaused)
 	case row.SkipLive && row.SkipClass != nil:
 		return skippedJSON(*row.SkipClass)
-	case row.HasSource && row.ReadAt != nil && !row.ReadAt.Before(row.ContentAt):
+	case row.HasSource && row.ReadAt != nil && !row.ReadAt.Before(row.ContentAt) &&
+		(row.StagedAt == nil || !row.StagedAt.Before(row.ContentAt)):
 		readAt := row.ReadAt.UTC().Format(time.RFC3339)
 		return IngestJSON{Status: ingestRead, Pages: row.Pages, ReadAt: &readAt}
 	case row.StagedAt != nil && !row.StagedAt.Before(row.ContentAt) && !bench.PendingRun:
@@ -103,6 +111,9 @@ func deriveIngest(row store.FileIngestRow, bench store.FileIngestBench) IngestJS
 		if bench.BudgetPaused {
 			reason = skipSentenceBudgetPaused
 		}
+		return IngestJSON{Status: ingestSkipped, Reason: &reason}
+	case row.Enabled && bench.BudgetPaused && !bench.PendingRun:
+		reason := skipSentenceBudgetPaused
 		return IngestJSON{Status: ingestSkipped, Reason: &reason}
 	default:
 		return IngestJSON{Status: ingestWaiting}
